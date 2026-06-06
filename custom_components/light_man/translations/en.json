@@ -1,0 +1,13 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Light Man",
+        "description": "Set up the Light Man adaptive-lighting orchestrator."
+      }
+    },
+    "abort": {
+      "already_configured": "Light Man is already configured."
+    }
+  }
+}

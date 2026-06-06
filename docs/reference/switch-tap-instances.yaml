@@ -1,0 +1,43 @@
+# Switch-tap blueprint instances (mnestrud/Ataraxia Inovelli Switch Automations.yaml ->
+# switch-taps-blueprint.yaml), excerpt from /config/automations.yaml as of 2026-06-06.
+#
+# KEY POINT for Light Man's "arming scope": the paddle DOUBLE/TRIPLE actions are wired almost
+# entirely to PowerView SHADE scenes, NOT to the room's lights. So a hold must NOT be armed on
+# double/triple taps. The only switch interactions that set a custom *light* look are:
+#   - Config Day/Night  (the config button -> SCENE_NIGHT / SCENE_DAY; disengages the per-room helper)
+#   - Up/Down Held dim  (paddle hold; disengages the per-room helper)
+# Up-single = re-engage live AL (a Light Man hold-release trigger). Down-single = AL OFF prestage.
+
+# --- Kitchen ---
+up_double_action: scene.powerview_hub_1_kitchen_shades_up
+down_double_action: scene.powerview_hub_1_kitchen_shades_down
+up_triple_action: scene.powerview_hub_1_kitchen_shade_half
+down_triple_action: scene.powerview_hub_1_kitchen_shade_half
+
+# --- Living Room ---
+up_double_action: scene.powerview_hub_1_open_living_room_shades
+down_double_action: scene.powerview_hub_1_close_living_room_shades
+up_triple_action: scene.powerview_hub_1_open_side_shade_1
+down_triple_action: scene.powerview_hub_1_close_side_shade_1
+
+# --- Porch ---
+up_double_action: scene.powerview_hub_1_porch_shade_up
+down_double_action: scene.powerview_hub_1_porch_shade_down
+
+# --- Office (only ambiguous one; names suggest shades too) ---
+up_double_action: scene.office_up
+down_double_action: scene.office_down
+up_triple_action: scene.office_shady
+down_triple_action: scene.office_shady
+
+# --- Bedroom (x2 switches) ---
+up_double_action: scene.powerview_hub_1_bedroom_shades_up
+down_double_action: scene.powerview_hub_1_bedroom_shades_down
+up_triple_action: scene.powerview_hub_1_bedroom_shady
+down_triple_action: scene.powerview_hub_1_bedroom_shady
+
+# --- Guest ---
+up_double_action: scene.powerview_hub_1_guest_shade_up
+down_double_action: scene.powerview_hub_1_guest_shade_down
+up_triple_action: scene.guest_shady
+down_triple_action: scene.guest_shady

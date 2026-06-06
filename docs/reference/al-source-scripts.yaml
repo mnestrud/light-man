@@ -1,0 +1,66 @@
+# AL push scripts (blueprint: mnestrud/AL_MQTT_script_blueprint.yaml -> al-push-script-blueprint.yaml)
+# as of 2026-06-06. Shows the consolidation: the 4 source scripts drive the consolidated bulb groups;
+# the per-room scripts (al_living_room_recessed shown) have group_set_topic BLANKED -> Inovelli only.
+
+# ===== Consolidated per-source bulb floods (drive the bulbs) =====
+
+al_overhead_source:           # tick area a16
+  alias: AL Overhead Source (consolidated -> zgb_overhead_all)
+  use_blueprint:
+    path: mnestrud/AL_MQTT_script_blueprint.yaml
+    input:
+      al_switch: switch.adaptive_lighting_al_dummy_overhead_control
+      group_set_topic: zigbee2mqtt/zgb_overhead_all/set
+      group_light_entity: light.zgb_overhead_all
+      inovelli_group_delay: 0.5
+
+al_accent_source:             # tick area a17
+  alias: AL Accent Source (consolidated -> zgb_accent_all)
+  use_blueprint:
+    path: mnestrud/AL_MQTT_script_blueprint.yaml
+    input:
+      al_switch: switch.adaptive_lighting_accent_light_adaptive_lighting_control
+      group_set_topic: zigbee2mqtt/zgb_accent_all/set
+      group_light_entity: light.zgb_accent_all
+      inovelli_group_delay: 0.5
+
+al_hallup_source:             # tick area a18
+  alias: AL Hallway Up Source (consolidated -> zgb_hallway_up)
+  use_blueprint:
+    path: mnestrud/AL_MQTT_script_blueprint.yaml
+    input:
+      al_switch: switch.hallway_uplights_adaptive_adaptive_lighting_hallway_uplights_adaptive
+      sleep_mode_switch: switch.adaptive_lighting_hallway_uplights_adaptive_adaptive_lighting_sleep_mode_hallway_uplights_adaptive
+      group_set_topic: zigbee2mqtt/zgb_hallway_up/set
+      group_light_entity: light.hallway_light_center_uplight
+      inovelli_group_delay: 0.5
+
+al_halldown_source:           # tick area a19
+  alias: AL Hallway Down Source (consolidated -> zgb_hallway_down)
+  use_blueprint:
+    path: mnestrud/AL_MQTT_script_blueprint.yaml
+    input:
+      al_switch: switch.hallway_downlights_adaptive_adaptive_lighting_hallway_downlights_adaptive
+      sleep_mode_switch: switch.adaptive_lighting_hallway_downlights_adaptive_adaptive_lighting_sleep_mode_hallway_downlights_adaptive
+      group_set_topic: zigbee2mqtt/zgb_hallway_down/set
+      group_light_entity: light.hallway_light_center_downlight
+      inovelli_group_delay: 0.5
+
+# ===== Representative per-room script (Inovelli-only; group push blanked) =====
+
+al_living_room_recessed:      # tick area a9
+  alias: AL Living Room Recessed
+  use_blueprint:
+    path: mnestrud/AL_MQTT_script_blueprint.yaml
+    input:
+      al_switch: switch.adaptive_lighting_al_dummy_overhead_control
+      inovelli_set_topic: zigbee2mqtt/Living Room Overhead Light Switch 1/set
+      group_set_topic: ""        # <-- BLANKED by the consolidation. Bulbs are driven by a16 instead.
+      inovelli_entity: light.living_room_overhead_light_switch_1
+      group_light_entity: light.living_room_overhead_light_1
+      inovelli_group_delay: 0.5
+
+# The other 9 per-room overhead scripts (al_primary_bedroom, al_bathroom_recessed,
+# al_suite_shower_recessed, al_office_overhead_2, al_kitchen_overhead, al_front_door_overhead,
+# al_upstairs_bath_wall_sconces, al_stairwell_overhead, al_michael_closet_overhead) follow the same
+# pattern: group_set_topic blanked, inovelli_set_topic set to their switch.

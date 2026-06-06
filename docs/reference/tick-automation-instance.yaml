@@ -1,0 +1,83 @@
+# Live instance of the Master Tick automation (id 1758389535606) as of 2026-06-06.
+# Uses blueprint: mnestrud/Ataraxia Lighting - Tick Blueprint.yaml (see tick-blueprint.yaml).
+# This is the a1..a19 area->entity wiring. a1-a15 = per-room (Inovelli-only; group push blanked).
+# a16-a19 = consolidated per-source bulb floods (the only thing that drives bulb color/brightness).
+id: "1758389535606"
+alias: Ataraxia Lighting - Master Tick
+use_blueprint:
+  path: mnestrud/Ataraxia Lighting - Tick Blueprint.yaml
+  input:
+    timer_entity: timer.al_ataraxia_heartbeat_timer
+    z2m_bridge: binary_sensor.zigbee2mqtt_bridge_connection_state
+    global_al_switch: switch.adaptive_lighting_al_dummy_overhead_control
+    per_area_delay: 4
+    rest_duration: "00:00:20"
+    transition: "5"
+
+    # ---- a1-a15: per-room. enable = adaptive_lighting_switch_<room> (the booleans the switch taps
+    #      toggle). Their scripts have group_set_topic BLANKED -> they drive only the Inovelli switch.
+    a1_enable: input_boolean.adaptive_lighting_switch_bedroom
+    a1_light: light.zgb_primary_bedroom
+    a1_script: script.al_primary_bedroom
+    a2_enable: input_boolean.adaptive_lighting_switch_michael_closet
+    a2_light: light.michael_closet_overhead_light
+    a2_script: script.al_michael_closet_overhead
+    a3_enable: input_boolean.adaptive_lighting_switch_primary_bath_overhead
+    a3_light: light.zgb_overhead_bath
+    a3_script: script.al_bathroom_recessed
+    a4_enable: input_boolean.adaptive_lighting_switch_primary_bath_vanity
+    a4_light: light.zgb_overhead_bath
+    a4_script: script.al_primary_bath_vanity
+    a4_al_switch_override: switch.adaptive_lighting_accent_light_adaptive_lighting_control
+    a5_enable: input_boolean.adaptive_lighting_switch_shower
+    a5_light: light.zgb_primary_shower_lights
+    a5_script: script.al_suite_shower_recessed
+    a6_enable: input_boolean.adaptive_lighting_switch_office
+    a6_light: light.zgb_office_overhead
+    a6_script: script.al_office_overhead_2
+    a7_enable: input_boolean.adaptive_lighting_switch_kitchen
+    a7_light: light.zgb_kitchen
+    a7_script: script.al_kitchen_overhead
+    a8_enable: input_boolean.adaptive_lighting_switch_kitchen_island
+    a8_light: light.zgb_kitchen_island
+    a8_script: script.al_kitchen_island_pendants
+    a8_al_switch_override: switch.adaptive_lighting_accent_light_adaptive_lighting_control
+    a9_enable: input_boolean.adaptive_lighting_switch_lr
+    a9_light: light.zgb_living_room
+    a9_script: script.al_living_room_recessed
+    a10_enable: input_boolean.adaptive_lighting_switch_front_door
+    a10_light: light.front_door_overhead_light_1
+    a10_script: script.al_front_door_overhead
+    a11_enable: input_boolean.adaptive_lighting_switch_upstairs_bath
+    a11_light: light.zgb_upstairs_bath
+    a11_script: script.al_upstairs_bath_wall_sconces
+    a12_enable: input_boolean.adaptive_lighting_switch_hallway
+    a12_light: light.zgb_hallway_down
+    a12_script: script.al_hallway_downlights
+    a12_al_switch_override: switch.hallway_downlights_adaptive_adaptive_lighting_hallway_downlights_adaptive
+    a13_enable: input_boolean.adaptive_lighting_switch_stairwell
+    a13_light: light.zgb_stairwell
+    a13_script: script.al_stairwell_overhead
+    a14_enable: input_boolean.adaptive_lighting_switch_hallway
+    a14_light: light.zgb_hallway_up
+    a14_script: script.al_hallway_west_sync
+    a14_al_switch_override: switch.hallway_uplights_adaptive_adaptive_lighting_hallway_uplights_adaptive
+    a15_enable: input_boolean.adaptive_lighting_switch_hallway
+    a15_light: light.zgb_hallway_up
+    a15_script: script.al_hallway_uplights
+    a15_al_switch_override: switch.hallway_uplights_adaptive_adaptive_lighting_hallway_uplights_adaptive
+
+    # ---- a16-a19: consolidated per-source bulb floods. enable = GLOBAL source booleans (NOT per-room).
+    #      These are what overwrite a custom room scene at the next tick. See ARCHITECTURE.md.
+    a16_enable: input_boolean.adaptive_lighting_overhead_all   # overhead source -> 24 bulbs / 10 rooms
+    a16_light: light.zgb_overhead_all
+    a16_script: script.al_overhead_source
+    a17_enable: input_boolean.adaptive_lighting_accent_all      # accent source
+    a17_light: light.zgb_accent_all
+    a17_script: script.al_accent_source
+    a18_enable: input_boolean.adaptive_lighting_switch_hallway  # hallway shares per-room boolean
+    a18_light: light.zgb_hallway_up
+    a18_script: script.al_hallup_source
+    a19_enable: input_boolean.adaptive_lighting_switch_hallway
+    a19_light: light.zgb_hallway_down
+    a19_script: script.al_halldown_source

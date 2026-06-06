@@ -1,0 +1,1047 @@
+blueprint:
+  name: Ataraxia Lighting – Master Tick Automation (v1.0rc10)
+  description: 'Timer-driven fan-out to up to 15 areas. Uses a global AL switch (optional
+    per-area overrides). Reads values once per tick, applies to active areas only.
+    Timer is restarted AFTER fan-out completes (rest-period model). Includes
+    availability checks and optional debug logging.
+
+    '
+  domain: automation
+  author: mnestrud
+  input:
+    timer_entity:
+      name: Timer
+      description: Heartbeat timer entity; started after fan-out completes.
+      selector:
+        entity:
+          domain:
+          - timer
+          multiple: false
+          reorder: false
+    rest_duration:
+      name: Rest duration after fan-out
+      description: How long to wait after fan-out completes before the next tick (HH:MM:SS).
+      default: '00:00:20'
+      selector:
+        text:
+          multiple: false
+          multiline: false
+    z2m_bridge:
+      name: Zigbee2MQTT Bridge Online Sensor
+      description: Used to gate fan-out work.
+      selector:
+        entity:
+          domain:
+          - binary_sensor
+          multiple: false
+          reorder: false
+    global_al_switch:
+      name: Global Adaptive Lighting Values Control Switch
+      description: Default brightness/K source for all areas.
+      selector:
+        entity:
+          domain:
+          - switch
+          multiple: false
+          reorder: false
+    per_area_delay:
+      name: Per-area stagger (seconds)
+      description: Delay between areas.
+      default: 4
+      selector:
+        number:
+          min: 0.0
+          max: 60.0
+          step: 1.0
+          mode: slider
+    transition:
+      name: Transition (seconds) – optional
+      description: Blank = no transition. Applied only when lights are ON. OFF-state prestaging always uses transition 0.
+      default: ''
+      selector:
+        text:
+          multiple: false
+          multiline: false
+    verbose_logging:
+      name: Debug logging (tick + per-area)
+      description: When on, write Logbook entries.
+      default: false
+      selector:
+        boolean: {}
+    a1_enable:
+      name: Area 1 – AL Area Active - Toggle Switch
+      default:
+      selector:
+        entity:
+          domain:
+          - input_boolean
+          multiple: false
+          reorder: false
+    a1_light:
+      name: Area 1 – Controlling Light Switch - it has on/off state of light
+      default:
+      selector:
+        entity:
+          domain:
+          - light
+          multiple: false
+          reorder: false
+    a1_script:
+      name: Area 1 – AL Ataraxia Script for Area
+      default:
+      selector:
+        entity:
+          domain:
+          - script
+          multiple: false
+          reorder: false
+    a1_al_switch_override:
+      name: Area 1 – Adaptive Lighting Values Area Override Control Switch
+      default:
+      selector:
+        entity:
+          domain:
+          - switch
+          multiple: false
+          reorder: false
+    a2_enable:
+      name: Area 2 – AL Area Active - Toggle Switch
+      default:
+      selector:
+        entity:
+          domain:
+          - input_boolean
+          multiple: false
+          reorder: false
+    a2_light:
+      name: Area 2 – Controlling Light Switch - it has on/off state of light
+      default:
+      selector:
+        entity:
+          domain:
+          - light
+          multiple: false
+          reorder: false
+    a2_script:
+      name: Area 2 – AL Ataraxia Script for Area
+      default:
+      selector:
+        entity:
+          domain:
+          - script
+          multiple: false
+          reorder: false
+    a2_al_switch_override:
+      name: Area 2 – Adaptive Lighting Values Area Override Control Switch
+      default:
+      selector:
+        entity:
+          domain:
+          - switch
+          multiple: false
+          reorder: false
+    a3_enable:
+      name: Area 3 – AL Area Active - Toggle Switch
+      default:
+      selector:
+        entity:
+          domain:
+          - input_boolean
+          multiple: false
+          reorder: false
+    a3_light:
+      name: Area 3 – Controlling Light Switch - it has on/off state of light
+      default:
+      selector:
+        entity:
+          domain:
+          - light
+          multiple: false
+          reorder: false
+    a3_script:
+      name: Area 3 – AL Ataraxia Script for Area
+      default:
+      selector:
+        entity:
+          domain:
+          - script
+          multiple: false
+          reorder: false
+    a3_al_switch_override:
+      name: Area 3 – Adaptive Lighting Values Area Override Control Switch
+      default:
+      selector:
+        entity:
+          domain:
+          - switch
+          multiple: false
+          reorder: false
+    a4_enable:
+      name: Area 4 – AL Area Active - Toggle Switch
+      default:
+      selector:
+        entity:
+          domain:
+          - input_boolean
+          multiple: false
+          reorder: false
+    a4_light:
+      name: Area 4 – Controlling Light Switch - it has on/off state of light
+      default:
+      selector:
+        entity:
+          domain:
+          - light
+          multiple: false
+          reorder: false
+    a4_script:
+      name: Area 4 – AL Ataraxia Script for Area
+      default:
+      selector:
+        entity:
+          domain:
+          - script
+          multiple: false
+          reorder: false
+    a4_al_switch_override:
+      name: Area 4 – Adaptive Lighting Values Area Override Control Switch
+      default:
+      selector:
+        entity:
+          domain:
+          - switch
+          multiple: false
+          reorder: false
+    a5_enable:
+      name: Area 5 – AL Area Active - Toggle Switch
+      default:
+      selector:
+        entity:
+          domain:
+          - input_boolean
+          multiple: false
+          reorder: false
+    a5_light:
+      name: Area 5 – Controlling Light Switch - it has on/off state of light
+      default:
+      selector:
+        entity:
+          domain:
+          - light
+          multiple: false
+          reorder: false
+    a5_script:
+      name: Area 5 – AL Ataraxia Script for Area
+      default:
+      selector:
+        entity:
+          domain:
+          - script
+          multiple: false
+          reorder: false
+    a5_al_switch_override:
+      name: Area 5 – Adaptive Lighting Values Area Override Control Switch
+      default:
+      selector:
+        entity:
+          domain:
+          - switch
+          multiple: false
+          reorder: false
+    a6_enable:
+      name: Area 6 – AL Area Active - Toggle Switch
+      default:
+      selector:
+        entity:
+          domain:
+          - input_boolean
+          multiple: false
+          reorder: false
+    a6_light:
+      name: Area 6 – Controlling Light Switch - it has on/off state of light
+      default:
+      selector:
+        entity:
+          domain:
+          - light
+          multiple: false
+          reorder: false
+    a6_script:
+      name: Area 6 – AL Ataraxia Script for Area
+      default:
+      selector:
+        entity:
+          domain:
+          - script
+          multiple: false
+          reorder: false
+    a6_al_switch_override:
+      name: Area 6 – Adaptive Lighting Values Area Override Control Switch
+      default:
+      selector:
+        entity:
+          domain:
+          - switch
+          multiple: false
+          reorder: false
+    a7_enable:
+      name: Area 7 – AL Area Active - Toggle Switch
+      default:
+      selector:
+        entity:
+          domain:
+          - input_boolean
+          multiple: false
+          reorder: false
+    a7_light:
+      name: Area 7 – Controlling Light Switch - it has on/off state of light
+      default:
+      selector:
+        entity:
+          domain:
+          - light
+          multiple: false
+          reorder: false
+    a7_script:
+      name: Area 7 – AL Ataraxia Script for Area
+      default:
+      selector:
+        entity:
+          domain:
+          - script
+          multiple: false
+          reorder: false
+    a7_al_switch_override:
+      name: Area 7 – Adaptive Lighting Values Area Override Control Switch
+      default:
+      selector:
+        entity:
+          domain:
+          - switch
+          multiple: false
+          reorder: false
+    a8_enable:
+      name: Area 8 – AL Area Active - Toggle Switch
+      default:
+      selector:
+        entity:
+          domain:
+          - input_boolean
+          multiple: false
+          reorder: false
+    a8_light:
+      name: Area 8 – Controlling Light Switch - it has on/off state of light
+      default:
+      selector:
+        entity:
+          domain:
+          - light
+          multiple: false
+          reorder: false
+    a8_script:
+      name: Area 8 – AL Ataraxia Script for Area
+      default:
+      selector:
+        entity:
+          domain:
+          - script
+          multiple: false
+          reorder: false
+    a8_al_switch_override:
+      name: Area 8 – Adaptive Lighting Values Area Override Control Switch
+      default:
+      selector:
+        entity:
+          domain:
+          - switch
+          multiple: false
+          reorder: false
+    a9_enable:
+      name: Area 9 – AL Area Active - Toggle Switch
+      default:
+      selector:
+        entity:
+          domain:
+          - input_boolean
+          multiple: false
+          reorder: false
+    a9_light:
+      name: Area 9 – Controlling Light Switch - it has on/off state of light
+      default:
+      selector:
+        entity:
+          domain:
+          - light
+          multiple: false
+          reorder: false
+    a9_script:
+      name: Area 9 – AL Ataraxia Script for Area
+      default:
+      selector:
+        entity:
+          domain:
+          - script
+          multiple: false
+          reorder: false
+    a9_al_switch_override:
+      name: Area 9 – Adaptive Lighting Values Area Override Control Switch
+      default:
+      selector:
+        entity:
+          domain:
+          - switch
+          multiple: false
+          reorder: false
+    a10_enable:
+      name: Area 10 – AL Area Active - Toggle Switch
+      default:
+      selector:
+        entity:
+          domain:
+          - input_boolean
+          multiple: false
+          reorder: false
+    a10_light:
+      name: Area 10 – Controlling Light Switch - it has on/off state of light
+      default:
+      selector:
+        entity:
+          domain:
+          - light
+          multiple: false
+          reorder: false
+    a10_script:
+      name: Area 10 – AL Ataraxia Script for Area
+      default:
+      selector:
+        entity:
+          domain:
+          - script
+          multiple: false
+          reorder: false
+    a10_al_switch_override:
+      name: Area 10 – Adaptive Lighting Values Area Override Control Switch
+      default:
+      selector:
+        entity:
+          domain:
+          - switch
+          multiple: false
+          reorder: false
+    a11_enable:
+      name: Area 11 – AL Area Active - Toggle Switch
+      default:
+      selector:
+        entity:
+          domain:
+          - input_boolean
+          multiple: false
+          reorder: false
+    a11_light:
+      name: Area 11 – Controlling Light Switch - it has on/off state of light
+      default:
+      selector:
+        entity:
+          domain:
+          - light
+          multiple: false
+          reorder: false
+    a11_script:
+      name: Area 11 – AL Ataraxia Script for Area
+      default:
+      selector:
+        entity:
+          domain:
+          - script
+          multiple: false
+          reorder: false
+    a11_al_switch_override:
+      name: Area 11 – Adaptive Lighting Values Area Override Control Switch
+      default:
+      selector:
+        entity:
+          domain:
+          - switch
+          multiple: false
+          reorder: false
+    a12_enable:
+      name: Area 12 – AL Area Active - Toggle Switch
+      default:
+      selector:
+        entity:
+          domain:
+          - input_boolean
+          multiple: false
+          reorder: false
+    a12_light:
+      name: Area 12 – Controlling Light Switch - it has on/off state of light
+      default:
+      selector:
+        entity:
+          domain:
+          - light
+          multiple: false
+          reorder: false
+    a12_script:
+      name: Area 12 – AL Ataraxia Script for Area
+      default:
+      selector:
+        entity:
+          domain:
+          - script
+          multiple: false
+          reorder: false
+    a12_al_switch_override:
+      name: Area 12 – Adaptive Lighting Values Area Override Control Switch
+      default:
+      selector:
+        entity:
+          domain:
+          - switch
+          multiple: false
+          reorder: false
+    a13_enable:
+      name: Area 13 – AL Area Active - Toggle Switch
+      default:
+      selector:
+        entity:
+          domain:
+          - input_boolean
+          multiple: false
+          reorder: false
+    a13_light:
+      name: Area 13 – Controlling Light Switch - it has on/off state of light
+      default:
+      selector:
+        entity:
+          domain:
+          - light
+          multiple: false
+          reorder: false
+    a13_script:
+      name: Area 13 – AL Ataraxia Script for Area
+      default:
+      selector:
+        entity:
+          domain:
+          - script
+          multiple: false
+          reorder: false
+    a13_al_switch_override:
+      name: Area 13 – Adaptive Lighting Values Area Override Control Switch
+      default:
+      selector:
+        entity:
+          domain:
+          - switch
+          multiple: false
+          reorder: false
+    a14_enable:
+      name: Area 14 – AL Area Active - Toggle Switch
+      default:
+      selector:
+        entity:
+          domain:
+          - input_boolean
+          multiple: false
+          reorder: false
+    a14_light:
+      name: Area 14 – Controlling Light Switch - it has on/off state of light
+      default:
+      selector:
+        entity:
+          domain:
+          - light
+          multiple: false
+          reorder: false
+    a14_script:
+      name: Area 14 – AL Ataraxia Script for Area
+      default:
+      selector:
+        entity:
+          domain:
+          - switch
+          multiple: false
+          reorder: false
+    a14_al_switch_override:
+      name: Area 14 – Adaptive Lighting Values Area Override Control Switch
+      default:
+      selector:
+        entity:
+          domain:
+          - switch
+          multiple: false
+          reorder: false
+    a15_enable:
+      name: Area 15 – AL Area Active - Toggle Switch
+      default:
+      selector:
+        entity:
+          domain:
+          - input_boolean
+          multiple: false
+          reorder: false
+    a15_light:
+      name: Area 15 – Controlling Light Switch - it has on/off state of light
+      default:
+      selector:
+        entity:
+          domain:
+          - light
+          multiple: false
+          reorder: false
+    a15_script:
+      name: Area 15 – AL Ataraxia Script for Area
+      default:
+      selector:
+        entity:
+          domain:
+          - script
+          multiple: false
+          reorder: false
+    a15_al_switch_override:
+      name: Area 15 – Adaptive Lighting Values Area Override Control Switch
+      default:
+      selector:
+        entity:
+          domain:
+          - switch
+          multiple: false
+          reorder: false
+    a16_enable:
+      name: Area 16 – AL Area Active - Toggle Switch
+      default:
+      selector:
+        entity:
+          domain:
+          - input_boolean
+          multiple: false
+          reorder: false
+    a16_light:
+      name: Area 16 – Controlling Light Switch - it has on/off state of light
+      default:
+      selector:
+        entity:
+          domain:
+          - light
+          multiple: false
+          reorder: false
+    a16_script:
+      name: Area 16 – AL Ataraxia Script for Area
+      default:
+      selector:
+        entity:
+          domain:
+          - script
+          multiple: false
+          reorder: false
+    a17_enable:
+      name: Area 17 – AL Area Active - Toggle Switch
+      default:
+      selector:
+        entity:
+          domain:
+          - input_boolean
+          multiple: false
+          reorder: false
+    a17_light:
+      name: Area 17 – Controlling Light Switch - it has on/off state of light
+      default:
+      selector:
+        entity:
+          domain:
+          - light
+          multiple: false
+          reorder: false
+    a17_script:
+      name: Area 17 – AL Ataraxia Script for Area
+      default:
+      selector:
+        entity:
+          domain:
+          - script
+          multiple: false
+          reorder: false
+    a18_enable:
+      name: Area 18 – AL Area Active - Toggle Switch
+      default:
+      selector:
+        entity:
+          domain:
+          - input_boolean
+          multiple: false
+          reorder: false
+    a18_light:
+      name: Area 18 – Controlling Light Switch - it has on/off state of light
+      default:
+      selector:
+        entity:
+          domain:
+          - light
+          multiple: false
+          reorder: false
+    a18_script:
+      name: Area 18 – AL Ataraxia Script for Area
+      default:
+      selector:
+        entity:
+          domain:
+          - script
+          multiple: false
+          reorder: false
+    a19_enable:
+      name: Area 19 – AL Area Active - Toggle Switch
+      default:
+      selector:
+        entity:
+          domain:
+          - input_boolean
+          multiple: false
+          reorder: false
+    a19_light:
+      name: Area 19 – Controlling Light Switch - it has on/off state of light
+      default:
+      selector:
+        entity:
+          domain:
+          - light
+          multiple: false
+          reorder: false
+    a19_script:
+      name: Area 19 – AL Ataraxia Script for Area
+      default:
+      selector:
+        entity:
+          domain:
+          - script
+          multiple: false
+          reorder: false
+mode: single
+max_exceeded: silent
+triggers:
+- trigger: event
+  event_type: timer.finished
+  event_data:
+    entity_id: !input timer_entity
+  id: TICK
+- trigger: homeassistant
+  event: start
+  id: START
+- trigger: time_pattern
+  minutes: /1
+  id: WATCHDOG
+conditions:
+- condition: or
+  conditions:
+  - condition: template
+    value_template: "{{ trigger.id != 'WATCHDOG' }}"
+  - condition: state
+    entity_id: !input timer_entity
+    state: idle
+actions:
+- variables:
+    _stagger: !input per_area_delay
+    _transition: !input transition
+    _log: !input verbose_logging
+    _rest: !input rest_duration
+    g_sw: !input global_al_switch
+    ov1: !input a1_al_switch_override
+    ov2: !input a2_al_switch_override
+    ov3: !input a3_al_switch_override
+    ov4: !input a4_al_switch_override
+    ov5: !input a5_al_switch_override
+    ov6: !input a6_al_switch_override
+    ov7: !input a7_al_switch_override
+    ov8: !input a8_al_switch_override
+    ov9: !input a9_al_switch_override
+    ov10: !input a10_al_switch_override
+    ov11: !input a11_al_switch_override
+    ov12: !input a12_al_switch_override
+    ov13: !input a13_al_switch_override
+    ov14: !input a14_al_switch_override
+    ov15: !input a15_al_switch_override
+    _g_bri: '{{ [state_attr(g_sw, ''brightness_pct'') | float(50) | round(0) |
+      int,1] | max }}'
+    _g_kel: '{{ state_attr(g_sw, ''color_temp_kelvin'') | float(2700) }}'
+    _a1_bri: '{{ [state_attr(ov1, ''brightness_pct'') | float(_g_bri) | round(0)
+      | int,1] | max if ov1 else _g_bri }}'
+    _a1_kel: '{{ state_attr(ov1, ''color_temp_kelvin'') | float(_g_kel) if ov1
+      else _g_kel }}'
+    _a2_bri: '{{ [state_attr(ov2, ''brightness_pct'') | float(_g_bri) | round(0)
+      | int,1] | max if ov2 else _g_bri }}'
+    _a2_kel: '{{ state_attr(ov2, ''color_temp_kelvin'') | float(_g_kel) if ov2
+      else _g_kel }}'
+    _a3_bri: '{{ [state_attr(ov3, ''brightness_pct'') | float(_g_bri) | round(0)
+      | int,1] | max if ov3 else _g_bri }}'
+    _a3_kel: '{{ state_attr(ov3, ''color_temp_kelvin'') | float(_g_kel) if ov3
+      else _g_kel }}'
+    _a4_bri: '{{ [state_attr(ov4, ''brightness_pct'') | float(_g_bri) | round(0)
+      | int,1] | max if ov4 else _g_bri }}'
+    _a4_kel: '{{ state_attr(ov4, ''color_temp_kelvin'') | float(_g_kel) if ov4
+      else _g_kel }}'
+    _a5_bri: '{{ [state_attr(ov5, ''brightness_pct'') | float(_g_bri) | round(0)
+      | int,1] | max if ov5 else _g_bri }}'
+    _a5_kel: '{{ state_attr(ov5, ''color_temp_kelvin'') | float(_g_kel) if ov5
+      else _g_kel }}'
+    _a6_bri: '{{ [state_attr(ov6, ''brightness_pct'') | float(_g_bri) | round(0)
+      | int,1] | max if ov6 else _g_bri }}'
+    _a6_kel: '{{ state_attr(ov6, ''color_temp_kelvin'') | float(_g_kel) if ov6
+      else _g_kel }}'
+    _a7_bri: '{{ [state_attr(ov7, ''brightness_pct'') | float(_g_bri) | round(0)
+      | int,1] | max if ov7 else _g_bri }}'
+    _a7_kel: '{{ state_attr(ov7, ''color_temp_kelvin'') | float(_g_kel) if ov7
+      else _g_kel }}'
+    _a8_bri: '{{ [state_attr(ov8, ''brightness_pct'') | float(_g_bri) | round(0)
+      | int,1] | max if ov8 else _g_bri }}'
+    _a8_kel: '{{ state_attr(ov8, ''color_temp_kelvin'') | float(_g_kel) if ov8
+      else _g_kel }}'
+    _a9_bri: '{{ [state_attr(ov9, ''brightness_pct'') | float(_g_bri) | round(0)
+      | int,1] | max if ov9 else _g_bri }}'
+    _a9_kel: '{{ state_attr(ov9, ''color_temp_kelvin'') | float(_g_kel) if ov9
+      else _g_kel }}'
+    _a10_bri: '{{ [state_attr(ov10, ''brightness_pct'') | float(_g_bri) | round(0)
+      | int,1] | max if ov10 else _g_bri }}'
+    _a10_kel: '{{ state_attr(ov10, ''color_temp_kelvin'') | float(_g_kel) if ov10
+      else _g_kel }}'
+    _a11_bri: '{{ [state_attr(ov11, ''brightness_pct'') | float(_g_bri) | round(0)
+      | int,1] | max if ov11 else _g_bri }}'
+    _a11_kel: '{{ state_attr(ov11, ''color_temp_kelvin'') | float(_g_kel) if ov11
+      else _g_kel }}'
+    _a12_bri: '{{ [state_attr(ov12, ''brightness_pct'') | float(_g_bri) | round(0)
+      | int,1] | max if ov12 else _g_bri }}'
+    _a12_kel: '{{ state_attr(ov12, ''color_temp_kelvin'') | float(_g_kel) if ov12
+      else _g_kel }}'
+    _a13_bri: '{{ [state_attr(ov13, ''brightness_pct'') | float(_g_bri) | round(0)
+      | int,1] | max if ov13 else _g_bri }}'
+    _a13_kel: '{{ state_attr(ov13, ''color_temp_kelvin'') | float(_g_kel) if ov13
+      else _g_kel }}'
+    _a14_bri: '{{ [state_attr(ov14, ''brightness_pct'') | float(_g_bri) | round(0)
+      | int,1] | max if ov14 else _g_bri }}'
+    _a14_kel: '{{ state_attr(ov14, ''color_temp_kelvin'') | float(_g_kel) if ov14
+      else _g_kel }}'
+    _a15_bri: '{{ [state_attr(ov15, ''brightness_pct'') | float(_g_bri) | round(0)
+      | int,1] | max if ov15 else _g_bri }}'
+    _a15_kel: '{{ state_attr(ov15, ''color_temp_kelvin'') | float(_g_kel) if ov15
+      else _g_kel }}'
+    # a16-a19 = consolidated per-source pushes; reuse the already-computed per-room representative
+    # values (a16 overhead=global; a17 accent=_a4; a18 hallup=_a15; a19 halldown=_a12).
+    _a16_bri: '{{ _g_bri }}'
+    _a16_kel: '{{ _g_kel }}'
+    _a17_bri: '{{ _a4_bri }}'
+    _a17_kel: '{{ _a4_kel }}'
+    _a18_bri: '{{ _a15_bri }}'
+    _a18_kel: '{{ _a15_kel }}'
+    _a19_bri: '{{ _a12_bri }}'
+    _a19_kel: '{{ _a12_kel }}'
+    # KEYED-JSON dedup state (replaces the old positional CSV helpers al_last_bri/al_last_kel).
+    # input_text.al_last_published holds one entry per AL SOURCE (not per area):
+    #   {"overhead":{"b":<pct>,"k":<kelvin>},"accent":{...},"hallup":{...},"halldown":{...}}
+    # Each area maps to its source via its AL-override switch (_src_map); areas with no override
+    # inherit the global switch = overhead source. Keying by source NAME removes the old
+    # positional-index fragility — the dedup flags (_pub_bri/_pub_kel), the helper write-back below,
+    # the drift-check reconcile loop, and the occupancy automations all reference by source KEY now.
+    _src_map:
+      switch.adaptive_lighting_accent_light_adaptive_lighting_control: accent
+      switch.hallway_downlights_adaptive_adaptive_lighting_hallway_downlights_adaptive: halldown
+      switch.hallway_uplights_adaptive_adaptive_lighting_hallway_uplights_adaptive: hallup
+    _last: "{{ (states('input_text.al_last_published') | from_json) if states('input_text.al_last_published')[0:1] == '{' else {} }}"
+    areas:
+    - enable: !input a1_enable
+      light: !input a1_light
+      script: !input a1_script
+      bri: '{{ _a1_bri }}'
+      kel: '{{ _a1_kel }}'
+      src: "{{ _src_map.get(ov1, 'overhead') if ov1 else 'overhead' }}"
+    - enable: !input a2_enable
+      light: !input a2_light
+      script: !input a2_script
+      bri: '{{ _a2_bri }}'
+      kel: '{{ _a2_kel }}'
+      src: "{{ _src_map.get(ov2, 'overhead') if ov2 else 'overhead' }}"
+    - enable: !input a3_enable
+      light: !input a3_light
+      script: !input a3_script
+      bri: '{{ _a3_bri }}'
+      kel: '{{ _a3_kel }}'
+      src: "{{ _src_map.get(ov3, 'overhead') if ov3 else 'overhead' }}"
+    - enable: !input a4_enable
+      light: !input a4_light
+      script: !input a4_script
+      bri: '{{ _a4_bri }}'
+      kel: '{{ _a4_kel }}'
+      src: "{{ _src_map.get(ov4, 'overhead') if ov4 else 'overhead' }}"
+    - enable: !input a5_enable
+      light: !input a5_light
+      script: !input a5_script
+      bri: '{{ _a5_bri }}'
+      kel: '{{ _a5_kel }}'
+      src: "{{ _src_map.get(ov5, 'overhead') if ov5 else 'overhead' }}"
+    - enable: !input a6_enable
+      light: !input a6_light
+      script: !input a6_script
+      bri: '{{ _a6_bri }}'
+      kel: '{{ _a6_kel }}'
+      src: "{{ _src_map.get(ov6, 'overhead') if ov6 else 'overhead' }}"
+    - enable: !input a7_enable
+      light: !input a7_light
+      script: !input a7_script
+      bri: '{{ _a7_bri }}'
+      kel: '{{ _a7_kel }}'
+      src: "{{ _src_map.get(ov7, 'overhead') if ov7 else 'overhead' }}"
+    - enable: !input a8_enable
+      light: !input a8_light
+      script: !input a8_script
+      bri: '{{ _a8_bri }}'
+      kel: '{{ _a8_kel }}'
+      src: "{{ _src_map.get(ov8, 'overhead') if ov8 else 'overhead' }}"
+    - enable: !input a9_enable
+      light: !input a9_light
+      script: !input a9_script
+      bri: '{{ _a9_bri }}'
+      kel: '{{ _a9_kel }}'
+      src: "{{ _src_map.get(ov9, 'overhead') if ov9 else 'overhead' }}"
+    - enable: !input a10_enable
+      light: !input a10_light
+      script: !input a10_script
+      bri: '{{ _a10_bri }}'
+      kel: '{{ _a10_kel }}'
+      src: "{{ _src_map.get(ov10, 'overhead') if ov10 else 'overhead' }}"
+    - enable: !input a11_enable
+      light: !input a11_light
+      script: !input a11_script
+      bri: '{{ _a11_bri }}'
+      kel: '{{ _a11_kel }}'
+      src: "{{ _src_map.get(ov11, 'overhead') if ov11 else 'overhead' }}"
+    - enable: !input a12_enable
+      light: !input a12_light
+      script: !input a12_script
+      bri: '{{ _a12_bri }}'
+      kel: '{{ _a12_kel }}'
+      src: "{{ _src_map.get(ov12, 'overhead') if ov12 else 'overhead' }}"
+    - enable: !input a13_enable
+      light: !input a13_light
+      script: !input a13_script
+      bri: '{{ _a13_bri }}'
+      kel: '{{ _a13_kel }}'
+      src: "{{ _src_map.get(ov13, 'overhead') if ov13 else 'overhead' }}"
+    - enable: !input a14_enable
+      light: !input a14_light
+      script: !input a14_script
+      bri: '{{ _a14_bri }}'
+      kel: '{{ _a14_kel }}'
+      src: "{{ _src_map.get(ov14, 'overhead') if ov14 else 'overhead' }}"
+    - enable: !input a15_enable
+      light: !input a15_light
+      script: !input a15_script
+      bri: '{{ _a15_bri }}'
+      kel: '{{ _a15_kel }}'
+      src: "{{ _src_map.get(ov15, 'overhead') if ov15 else 'overhead' }}"
+    - enable: !input a16_enable
+      light: !input a16_light
+      script: !input a16_script
+      bri: '{{ _a16_bri }}'
+      kel: '{{ _a16_kel }}'
+      src: overhead
+    - enable: !input a17_enable
+      light: !input a17_light
+      script: !input a17_script
+      bri: '{{ _a17_bri }}'
+      kel: '{{ _a17_kel }}'
+      src: accent
+    - enable: !input a18_enable
+      light: !input a18_light
+      script: !input a18_script
+      bri: '{{ _a18_bri }}'
+      kel: '{{ _a18_kel }}'
+      src: hallup
+    - enable: !input a19_enable
+      light: !input a19_light
+      script: !input a19_script
+      bri: '{{ _a19_bri }}'
+      kel: '{{ _a19_kel }}'
+      src: halldown
+- choose:
+  - conditions:
+    - condition: template
+      value_template: '{{ _log }}'
+    sequence:
+    - action: logbook.log
+      data:
+        name: Ataraxia AL
+        message: 'Tick: bri={{ _g_bri }}, K={{ _g_kel }}, stagger={{ _stagger
+          }}s'
+        entity_id: !input timer_entity
+- choose:
+  - conditions:
+    - condition: state
+      entity_id: !input z2m_bridge
+      state: 'on'
+    sequence:
+    - repeat:
+        for_each: '{{ areas }}'
+        sequence:
+        - condition: template
+          value_template: "{{ repeat.item.enable is not none and repeat.item.light
+            is not none and\n   repeat.item.script is not none and is_state(repeat.item.enable,
+            'on') }}\n"
+        - condition: template
+          value_template: '{{ states(repeat.item.light) not in [''unavailable'',''unknown'']
+            }}
+
+            '
+        - variables:
+            _is_on: '{{ is_state(repeat.item.light, ''on'') }}'
+            _target_state: '{{ ''ON'' if _is_on else ''OFF'' }}'
+            _src: '{{ repeat.item.src }}'
+            _pub_bri: "{{ 0 if ((_last.get(_src, {}).get('b', -99) | int(-99)) == (repeat.item.bri | int(-1))) else 1 }}"
+            _pub_kel: "{{ 0 if ((_last.get(_src, {}).get('k', -99) | int(-99)) == (repeat.item.kel | float(-1) | round(0) | int)) else 1 }}"
+        - choose:
+          - conditions:
+            - condition: template
+              value_template: '{{ _log }}'
+            sequence:
+            - action: logbook.log
+              data:
+                name: Ataraxia AL
+                message: 'Area {{ repeat.index }}: light={{ repeat.item.light
+                  }}, script={{ repeat.item.script }}, {{ _target_state }}, bri={{
+                  repeat.item.bri }}, K={{ repeat.item.kel }}'
+                entity_id: '{{ repeat.item.light }}'
+        - action: script.turn_on
+          target:
+            entity_id: '{{ repeat.item.script }}'
+          data:
+            variables:
+              target_state: '{{ _target_state }}'
+              brightness_pct: '{{ repeat.item.bri }}'
+              color_temp_kelvin: '{{ repeat.item.kel }}'
+              transition: '{{ 0 if _target_state == "OFF" else _transition }}'
+              bri_changed: '{{ _pub_bri }}'
+              kel_changed: '{{ _pub_kel }}'
+        - choose:
+          - conditions:
+            - condition: template
+              value_template: '{{ not repeat.last }}'
+            sequence:
+            - delay:
+                seconds: '{{ _stagger | int(0) }}'
+    # Keyed-JSON write-back: one entry per AL source (representative value per source — all areas
+    # on a source share the same value). overhead = global switch; accent/hallup/halldown = overrides.
+    - action: input_text.set_value
+      target:
+        entity_id: input_text.al_last_published
+      data:
+        value: >-
+          {{ {'overhead': {'b': _g_bri | int, 'k': _g_kel | float | round(0) | int},
+              'accent':   {'b': _a4_bri | int, 'k': _a4_kel | float | round(0) | int},
+              'hallup':   {'b': _a15_bri | int, 'k': _a15_kel | float | round(0) | int},
+              'halldown': {'b': _a12_bri | int, 'k': _a12_kel | float | round(0) | int}} | to_json }}
+    # Tick counter — drift-check (every 2nd tick) + liveness signal
+    - action: input_number.increment
+      target:
+        entity_id: input_number.al_tick_count
+- action: timer.start
+  target:
+    entity_id: !input timer_entity
+  data:
+    duration: '{{ _rest }}'

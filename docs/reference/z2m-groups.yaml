@@ -1,0 +1,54 @@
+# Zigbee2MQTT group definitions (from /config/zigbee2mqtt/configuration.yaml, 2026-06-06).
+# IMPORTANT: Z2M stores group *membership* in database.db, NOT in configuration.yaml. The membership
+# lists below are RECONSTRUCTED from the Z2M network map + tick wiring and must be verified against
+# the live group state (bridge/request/groups or the Z2M frontend) — this is a Phase-1 pre-check.
+
+# ----- Group definitions (verbatim) -----
+groups:
+  "1":  { friendly_name: zgb_living_room,           hue_native_control: true }
+  "2":  { friendly_name: zgb_kitchen,               hue_native_control: true }
+  "3":  { friendly_name: zgb_stairwell,             hue_native_control: true }
+  "4":  { friendly_name: zgb_primary_bedroom,       hue_native_control: true }
+  "5":  { friendly_name: zgb_overhead_bath,         hue_native_control: true }
+  "6":  { friendly_name: zgb_primary_shower_lights, hue_native_control: true }
+  "7":  { friendly_name: zgb_office_overhead,       hue_native_control: true }
+  "8":  { friendly_name: zgb_hallway_up,            hue_native_control: true }
+  "9":  { friendly_name: zgb_hallway_down,          hue_native_control: true }
+  "15": { friendly_name: zgb_effie_closet_overhead }                          # no AL script
+  "16": { friendly_name: zgb_upstairs_bath,         hue_native_control: true }
+  "17": { friendly_name: zgb_kitchen_island,        hue_native_control: true }
+  "21": { friendly_name: zgb_hallwayf }
+  "30": { friendly_name: zgb_overhead_all,          hue_native_control: true } # consolidated overhead
+  "31": { friendly_name: zgb_accent_all,            hue_native_control: true } # consolidated accent
+
+# ----- Consolidated source -> per-room group mapping (confident, from tick wiring) -----
+# zgb_overhead_all (30) = union of the 10 overhead per-room groups:
+#   zgb_primary_bedroom, zgb_overhead_bath, zgb_primary_shower_lights, zgb_office_overhead,
+#   zgb_kitchen, zgb_living_room, zgb_stairwell, zgb_upstairs_bath + michael-closet + front-door bulbs.
+# zgb_accent_all (31) = under-vanity strip + the 2 kitchen-island bulbs.
+# zgb_hallway_up (8) / zgb_hallway_down (9) = hallway up/down lights (already per-source).
+#
+# Every bulb is a member of BOTH its per-room group AND the consolidated source group. Per-room groups
+# + the Inovelli SBM bindings are untouched by the consolidation; the consolidated groups exist purely
+# for the AL flood. Removing a bulb from a consolidated group (the Light Man hold mechanism) does NOT
+# affect its per-room group or the switch binding -> paddle on/off keeps working during a hold.
+
+# ----- Reconstructed zgb_overhead_all membership (VERIFY against database.db) -----
+# From the Z2M network map (friendly name | IEEE). Hue 4" downlights unless noted.
+overhead_all_reconstructed:
+  primary_bedroom:   ["0x001788010d488e17", "0x001788010de6acf9", "0x001788010de6ad4c", "0x001788010de6ad46"]
+  michael_closet:    ["0x001788010d68c587"]   # A19 1100lm
+  primary_bath:      ["0x001788010d6e1ca4"]   # toilet light (overhead_bath group)
+  shower:            ["0x001788010d6e1cb5", "0x001788010d6e0bd2"]
+  office:            ["0x001788010e7fa5b5", "0x001788010e7f9ab9"]  # Datura ceiling
+  kitchen:           ["0x001788010d4882d2", "0x001788010d487d57", "0x001788010d487d50"]
+  living_room:       ["0x001788010d6e23ab", "0x001788010de6acdb", "0x001788010d487fff", "0x001788010d6e0c6b", "0x001788010d6e1ff4", "0x001788010de6ad1f"]
+  front_door:        ["0x001788010d487d62", "0x001788010d487ebf"]
+  upstairs_bath:     ["0x001788010d14eb54", "0x001788010d14ea75", "0x001788010d14ecb0"]  # filament E27
+  stairwell:         ["0x001788010e976d52", "0x001788010f186464"]
+# NOTE: counts ~28 here vs the KB's "24 bulbs" — exact set differs (e.g. vanity vs overhead-bath
+# split). Treat as a starting map only; enumerate the real membership in Phase 1.
+
+accent_all_reconstructed:
+  under_vanity:      ["0x001788010e32c84d"]   # Hue solo lightstrip
+  kitchen_island:    ["0x001788010e67302e", "0x001788010e673093"]  # Lightguide G30

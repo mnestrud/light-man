@@ -1,0 +1,14 @@
+{
+  "domain": "light_man",
+  "name": "Light Man",
+  "codeowners": ["@mnestrud"],
+  "config_flow": true,
+  "dependencies": ["mqtt"],
+  "documentation": "https://github.com/mnestrud/light-man",
+  "integration_type": "hub",
+  "iot_class": "local_push",
+  "issue_tracker": "https://github.com/mnestrud/light-man/issues",
+  "requirements": [],
+  "single_config_entry": true,
+  "version": "0.0.0"
+}
