@@ -254,9 +254,13 @@ matrix, enforced **directly in the push** (no blueprint, no shadow config):
 ## Phase 2+ — Roadmap (future, not committed by this approval)
 
 - **Replace AL dummy switches with Light Man adaptive-target profiles** (your "adaptive targets only"
-  idea): an **OptionsFlow** defines per-source profiles (kelvin range, brightness range, sun-elevation
-  curve, sleep/night rgb + color mode); the coordinator computes values internally and the HACS AL
-  integration is removed. The per-source color mode (§1.5) migrates into the profile.
+  idea) — full design in `docs/reference/adaptive-algorithm.md`. The engine computes per-source
+  `{brightness, color_temp|rgb}` from **real solar elevation** at the house lat/long (color normalized
+  to a fixed `REF = 71.5°`, interpolated in mired; brightness perceptual), with a **real-twilight**
+  dusk ramp, a **sleep toggle switch** (`switch.light_man_sleep`, ramp_in/ramp_out — schedule owned by
+  the user) and an **optional forced day-window** that gates the edges without distorting midday. An
+  **OptionsFlow** edits the per-source profiles; the coordinator computes values internally and the
+  HACS AL integration is removed. The per-source color mode (§1.5) migrates into the profile.
 - Absorb tick a1–a15 (Inovelli `defaultLevel`/LED unicast) and retire the tick blueprint entirely.
 - Optionally migrate the switch-taps blueprint's look application + held-dim ramp + occupancy.
 - Preserve KB-encoded fixes (latch, off-prestage, hue native control, SBM binding) as behavior +
