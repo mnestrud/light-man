@@ -4,5 +4,5 @@ from __future__ import annotations
 
 DOMAIN = "light_man"
 
-# Logger used for hold/membership failure warnings (see ARCHITECTURE.md).
+# Logger for hold lifecycle events (arm / release / TTL-expiry info lines).
 LOGGER_HOLD = "light_man.hold"

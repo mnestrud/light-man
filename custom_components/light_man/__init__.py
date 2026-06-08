@@ -1,8 +1,11 @@
 """The Light Man integration.
 
-Phase-0 scaffold. Phase 1 adds the coordinator, the MQTT bridge request/response
-primitive, the per-room hold manager, the membership reconciler, and the
-sensor/switch platforms. See docs/reference/ARCHITECTURE.md.
+Phase-0 scaffold. Phase 1 adds the coordinator (timer-driven push + hold manager
++ write-on-change dedup), the MQTT subscriptions that arm/release holds (Inovelli
+action topics) and detect room off->on (switch state topics), and the
+sensor/switch platforms. Held rooms are excluded by addressing (consolidated vs.
+per-room groupcasts), not by mutating Zigbee group membership.
+See docs/reference/ARCHITECTURE.md.
 """
 
 from __future__ import annotations

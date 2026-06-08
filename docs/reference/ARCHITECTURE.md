@@ -23,7 +23,9 @@ replace the AL value source and migrate the rest of the tick.
 > group-membership** mechanism with a bind/unbind primitive, transaction-correlation, a retry state
 > machine, and a membership reconciler. That approach was dropped in favor of push-ownership +
 > addressing. See `docs/PLAN.md` ("Design evolution") for the rationale; §5 here has been rewritten to
-> match.
+> match. A later simplification pass set a single solar-midnight hold TTL, memory-only dedup (no
+> Store), one active-holds sensor (push-health → diagnostics), release-reuses-push, and dropped the
+> `arm_hold` service.
 
 ---
 
@@ -87,7 +89,7 @@ tick (~92 s), and there is no per-room way to prevent it.
 
 **Root cause (architectural):** override is a per-room/per-light concept, but adaptation is now a
 per-source group **multicast** that cannot exclude individual members. Restoring per-room exclusion
-requires removing a held room's bulbs from the consolidated group.
+requires addressing per-room (skipping held rooms) instead of flooding the consolidated group.
 
 **Caveat:** the **hallway** source is incidentally still protected (a18/a19 share the per-room hallway
 boolean). The breakage is the **overhead** source (whole main floor + bedrooms/baths/office) and
@@ -101,8 +103,9 @@ boolean). The breakage is the **overhead** source (whole main floor + bedrooms/b
 ## 5. The fix — design (agreed)
 
 ### 5.1 Mechanism: own the push, exclude by addressing
-Light Man replaces the 4 source pushes (tick a16–a19) with its own timer-driven coordinator. Exclusion
-is an **addressing** decision, recomputed each push from the hold set — no Zigbee topology is mutated:
+Light Man replaces the 4 source pushes (tick a16–a19) with its own timer-driven coordinator (own ~30 s
+cadence, independent of the tick). Exclusion is an **addressing** decision, recomputed each push from
+the hold set — no Zigbee topology is mutated:
 - **No held room in a source** → one publish to the consolidated group `/set` (`zgb_overhead_all`,
   etc.) — byte-identical to today: same group, same RF (4 floods), full native Hue.
 - **A room is held** → publish per **unheld** room to its per-room group `/set`, skipping the held one.
@@ -126,22 +129,28 @@ self-heals on the next cycle exactly as the tick does today.
 
 ### 5.3 Hold model + arm/release
 - **Hold state** — `Store` (`al_held_rooms`): `room → {armed_at, expires_at}`. Intent set immediately;
-  the next push honors it. No convergence step (addressing is recomputed each push).
-- **Tap seam** — Light Man **subscribes to `zigbee2mqtt/<switch>/action`** and maps the action string
-  to a hold op. The switch-taps blueprint still applies the actual look/LED/shades; Light Man only
-  decides whether the adaptive push skips that room.
+  the next push honors it. Holds persist across restart (the intent must survive — else a restart
+  re-clobbers a held scene). No convergence step (addressing is recomputed each push).
+- **Tap seam** — Light Man **subscribes to `zigbee2mqtt/<switch>/action`** (arm/release) and to the
+  Inovelli switch **state** topics (off→on release — the same room switches Light Man adapts). The
+  switch-taps blueprint still applies the actual look/LED/shades; Light Man only decides whether the
+  adaptive push skips that room.
 - **Arm** (on `config_single`/`config_double` = Day/Night, or `up_held`/`down_held` = dim — **never**
   `*_double`/`*_triple`, which are PowerView shades): record the room held; the tap already applied the
-  look. `expires_at = min(armed_at + ttl, next solar midnight)`.
-- **Release** (on `up_single` = tap-on, or room off→on): clear the hold; the next push re-includes the
-  room. On tap-on, also fire a **one-shot AL push to the room's per-room `/set`** so it snaps to
-  adaptive instantly (don't wait up to one interval).
+  look. `expires_at = next solar midnight` (holds always clear overnight).
+- **Release** (on `up_single` = tap-on, or room off→on via the switch state topic): clear the hold,
+  then **trigger an immediate push cycle** so the room snaps to adaptive at once (reuses the push path,
+  no bespoke single-room publish).
 - **TTL sweep** (piggyback the push loop) clears expired holds; info line on expiry.
+- **Holdable rooms** must have a per-room `set_topic` — without one the push cannot address around the
+  room (it would fall back to the consolidated flood and hit the held bulbs). Validate the
+  `switch → room → set_topic` chain at config load.
 
 ### 5.4 Write-on-change dedup
-Keep last-published per (source, target) in memory (+ `Store` for restart); skip unchanged. Replaces
+Keep last-published per (source, target) in memory only; skip unchanged. Replaces
 `input_text.al_last_published`; `always_update=False` on the coordinator. Fold the color-mode
-(rgb vs color_temp) into the dedup key so a mode flip always publishes.
+(rgb vs color_temp) into the dedup key so a mode flip always publishes. No `Store`: the push is
+level-triggered, so the first cycle after a restart simply re-publishes once (idempotent).
 
 ### 5.5 Native-Hue coverage (the one new obligation)
 Every member of `zgb_overhead_all` / `zgb_accent_all` must belong to a per-room group that is also
@@ -154,20 +163,22 @@ color-while-off prestage while another room in its source is held. Phase-1 pre-c
 While a source has a held room, that source addresses per-room, so on each AL step the unheld rooms
 get individual floods instead of one consolidated flood (~9 vs 1 for overhead). This is a transient
 increase, bounded by hold lifetime; steady state (no holds) is unchanged at 4 consolidated floods.
+**Accepted** — holds are transient.
 
 ---
 
 ## 6. The seam (Light Man vs. Z2M)
 
 - **Light Man owns (Phase 1):** the 4 source pushes (a16–a19), hold state, dynamic addressing,
-  write-on-change dedup, per-source day/night color mode, tap→hold arming via action-topic subscribe.
+  write-on-change dedup, per-source day/night color mode, tap→hold arming + off→on release via MQTT
+  subscribe.
 - **Z2M keeps owning:** groups, membership, bindings, `hue_native_control`, Inovelli SBM, all device
-  I/O. Light Man talks to Z2M **only over MQTT** (group/switch `/set` publishes + `…/action` subscribe)
-  — no `bridge/request` group mutation.
-- **Switch taps (Phase 1):** Light Man **subscribes to the Inovelli action topics** and manages holds.
-  Look application, LED effects, PowerView shade scenes, accent toggling, and the held-dim ramp stay in
-  the switch-taps blueprint. The tick blueprint keeps a1–a15 (Inovelli unicast); **a16–a19 are disabled
-  and owned by Light Man** — re-enabling them is the instant fallback.
+  I/O. Light Man talks to Z2M **only over MQTT** (group/switch `/set` publishes + `…/action` and
+  switch-state subscribes) — no `bridge/request` group mutation.
+- **Switch taps (Phase 1):** Light Man **subscribes to the Inovelli action + state topics** and manages
+  holds. Look application, LED effects, PowerView shade scenes, accent toggling, and the held-dim ramp
+  stay in the switch-taps blueprint. The tick blueprint keeps a1–a15 (Inovelli unicast); **a16–a19 are
+  disabled and owned by Light Man** — re-enabling them is the instant fallback.
 
 ---
 
@@ -177,10 +188,10 @@ increase, bounded by hold lifetime; steady state (no holds) is unchanged at 4 co
 - **Phase 1 — Own the adaptive push + scene-hold:** §5 components; Light Man owns a16–a19, tick keeps
   a1–a15. AL dummy switches stay as the value source. Deliverable.
 - **Phase 2+ (roadmap, not committed):** replace the AL dummy switches with Light Man-computed
-  adaptive-target profiles (OptionsFlow: kelvin/brightness ranges, sun curve, sleep rgb) and remove the
-  HACS AL integration; absorb tick a1–a15; retire the tick/push blueprints; optionally migrate the
-  switch-taps blueprint's look application + held-dim ramp + occupancy. Preserve KB-encoded fixes as
-  behavior + regression tests.
+  adaptive-target profiles from **real solar elevation** (`docs/reference/adaptive-algorithm.md`) and
+  remove the HACS AL integration; absorb tick a1–a15; retire the tick/push blueprints; optionally
+  migrate the switch-taps blueprint's look application + held-dim ramp + occupancy. Preserve KB-encoded
+  fixes as behavior + regression tests.
 
 ---
 
@@ -195,21 +206,26 @@ increase, bounded by hold lifetime; steady state (no holds) is unchanged at 4 co
 - **Inovelli SBM binding:** VZM31-SN binds from EP1; VZM32-SN (mmWave) binds from **EP2**.
   `BindingOffToOnSyncLevel: Enabled` on all switches → tap-on uses `defaultLevelLocal` written each
   tick.
-- **Zigbee RF:** multicast lost in two waves; consolidation traded per-tick implicit retries for fewer
-  floods, mitigated by the drift-check reconcile loop.
+- **Zigbee RF:** multicast lost in two waves; the existing tick stack traded per-tick implicit retries
+  for fewer floods, mitigated by its drift-check reconcile loop. Light Man's push is level-triggered
+  (re-asserts every cycle), which provides the same self-healing without a separate reconciler.
 - **Tick cadence:** AL adapts ~every 30 s; tick re-commands ~every 92 s → consumers must read
   last-published (helpers), not the live AL switch.
 
 ---
 
-## 9. Open implementation decisions (resolve during build)
+## 9. Resolved implementation decisions
 
-1. ~~Tap seam~~ — **resolved:** Light Man subscribes to the Inovelli action topics.
-2. ~~Config surface for the mapping~~ — **resolved:** Phase 1 seeds a `Store`-loaded
-   `light_man_config.json` (topology map + per-source color mode); the config-flow `user` step is a
-   trivial confirm. The real OptionsFlow (adaptive-target profiles) lands in Phase 2.
-3. Confirm `integration_type` `hub` vs `service` (HA `ha-dev` check).
-4. Push cadence: own fixed interval (default 30 s) vs. phase-align to the existing tick heartbeat.
+1. **Tap seam** — Light Man subscribes to the Inovelli action topics (arm/release) and switch-state
+   topics (off→on release).
+2. **Config surface** — Phase 1 seeds a `Store`-loaded `light_man_config.json` (topology map +
+   per-source color mode + per-room switches); the config-flow `user` step is a trivial confirm. The
+   real OptionsFlow (adaptive-target profiles) lands in Phase 2.
+3. **`integration_type`** — `hub` (local orchestrator over MQTT/Z2M; multiple sources).
+4. **Push cadence** — Light Man owns its own ~30 s timer, independent of the tick (which is being
+   retired), not phase-aligned to it.
+5. **Hold TTL** — single rule: `expires_at = next solar midnight`.
+6. **RF during holds** — accept the transient per-room-flood increase; steady state unchanged.
 
 ---
 
@@ -217,11 +233,12 @@ increase, bounded by hold lifetime; steady state (no holds) is unchanged at 4 co
 
 - **Unit (pytest ≥95%, 100% config_flow):** push payload + dedup, addressing selection (consolidated
   vs per-room by hold set), color-mode matrix (incl. rgb-invalid fallback), hold arm/release/TTL,
-  action-string → hold mapping, one-shot snap on release, config-load validation, services.
+  action-string → hold mapping, off→on release, immediate-push snap on release, config-load validation
+  (incl. holdable-room `set_topic` chain), services.
 - **Live:** robocopy → `ha_restart` → validate. Functional (after cutover): set Day scene in a room →
   that source switches to per-room floods, the held room is skipped, scene survives ≥2 push cycles;
   tap-on (`up_single`) → instant snap + re-included; off→on → adapts; a hold with no tap-on →
-  auto-expires at TTL/solar-midnight; steady state (no holds) → exactly 4 consolidated floods.
+  auto-expires at the next solar midnight; steady state (no holds) → exactly 4 consolidated floods.
 
 ---
 
@@ -236,3 +253,4 @@ increase, bounded by hold lifetime; steady state (no holds) is unchanged at 4 co
 | `al-source-scripts.yaml` | 4 source scripts + a per-room script (blanked group) |
 | `switch-tap-instances.yaml` | Tap instances — double/triple = PowerView shades |
 | `z2m-groups.yaml` | Group definitions + reconstructed membership |
+| `adaptive-algorithm.md` | Phase 2 real-elevation adaptive-target engine design |

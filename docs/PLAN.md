@@ -6,8 +6,9 @@
 > per-room groupcasts), not by mutating group membership. That deletes the bind/unbind primitive, the
 > transaction-correlation registry, the retry state machine, and the membership reconciler. The
 > per-source day/night color-mode is now a **live push feature** (no shadow blueprint config).
-> `docs/reference/ARCHITECTURE.md` §5 (the membership mechanism) is now historical — see §"Design
-> evolution" below; ARCHITECTURE.md will be re-synced as a follow-up.
+> A second pass simplified further: single solar-midnight hold TTL, memory-only dedup (no Store),
+> one active-holds sensor (push-health → diagnostics), release reuses the push path, no `arm_hold`
+> service. `docs/reference/ARCHITECTURE.md` is kept in sync.
 
 ## Context
 
@@ -57,8 +58,8 @@ The reference pack settled three things that flipped the mechanism:
    `defaultLevel`/LED, with write-on-change dedup (`al-push-script-blueprint.yaml:223-230`).
 3. **Adaptive values are just three attributes.** AL "dummy" switches expose `brightness_pct`,
    `color_temp_kelvin`, `rgb_color`; the tick reads only those (`tick-blueprint.yaml:763-765`).
-   Everything else in the AL integration is unused — so Light Man can replace it later by porting one
-   sun-elevation curve (Phase 2).
+   Everything else in the AL integration is unused — so Light Man can replace it later by porting a
+   real-elevation curve (Phase 2, `docs/reference/adaptive-algorithm.md`).
 
 **What this deletes vs. the old plan:** the `group/members/add|remove` primitive, unique-per-attempt
 `transaction` correlation, the 3-attempt retry state machine, the membership reconciler, and bind
@@ -78,21 +79,26 @@ next cycle exactly as the tick does today.
 | AUDIT_MEMORY_FILE | `light_man_audit.md` |
 | PLATFORMS | `sensor`, `switch` (+ services) |
 | HA_MIN_VERSION | match current live (2026.x) |
-| integration_type | `hub` (local orchestrator over MQTT/Z2M) — confirm via `ha-dev` |
+| integration_type | `hub` (local orchestrator over MQTT/Z2M) |
 | iot_class | `local_push` |
 | License | MIT |
 
 **Locked design decisions (cemented — avoid remaking):**
 - **Domain `light_man`** — baked into folder path, `manifest.json`, every entity `unique_id`,
-  config-flow handler, service names (`light_man.arm_hold`), translation keys.
-- **Entity `unique_id` scheme:** `{entry_id}_{room|source}_{kind}` (e.g. `…_living_room_hold`,
-  `…_overhead_push`). Changing later orphans registry entries.
+  config-flow handler, service names (`light_man.release_hold`), translation keys.
+- **Entity `unique_id` scheme:** `{entry_id}_{room|source}_{kind}` (e.g. `…_active_holds`,
+  `…_push_enable`). Changing later orphans registry entries.
 - **Config model:** UI config-flow with a **single config entry** (`single_config_entry: true`) —
   house-wide singleton. **Phase 1: the topology map + per-source color mode are seeded from a
   `Store`-loaded JSON** (`light_man_config.json`), not an interactive flow. The config-flow `user`
   step is a trivial confirm that creates the entry. The real OptionsFlow (adaptive-target profiles)
   lands in **Phase 2**.
 - **Held-room exclusion is by addressing, never by group-membership mutation.**
+- **Push cadence:** Light Man owns its own ~30 s timer — independent of the tick blueprint (which is
+  being retired), not phase-aligned to it.
+- **Hold TTL:** a single rule — `expires_at = next solar midnight` (holds always clear overnight).
+- **RF during holds:** the transient per-room-flood increase for a held source is **accepted**;
+  steady state (no holds) is unchanged at 4 consolidated floods.
 - **Manifest:** `integration_type: hub`, `iot_class: local_push`, `dependencies: ["mqtt"]`.
 
 **Branch / release workflow:** `dev` = default; each robocopy deploy is preceded by a `git push` to
@@ -102,25 +108,27 @@ next cycle exactly as the tick does today.
 
 ```mermaid
 flowchart TD
-    CFG["Store-seeded config (light_man_config.json)<br/>per source: AL dummy switch · consolidated group · per-room {group, /set topic, bulbs} · day/night color mode"] --> CO
-    AL["AL dummy switches (HACS)<br/>brightness_pct · color_temp_kelvin · rgb_color"] --> CO["Light Man coordinator<br/>(timer-driven push, replaces tick a16–a19)"]
-    H["Hold model (Store: al_held_rooms)<br/>room → {armed_at, expires_at}"] --> CO
+    CFG["Store-seeded config (light_man_config.json)<br/>per source: AL dummy switch · consolidated group · per-room {set_topic, switches} · day/night color mode"] --> CO
+    AL["AL dummy switches (HACS)<br/>brightness_pct · color_temp_kelvin · rgb_color"] --> CO["Light Man coordinator<br/>(own 30 s timer push, replaces tick a16–a19)"]
+    H["Hold model (Store: al_held_rooms)<br/>room → {armed_at, expires_at=next solar midnight}"] --> CO
     CO -->|"no holds in source"| GC["Consolidated groupcast<br/>zgb_*_all /set (4 floods — today's RF)"]
     CO -->|"holds in source"| PR["Per-room groupcasts (unheld rooms only)<br/>zgb_<room> /set"]
-    TAP["MQTT subscribe: zigbee2mqtt/<switch>/action"] -->|"config_single/double, up_held/down_held"| ARM["arm_hold"]
-    TAP -->|"up_single"| REL["release_hold (+ one-shot AL snap)"]
-    OFF["room off→on (light state)"] --> REL
+    TAP["MQTT subscribe: zigbee2mqtt/<switch>/action"] -->|"config_single/double, up_held/down_held"| ARM["arm hold (internal)"]
+    TAP -->|"up_single"| REL["release hold (+ immediate push cycle)"]
+    OFF["MQTT subscribe: Inovelli switch state<br/>(room off→on)"] --> REL
     ARM --> H
     REL --> H
-    TTL["TTL sweep: 12h or solar-midnight"] --> H
-    CO --> E["Entities: per-room hold sensor · per-source push/health sensor<br/>services: arm_hold · release_hold · clear_holds · force_push · diagnostics"]
+    TTL["TTL sweep: next solar midnight"] --> H
+    CO --> E["Entities: active-holds sensor + push-enable switch<br/>(push-health data → diagnostics, not a live sensor)<br/>services: release_hold · clear_holds · force_push · diagnostics"]
     BP["Tick blueprint a1–a15 (Inovelli LED/defaultLevel)<br/>+ switch-taps blueprint (looks, LED, shades, accent)"] -. "unchanged; a16–a19 disabled = fallback" .-> CO
 ```
 
 - **Light Man owns (Phase 1):** the 4 source pushes (a16–a19), hold state, dynamic addressing,
-  write-on-change dedup, per-source day/night color mode, tap→hold arming via action-topic subscribe.
+  write-on-change dedup, per-source day/night color mode, tap→hold arming via action-topic subscribe,
+  and off→on release via the Inovelli switch state topics.
 - **Z2M keeps owning device I/O:** groups, bindings, `hue_native_control`, Inovelli SBM. Light Man
-  talks to Z2M **only via MQTT** — group/switch `/set` topics (fire-and-forget) + `…/action` subscribe.
+  talks to Z2M **only via MQTT** — group/switch `/set` publishes (fire-and-forget) + `…/action` and
+  switch-state subscribes.
 - **Blueprints keep:** tick a1–a15 (Inovelli unicast); the switch-taps blueprint's look application,
   LED effects, PowerView shade scenes, accent toggling, held-dim ramp. Light Man only *observes* taps
   to manage holds — it does **not** apply the Day/Night look (the blueprint still does), it just stops
@@ -132,6 +140,7 @@ flowchart TD
 Done and committed (`0ddfbec`, `d0412fc`): public repo (MIT), `dev`/`main`, `.github/workflows/`
 (validate, docs, claude review/mention), `CLAUDE.md`, `docs/reference/` pack, partial
 `custom_components/light_man/` scaffold, `hacs.json`, `pyproject.toml`, `requirements_test.txt`.
+(Phase-0 `__init__.py`/`const.py` docstrings cleaned of stale membership/reconciler text.)
 
 **Still outstanding (local, one-time):** Windows PHCC env — venv, copy `sitecustomize.py`, pin
 PHCC/mypy per `CLAUDE.md`. Memory files `light_man_audit.md` / `light_man_test_env.md` and the
@@ -143,20 +152,21 @@ PHCC/mypy per `CLAUDE.md`. Memory files `light_man_audit.md` / `light_man_test_e
 
 | Exists (Phase 0) | To add (Phase 1) |
 |---|---|
-| `__init__.py` (`PLATFORMS = []`) | set `PLATFORMS = ["sensor","switch"]`; Store load of `light_man_config.json`; hold Store; MQTT subscriptions; unload cleanup |
-| `const.py` (`DOMAIN`, `LOGGER_*`) | source keys, color-mode enum, defaults, push interval, TTL, mired clamp (153–500), topic templates |
+| `__init__.py` (`PLATFORMS = []`) | set `PLATFORMS = ["sensor","switch"]`; Store load of `light_man_config.json`; hold Store; MQTT subscriptions (action topics + switch-state topics); unload cleanup |
+| `const.py` (`DOMAIN`, `LOGGER_HOLD`) | source keys, color-mode enum, defaults, push interval (30 s), mired clamp (153–500), topic templates |
 | `config_flow.py` (single-instance user step) | keep trivial confirm step (entry creation only); **no** topology UI in Phase 1 |
 | `manifest.json` (`hub`/`local_push`/`single_config_entry`/`mqtt`, v`0.0.0`) | bump `version` |
 | `strings.json`, `translations/en.json` | confirm step + service/error strings (mirror both) |
-| — | `coordinator.py` (push engine + hold manager + dedup), `sensor.py`, `switch.py`, `services.yaml`, `icons.json`, `diagnostics.py`, `tests/` (incl. `conftest.py`), seed `light_man_config.json` |
+| — | `coordinator.py` (push engine + hold manager + dedup), `sensor.py` (1 active-holds sensor), `switch.py` (1 push-enable switch), `services.yaml`, `icons.json`, `diagnostics.py` (incl. push-health data), `tests/` (incl. `conftest.py`), seed `light_man_config.json` |
 
 ### 1.2 Pre-checks (read-only, live)
 - Enumerate real membership of `zgb_overhead_all` / `zgb_accent_all` and the per-room groups + their
-  `/set` topics and bulb IEEEs (the `z2m-groups.yaml` map is *reconstructed* — verify against
-  `database.db` / the Z2M frontend) → this populates the seed JSON.
+  `/set` topics (the `z2m-groups.yaml` map is *reconstructed* — verify against `database.db` / the Z2M
+  frontend) → this populates the seed JSON.
 - Confirm the AL dummy-switch entity ids + attributes per source (`al-source-scripts.yaml:12,22,32,43`).
 - Confirm the Inovelli `…/action` payload strings match the blueprint subtypes
-  (`config_single`, `config_double`, `up_single`, `up_held`, `down_held`, …).
+  (`config_single`, `config_double`, `up_single`, `up_held`, `down_held`, …) and the switch **state**
+  topic shape used for off→on detection.
 - **Native-Hue coverage check (load-bearing):** confirm **every** member of `zgb_overhead_all` /
   `zgb_accent_all` belongs to a per-room group that is also `hue_native_control: true` — that is the
   group Light Man addresses through during a hold. Per `z2m-groups.yaml` almost all per-room groups
@@ -174,7 +184,6 @@ PHCC/mypy per `CLAUDE.md`. Memory files `light_man_audit.md` / `light_man_test_e
 ```jsonc
 {
   "push_interval_s": 30,
-  "hold_ttl_hours": 12,
   "sources": {
     "overhead": {
       "al_switch": "switch.adaptive_lighting_al_dummy_overhead_control",
@@ -183,48 +192,66 @@ PHCC/mypy per `CLAUDE.md`. Memory files `light_man_audit.md` / `light_man_test_e
       "night_color_mode": "color_temp",
       "sleep_switch": null,                 // hallway sources set this
       "rooms": {
-        "living_room": { "set_topic": "zigbee2mqtt/zgb_living_room/set",
-                         "bulbs": ["0x001788010d6e23ab", "..."] }
+        "living_room": {
+          "set_topic": "zigbee2mqtt/zgb_living_room/set",
+          "switches": ["zigbee2mqtt/Living Room Overhead Light Switch 1"]
+        }
       }
     }
   }
 }
 ```
 - Defaults reproduce today's behavior: overhead/accent `day=color_temp,night=color_temp`; hallway
-  up/down `day=color_temp,night=rgb` (sleep switch wired). `bulbs` lists are used only for hold-aware
-  per-room addressing and diagnostics; the reconciler-free push addresses **groups**, not individual
-  bulbs.
-- **Startup validation:** validate topics/entities exist; surface unmapped/odd entries in
-  **diagnostics**, never fail setup. The push reads only this config at runtime — never reconstructs
-  YAML.
+  up/down `day=color_temp,night=rgb` (sleep switch wired). The push addresses **groups/topics** only
+  (`consolidated_topic` when nothing is held, per-room `set_topic` otherwise) — bulb-level data is
+  intentionally **not** in the seed. Native-Hue coverage (§1.2) is a one-time human check in the Z2M
+  frontend, never runtime data.
+- **`rooms[*].switches`** carry each room's Inovelli switch base topic(s): `…/action` arms a hold for
+  the room, and the switch **state** drives off→on release. These are the same room switches Light Man
+  already adapts (defaultLevel/LED).
+- **Startup validation:** every **holdable** room (one a switch can arm) must have a per-room
+  `set_topic` — without it the push cannot address around the held room (it would fall back to the
+  consolidated flood and hit the held bulbs). Validate the `switch → room → set_topic` chain on load;
+  validate topics/entities exist; surface unmapped/odd entries in **diagnostics**, never fail setup.
+  The push reads only this config at runtime — never reconstructs YAML.
 
 ### 1.4 Components
-- **Push engine (coordinator)** — timer-driven (default 30 s; own cadence, independent of the tick).
-  Per source: read `brightness_pct`/`color_temp_kelvin` (and `rgb_color` when in an rgb mode) from the
-  AL dummy switch; compute `bri` (0–254) and `mired` (clamp 153–500); pick `mode = night_color_mode if
+- **Push engine (coordinator)** — timer-driven on its own ~30 s cadence (independent of the tick). Per
+  source: read `brightness_pct`/`color_temp_kelvin` (and `rgb_color` when in an rgb mode) from the AL
+  dummy switch; compute `bri` (0–254) and `mired` (clamp 153–500); pick `mode = night_color_mode if
   sleeping else day_color_mode`. **Addressing:** if no held room in the source → one publish to
   `consolidated_topic`; else → one publish per **unheld** room `set_topic`. Payload is stateless
   (`al-push-script-blueprint.yaml:228-230`): `{"brightness", "color_temp"|"color":{r,g,b},
-  "transition"}`. Never send `state` (latch fix).
-- **Write-on-change dedup** — keep last-published per (source, target) in memory (+ `Store` for
-  restart); skip unchanged. Replaces `input_text.al_last_published`. `always_update=False` on the
-  coordinator.
+  "transition"}`. Never send `state` (latch fix). Guard publishes on MQTT availability — skip the cycle
+  if the MQTT integration isn't connected (no exceptions on a disconnected broker). A `push_enable`
+  switch being OFF makes the cycle a no-op (fallback mode).
+- **Write-on-change dedup** — keep last-published per (source, target) in memory only; skip unchanged.
+  Replaces `input_text.al_last_published`. `always_update=False` on the coordinator. No `Store`: the
+  push is level-triggered, so after a restart the first cycle per source just re-publishes once
+  (idempotent — it matches what's on the bulbs, or self-heals next cycle).
 - **Hold model** — `Store` (`al_held_rooms`): `room → {armed_at, expires_at}`. Intent set immediately;
-  the next push honors it. No convergence step (addressing is recomputed each push).
+  the next push honors it. Holds persist across restart (the intent must survive — otherwise a restart
+  re-clobbers a held scene, the very bug being fixed). No convergence step (addressing is recomputed
+  each push).
 - **Arm hold** — on `config_single`/`config_double` (Day/Night) or `up_held`/`down_held` (dim) for a
   room; **never** double/triple. Record the room held. The blueprint already applied the look; Light
-  Man just stops overwriting it. Compute `expires_at = min(armed_at + ttl, next solar midnight)`.
-- **Release hold** — triggers: **`up_single`** (tap-on, immediate) and **room off→on**. Clear the
-  hold; the next push re-includes the room. On tap-on, also fire a **one-shot AL push to the room's
-  `set_topic`** so it snaps to adaptive instantly (don't wait up to one interval).
+  Man just stops overwriting it. `expires_at = next solar midnight` (holds always clear overnight; the
+  house returns to adaptive every morning).
+- **Release hold** — triggers: **`up_single`** (tap-on) and **room off→on** (detected on the Inovelli
+  switch **state** topic — the same room switches Light Man adapts). Clear the hold, then **trigger an
+  immediate push cycle** (the `force_push` routine) so the released room snaps to adaptive at once —
+  reuses the push path rather than a bespoke single-room publish (with another room still held the
+  cycle addresses per-room including the released one; otherwise it floods the consolidated group).
 - **TTL sweep** — periodic check (piggyback the push loop) clears expired holds; emits an info line.
-- **Tap subscription** — subscribe to `zigbee2mqtt/<switch>/action`; map action string → arm/release;
-  ignore `up_double/triple`, `down_double/triple` (shades). Switch↔room mapping comes from the seed
-  JSON.
-- **Entities/services** — `sensor`: per-room hold status (+ `expires_at` attr) and a per-source
-  push/health sensor (last publish, last value, dedup skips, addressing mode). `switch`: global
-  push-enable (fallback kill-switch) and optional per-source enable. Services: `arm_hold`,
-  `release_hold`, `clear_holds`, `force_push`; `diagnostics.py` dump.
+- **Tap / state subscription** — subscribe to `zigbee2mqtt/<switch>/action` (arm/release) and the
+  switch state topic (off→on release); map action string → hold op; ignore `up_double/triple`,
+  `down_double/triple` (shades). Switch↔room mapping comes from the seed JSON (`rooms[*].switches`).
+- **Entities/services** — `sensor`: one **active-holds** sensor (state = count of held rooms; attrs
+  list each room + its `expires_at`). A single holds sensor avoids creating/destroying per-room
+  entities as holds come and go. Push-health data (last publish, last value, dedup skips, addressing
+  mode) lives in `diagnostics.py`, **not** a live sensor. `switch`: one global push-enable
+  (fallback kill-switch). Services: `release_hold`, `clear_holds`, `force_push`. (No `arm_hold`
+  service — arming is the tap-subscription's job.)
 
 ### 1.5 Per-source day/night color mode (live feature, baked in)
 Generalize today's hallway-only night-RGB into a per-source **{day, night} × {color_temp, rgb}**
@@ -246,10 +273,11 @@ matrix, enforced **directly in the push** (no blueprint, no shadow config):
 ### 1.7 Buildable now vs. validate live
 - **Unit-testable against mocked MQTT (build now):** push payload build (bri/mired/color-mode/dedup),
   addressing selection (consolidated vs per-room by hold set), hold arm/release/TTL, action-string →
-  hold mapping, one-shot snap on release, config-load validation, services.
-- **Requires live HA/Z2M (validate locally):** real group/topic/bulb enumeration for the seed JSON;
-  AL dummy-switch attribute confirmation; action-topic payload strings; end-to-end scene survival and
-  the consolidated↔per-room RF behavior under a hold.
+  hold mapping, off→on release from a switch-state message, immediate-push snap on release,
+  config-load validation (incl. holdable-room `set_topic` chain), services.
+- **Requires live HA/Z2M (validate locally):** real group/topic enumeration for the seed JSON;
+  AL dummy-switch attribute confirmation; action + switch-state topic shapes; end-to-end scene survival
+  and the consolidated↔per-room RF behavior under a hold.
 
 ## Phase 2+ — Roadmap (future, not committed by this approval)
 
@@ -270,20 +298,12 @@ matrix, enforced **directly in the push** (no blueprint, no shadow config):
 
 - **Unit (pytest ≥95%, 100% config_flow):** push payload + dedup, addressing selection by hold set,
   color-mode matrix (incl. rgb-invalid fallback), hold arm/release/TTL, action-string mapping,
-  one-shot snap, config-load validation, services.
+  off→on release, immediate-push snap on release, config-load validation, services.
 - **Live:** robocopy → `ha_restart` → `ha-integration-validator` "Validate light_man on live HA".
   Functional, after cutover (§1.6): set Day scene in a room → that source switches to per-room floods,
   the held room is skipped, scene survives ≥2 push cycles; tap-on (`up_single`) → instant snap to AL +
-  re-included; off→on → adapts; a hold with no tap-on → auto-expires at TTL/solar-midnight; steady
+  re-included; off→on → adapts; a hold with no tap-on → auto-expires at next solar midnight; steady
   state with no holds → exactly 4 consolidated floods (today's RF). Color mode: flip a source's
   day/night mode → payload switches rgb↔color_temp; defaults reproduce today (overhead/accent always
   color_temp; hallway rgb at night).
 - **Quality:** drive `light_man_audit.md` toward Silver.
-
-## Open implementation decisions (resolve during build)
-
-1. Confirm `integration_type` `hub` vs `service` via `ha-dev` (manifest currently `hub`).
-2. Push cadence: fixed interval vs. subscribe to the existing tick's heartbeat for phase-alignment
-   (default: own 30 s interval; revisit if RF/timing interleave with a1–a15 matters).
-3. RF during holds: accept the transient per-room flood increase for a held source, or cap it (e.g.
-   only re-flood changed rooms). Default: accept — holds are transient; steady state is unchanged.
