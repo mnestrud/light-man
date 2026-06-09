@@ -117,9 +117,9 @@ during a hold.
 **Light Man owns the publish, not the groups.** `hue_native_control` is a Z2M per-group setting; Z2M
 builds the native Philips `multiColor` groupcast (and the color-while-off prestage bit) on every
 publish to a native group. Light Man's payload is identical to the blueprint's `mqtt.publish`
-(`al-push-script-blueprint.yaml:223-230`), so native Hue is preserved on both paths — **provided every
-per-room group is also `hue_native_control: true`** (almost all already are; orphans must get one — see
-§5.5).
+(`al-push-script-blueprint.yaml:223-230`), so native Hue is preserved on both paths — **provided
+`hue_native_control` is active on the target**, whether that's a per-room group or the bulb's own
+device-level option (see §5.5).
 
 ### 5.2 What this deletes vs. the membership draft
 No `bridge/request/group/members/{add,remove}` primitive, no unique-per-attempt `transaction`
@@ -152,12 +152,14 @@ Keep last-published per (source, target) in memory only; skip unchanged. Replace
 (rgb vs color_temp) into the dedup key so a mode flip always publishes. No `Store`: the push is
 level-triggered, so the first cycle after a restart simply re-publishes once (idempotent).
 
-### 5.5 Native-Hue coverage (the one new obligation)
-Every member of `zgb_overhead_all` / `zgb_accent_all` must belong to a per-room group that is also
-`hue_native_control: true` — that is the group addressed during a hold. Suspected orphans (no obvious
-native per-room group): **front_door**, **michael_closet** (overhead), **under_vanity** (accent). For
-each, create a `hue_native_control: true` per-room group in Z2M (one-time), else that bulb loses
-color-while-off prestage while another room in its source is held. Phase-1 pre-check.
+### 5.5 Native-Hue coverage — VERIFIED COMPLETE (2026-06-09)
+Every consolidated member must have `hue_native_control` active, **either** via its per-room group
+(11 native groups) **or at the bulb's device level** (`hue_native_control` is a converter option that
+applies to device or group). Verified in `configuration.yaml`: the members with no per-room group are
+single-light "rooms" carrying **device-level** `hue_native_control: true` — Front Door Overhead Light 1,
+Michael Closet Overhead Light, Primary Bath Under Vanity Lights — addressed during a hold by their own
+`/set` topic (no group-of-one). Front Door Overhead Light 2 is a router kept always-off (excluded from
+targeting; rides the stateless flood, never turns on). No orphan groups needed.
 
 ### 5.6 RF during holds
 While a source has a held room, that source addresses per-room, so on each AL step the unheld rooms

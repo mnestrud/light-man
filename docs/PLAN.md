@@ -182,16 +182,18 @@ harness `MEMORY.md` index created; HA MCP wired (`.mcp.json`) and verified; vali
 - Capture the Inovelli `…/action` payload strings (`mqtt_dump.py tap`) — `config_single`,
   `config_double`, `up_single`, `up_held`, `down_held`, … — and the switch **state** topic shape for
   off→on detection.
-- **Native-Hue coverage check (load-bearing) — VERIFIED 2026-06-09.** Every consolidated member must
-  belong to a per-room group that is also `hue_native_control: true` (that group is what Light Man
-  addresses during a hold). 11 native per-room groups cover all but **4 orphan bulbs** (confirmed via
-  live `bridge/groups` + `configuration.yaml`): overhead → **Front Door Overhead Light 1 & 2**
-  (`0x…487d62`, `0x…487ebf`), **Michael Closet Overhead Light** (`0x…68c587`); accent → **Primary Bath
-  Under Vanity Lights** (`0x…32c84d`). **Action (one-time, before those rooms are hold-safe):** create
-  a `hue_native_control: true` per-room group for each (Z2M `bridge/request/group/add` +
-  `group/members/add` — manual; then `mqtt_dump.py options <group> '{"hue_native_control":true}'
-  --commit`). Until then, holding another room in `overhead`/`accent` leaves those 4 bulbs without
-  color-while-off prestage.
+- **Native-Hue coverage check (load-bearing) — VERIFIED COMPLETE 2026-06-09.** Every consolidated
+  member must have `hue_native_control` active — **either** via its per-room **group** (11 native
+  groups) **or at the bulb's own device level** (single-light "rooms"). `hue_native_control` is a
+  converter *option* that applies to a device or a group alike. Confirmed in `configuration.yaml`: the
+  consolidated members with no per-room group are single-light rooms carrying **device-level
+  `hue_native_control: true`** — **Front Door Overhead Light 1** (`0x…487d62`), **Michael Closet
+  Overhead Light** (`0x…68c587`), **Primary Bath Under Vanity Lights** (`0x…32c84d`, accent). Light Man
+  addresses these during a hold via the **bulb's own `/set` topic** — no group needed (a group-of-one
+  is redundant). **Front Door Overhead Light 2** (`0x…487ebf`) is a **router kept always-off**:
+  excluded from per-room targeting; it only ever rides the consolidated flood, where the stateless
+  `multiColor` never turns it on. **Coverage is complete — no orphan groups to create.** (Validate the
+  device-level toggle via `mqtt_dump.py options '<bulb>'`.)
 - **Replaces the old §1.2 linchpin spike** — we no longer bet on Z2M rebuilding a flood for a smaller
   group; we build the per-room payload ourselves. The only "verify our port" check is that a
   hand-built per-room `/set` renders identically to the blueprint's consolidated one.
@@ -223,8 +225,13 @@ harness `MEMORY.md` index created; HA MCP wired (`.mcp.json`) and verified; vali
 - Defaults reproduce today's behavior: overhead/accent `day=color_temp,night=color_temp`; hallway
   up/down `day=color_temp,night=rgb` (sleep switch wired). The push addresses **groups/topics** only
   (`consolidated_topic` when nothing is held, per-room `set_topic` otherwise) — bulb-level data is
-  intentionally **not** in the seed. Native-Hue coverage (§1.2) is a one-time human check in the Z2M
-  frontend, never runtime data.
+  intentionally **not** in the seed. Native-Hue coverage (§1.2) is a one-time check via
+  `mqtt_dump.py options`, never runtime data.
+- **Single-light rooms:** a "room" may be a **single bulb** rather than a group — its `set_topic` is
+  then the **bulb's own** `/set` (e.g. `zigbee2mqtt/Front Door Overhead Light 1/set`), relying on the
+  bulb's **device-level** `hue_native_control` (§1.2). No group-of-one. **Router-only / always-off
+  bulbs** (e.g. `Front Door Overhead Light 2`) are **excluded from `rooms`** entirely — they ride the
+  consolidated flood but are never per-room targets and never arm/release a hold.
 - **`rooms[*].switches`** carry each room's Inovelli switch base topic(s): `…/action` arms a hold for
   the room, and the switch **state** drives off→on release. These are the same room switches Light Man
   already adapts (defaultLevel/LED).
