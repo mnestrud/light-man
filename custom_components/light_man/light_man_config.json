@@ -1,0 +1,89 @@
+{
+  "push_interval_s": 30,
+  "sources": {
+    "overhead": {
+      "al_switch": "switch.adaptive_lighting_al_dummy_overhead_control",
+      "consolidated_topic": "zigbee2mqtt/zgb_overhead_all/set",
+      "legacy_enable": "input_boolean.adaptive_lighting_overhead_all",
+      "day_color_mode": "color_temp",
+      "night_color_mode": "color_temp",
+      "rooms": {
+        "living_room": {
+          "set_topic": "zigbee2mqtt/zgb_living_room/set",
+          "switches": ["zigbee2mqtt/Living Room Overhead Light Switch 1"]
+        },
+        "kitchen": {
+          "set_topic": "zigbee2mqtt/zgb_kitchen/set",
+          "switches": ["zigbee2mqtt/Kitchen Overhead Light Switch"]
+        },
+        "primary_bedroom": {
+          "set_topic": "zigbee2mqtt/zgb_primary_bedroom/set",
+          "switches": ["zigbee2mqtt/Primary Bedroom Overhead Light Switch"]
+        },
+        "overhead_bath": {
+          "set_topic": "zigbee2mqtt/zgb_overhead_bath/set",
+          "switches": ["zigbee2mqtt/Primary Bath Front Smart Switch"]
+        },
+        "shower": {
+          "set_topic": "zigbee2mqtt/zgb_primary_shower_lights/set",
+          "switches": ["zigbee2mqtt/Primary Bath Shower Smart Switch"]
+        },
+        "office": {
+          "set_topic": "zigbee2mqtt/zgb_office_overhead/set",
+          "switches": ["zigbee2mqtt/Office Smart Switch"]
+        },
+        "upstairs_bath": {
+          "set_topic": "zigbee2mqtt/zgb_upstairs_bath/set",
+          "switches": ["zigbee2mqtt/Upstairs Bath Light Switch"]
+        },
+        "stairwell": {
+          "set_topic": "zigbee2mqtt/zgb_stairwell/set",
+          "switches": ["zigbee2mqtt/Stairwell Top Smart Switch mmwave"]
+        },
+        "front_door": {
+          "set_topic": "zigbee2mqtt/Front Door Overhead Light 1/set",
+          "switches": ["zigbee2mqtt/Front Door Overhead Light Switch"]
+        },
+        "michael_closet": {
+          "set_topic": "zigbee2mqtt/Michael Closet Overhead Light/set",
+          "switches": ["zigbee2mqtt/Michael Closet Overhead Switch"]
+        }
+      }
+    },
+    "accent": {
+      "al_switch": "switch.adaptive_lighting_accent_light_adaptive_lighting_control",
+      "consolidated_topic": "zigbee2mqtt/zgb_accent_all/set",
+      "legacy_enable": "input_boolean.adaptive_lighting_accent_all",
+      "day_color_mode": "color_temp",
+      "night_color_mode": "color_temp",
+      "rooms": {
+        "kitchen_island": {
+          "set_topic": "zigbee2mqtt/zgb_kitchen_island/set",
+          "switches": ["zigbee2mqtt/Kitchen Island Light Switch"]
+        },
+        "under_vanity": {
+          "set_topic": "zigbee2mqtt/Primary Bath Under Vanity Lights/set",
+          "switches": []
+        }
+      }
+    },
+    "hallway_up": {
+      "al_switch": "switch.hallway_uplights_adaptive_adaptive_lighting_hallway_uplights_adaptive",
+      "consolidated_topic": "zigbee2mqtt/zgb_hallway_up/set",
+      "legacy_enable": "input_boolean.adaptive_lighting_switch_hallway",
+      "day_color_mode": "color_temp",
+      "night_color_mode": "rgb",
+      "sleep_switch": "switch.adaptive_lighting_hallway_uplights_adaptive_adaptive_lighting_sleep_mode_hallway_uplights_adaptive",
+      "rooms": {}
+    },
+    "hallway_down": {
+      "al_switch": "switch.hallway_downlights_adaptive_adaptive_lighting_hallway_downlights_adaptive",
+      "consolidated_topic": "zigbee2mqtt/zgb_hallway_down/set",
+      "legacy_enable": "input_boolean.adaptive_lighting_switch_hallway",
+      "day_color_mode": "color_temp",
+      "night_color_mode": "rgb",
+      "sleep_switch": "switch.adaptive_lighting_hallway_downlights_adaptive_adaptive_lighting_sleep_mode_hallway_downlights_adaptive",
+      "rooms": {}
+    }
+  }
+}
