@@ -126,6 +126,12 @@ is **no** daytime single-color option, so this is new. Night color comes from `s
 RGB (`sleep.rgb`). Both colors are owned by Light Man, replacing the AL switch's `rgb_color` / sleep-rgb
 (removed in Phase 2). A source with no rgb in either regime is unaffected (pure `color_temp`).
 
+**Concrete requirement (2026-06-09, from live cutover):** `hallway_up` day target = **sky blue**
+(`base_color_mode: rgb`, `base_rgb` ≈ a sky blue — dial in the exact value on the bulbs during Phase 2),
+blending to the existing night RGB. Phase 1 cannot do this — in rgb mode it just mirrors the AL switch's
+`rgb_color` (currently warm white ~`[255,240,227]`), so the daytime hallway_up is warm-white-rgb until
+`base_rgb` lands.
+
 ## Carrying the current AL config forward
 
 `min/max_brightness`, `min/max_color_temp`, `sleep_brightness`, `sleep_color_temp` / `sleep_rgb` map
