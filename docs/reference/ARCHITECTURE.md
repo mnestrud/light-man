@@ -152,6 +152,15 @@ Keep last-published per (source, target) in memory only; skip unchanged. Replace
 (rgb vs color_temp) into the dedup key so a mode flip always publishes. No `Store`: the push is
 level-triggered, so the first cycle after a restart simply re-publishes once (idempotent).
 
+**Addressing-mode blind spot (must handle):** the dedup key is the target *topic*, which flips between
+the consolidated topic (no holds) and per-room topics (holds active). When the last hold releases and
+addressing flips back to the consolidated topic — whose cached value still equals the unchanged AL
+target — a naive dedup would skip the publish and leave the released room on its held scene (the rc30
+regression, reintroduced). **Rule:** invalidate a source's dedup entries whenever its held-room set
+changes (arm or release), and have `force_push` bypass dedup entirely. The arm direction is otherwise
+safe (bulbs are already correct from the prior consolidated flood); release/TTL-expiry is where the
+bypass is load-bearing.
+
 ### 5.5 Native-Hue coverage — VERIFIED COMPLETE (2026-06-09)
 Every consolidated member must have `hue_native_control` active, **either** via its per-room group
 (11 native groups) **or at the bulb's device level** (`hue_native_control` is a converter option that

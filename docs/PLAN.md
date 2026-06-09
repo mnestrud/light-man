@@ -8,7 +8,10 @@
 > per-source day/night color-mode is now a **live push feature** (no shadow blueprint config).
 > A second pass simplified further: single solar-midnight hold TTL, memory-only dedup (no Store),
 > one active-holds sensor (push-health → diagnostics), release reuses the push path, no `arm_hold`
-> service. `docs/reference/ARCHITECTURE.md` is kept in sync.
+> service. A 2026-06-09 review caught a dedup blind-spot across addressing-mode flips and added the
+> invalidate-on-hold-change + `force_push`-bypasses-dedup rule (§1.4), clarified the single-toggle as
+> HA `input_boolean` service calls, and recorded the single-light-room model (device-level
+> `hue_native_control`). `docs/reference/ARCHITECTURE.md` is kept in sync.
 
 ## Context
 
@@ -57,9 +60,11 @@ The reference pack settled three things that flipped the mechanism:
    `{"brightness", "color_temp"|"color", "transition"}` to a group `/set`, plus Inovelli
    `defaultLevel`/LED, with write-on-change dedup (`al-push-script-blueprint.yaml:223-230`).
 3. **Adaptive values are just three attributes.** AL "dummy" switches expose `brightness_pct`,
-   `color_temp_kelvin`, `rgb_color`; the tick reads only those (`tick-blueprint.yaml:763-765`).
-   Everything else in the AL integration is unused — so Light Man can replace it later by porting a
-   real-elevation curve (Phase 2, `docs/reference/adaptive-algorithm.md`).
+   `color_temp_kelvin`, `rgb_color`. The tick reads `brightness_pct`/`color_temp_kelvin`
+   (`tick-blueprint.yaml:763-765`); the push additionally reads `rgb_color` for the sleep/rgb path
+   (`al-push-script-blueprint.yaml:159`). Everything else in the AL integration is unused — so Light
+   Man can replace it later by porting a real-elevation curve (Phase 2,
+   `docs/reference/adaptive-algorithm.md`).
 
 **What this deletes vs. the old plan:** the `group/members/add|remove` primitive, unique-per-attempt
 `transaction` correlation, the 3-attempt retry state machine, the membership reconciler, and bind
@@ -257,12 +262,24 @@ harness `MEMORY.md` index created; HA MCP wired (`.mcp.json`) and verified; vali
 - **Single-toggle stack switch** — `switch.light_man_push_enable` is the sole control. ON: the push
   runs **and** Light Man sets each source's `legacy_enable` boolean OFF (tick a16–a19 stop). OFF: the
   push is a no-op **and** Light Man sets the `legacy_enable` booleans back ON (tick resumes the old
-  consolidated flood). On startup it reconciles the booleans to match its own state so the two stacks
-  are never active together. This is the one-flip fallback through Phase 1.
+  consolidated flood). The `legacy_enable` targets are `input_boolean` HA helpers (not Zigbee), so this
+  is `input_boolean.turn_on`/`turn_off` **HA service calls**, not an MQTT publish (consistent with the
+  CLAUDE.md Device-I/O carve-out: input_booleans use HA/MCP). On startup it reconciles the booleans to
+  match its own state so the two stacks are never active together. This is the one-flip fallback through
+  Phase 1.
 - **Write-on-change dedup** — keep last-published per (source, target) in memory only; skip unchanged.
   Replaces `input_text.al_last_published`. `always_update=False` on the coordinator. No `Store`: the
   push is level-triggered, so after a restart the first cycle per source just re-publishes once
   (idempotent — it matches what's on the bulbs, or self-heals next cycle).
+  **Dedup is keyed per (source, target *topic*), so it is blind to addressing-mode transitions** —
+  the target flips between `consolidated_topic` (no holds) and per-room `set_topic`s (holds active),
+  which are different keys. On its own this re-introduces the exact rc30 blind spot we're fixing
+  (`tick-blueprint.yaml:996-997`): when the last hold releases and addressing flips back to the
+  consolidated topic whose cached value still equals the unchanged AL target, the publish is deduped
+  and the released room keeps its held scene. **Rule:** whenever a source's held-room set changes
+  (arm *or* release), clear that source's dedup entries before the next push, and have `force_push`
+  **bypass dedup entirely** (always publish). The arm direction is otherwise safe (bulbs are already
+  correct from the prior consolidated flood); release/TTL-expiry is where the bypass is load-bearing.
 - **Hold model** — `Store` (`al_held_rooms`): `room → {armed_at, expires_at}`. Intent set immediately;
   the next push honors it. Holds persist across restart (the intent must survive — otherwise a restart
   re-clobbers a held scene, the very bug being fixed). No convergence step (addressing is recomputed
@@ -272,10 +289,12 @@ harness `MEMORY.md` index created; HA MCP wired (`.mcp.json`) and verified; vali
   Man just stops overwriting it. `expires_at = next solar midnight` (holds always clear overnight; the
   house returns to adaptive every morning).
 - **Release hold** — triggers: **`up_single`** (tap-on) and **room off→on** (detected on the Inovelli
-  switch **state** topic — the same room switches Light Man adapts). Clear the hold, then **trigger an
-  immediate push cycle** (the `force_push` routine) so the released room snaps to adaptive at once —
-  reuses the push path rather than a bespoke single-room publish (with another room still held the
-  cycle addresses per-room including the released one; otherwise it floods the consolidated group).
+  switch **state** topic — the same room switches Light Man adapts). Clear the hold, **invalidate the
+  source's dedup entries** (the hold set just changed — see "Write-on-change dedup"), then **trigger an
+  immediate push cycle** (the `force_push` routine, which bypasses dedup) so the released room snaps to
+  adaptive at once — reuses the push path rather than a bespoke single-room publish (with another room
+  still held the cycle addresses per-room including the released one; otherwise it floods the
+  consolidated group).
 - **TTL sweep** — periodic check (piggyback the push loop) clears expired holds; emits an info line.
 - **Tap / state subscription** — subscribe to `zigbee2mqtt/<switch>/action` (arm/release) and the
   switch state topic (off→on release); map action string → hold op; ignore `up_double/triple`,
@@ -302,6 +321,8 @@ matrix, enforced **directly in the push** (no blueprint, no shadow config):
 ### 1.6 Deployment & cutover (single toggle)
 1. Robocopy + restart; Light Man starts with **push-enable OFF** → on startup it reconciles the
    `legacy_enable` booleans **ON**, so the tick keeps flooding exactly as today (zero behavior change).
+   Note: persisted holds are **honored only while `push_enable` is ON**; under the legacy fallback the
+   tick's consolidated flood will clobber a held scene — the original regression persists by design.
 2. **Flip `push_enable` ON** → Light Man drives the `legacy_enable` booleans OFF and takes over the
    push. Verify floods now originate from Light Man.
 3. **Revert any time:** flip `push_enable` OFF → the `legacy_enable` booleans go back ON and the old
@@ -311,6 +332,8 @@ matrix, enforced **directly in the push** (no blueprint, no shadow config):
 - **Unit-testable against mocked MQTT (build now):** push payload build (bri/mired/color-mode/dedup),
   addressing selection (consolidated vs per-room by hold set), hold arm/release/TTL, action-string →
   hold mapping, off→on release from a switch-state message, immediate-push snap on release,
+  **dedup invalidation across an addressing-mode flip** (hold a room, release it while the AL target is
+  unchanged, assert the released room's topic is published and not deduped),
   single-toggle behavior (push_enable flip drives `legacy_enable` inverse + startup reconcile),
   config-load validation (incl. holdable-room `set_topic` chain), services.
 - **Requires live HA/Z2M (validate locally):** real group/topic enumeration for the seed JSON;
