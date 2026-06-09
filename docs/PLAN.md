@@ -99,6 +99,11 @@ next cycle exactly as the tick does today.
 - **Hold TTL:** a single rule — `expires_at = next solar midnight` (holds always clear overnight).
 - **RF during holds:** the transient per-room-flood increase for a held source is **accepted**;
   steady state (no holds) is unchanged at 4 consolidated floods.
+- **Single-toggle fallback (until Phase 2):** one switch — `switch.light_man_push_enable` — swaps the
+  whole stack. ON runs Light Man's push **and** turns the legacy a16–a19 enable booleans OFF; OFF
+  no-ops Light Man **and** turns them back ON. The new and old stacks are therefore never flooding at
+  once, and reverting is a single flip. This coupling to the legacy booleans is temporary and is
+  removed in Phase 2 when the tick retires.
 - **Manifest:** `integration_type: hub`, `iot_class: local_push`, `dependencies: ["mqtt"]`.
 
 **Branch / release workflow:** `dev` = default; each robocopy deploy is preceded by a `git push` to
@@ -120,7 +125,9 @@ flowchart TD
     REL --> H
     TTL["TTL sweep: next solar midnight"] --> H
     CO --> E["Entities: active-holds sensor + push-enable switch<br/>(push-health data → diagnostics, not a live sensor)<br/>services: release_hold · clear_holds · force_push · diagnostics"]
-    BP["Tick blueprint a1–a15 (Inovelli LED/defaultLevel)<br/>+ switch-taps blueprint (looks, LED, shades, accent)"] -. "unchanged; a16–a19 disabled = fallback" .-> CO
+    SW["switch.light_man_push_enable (single toggle)"] -->|"ON ⇒ off · OFF ⇒ on"| LEG["legacy a16–a19 enable booleans"]
+    SW --> CO
+    BP["Tick blueprint a1–a15 (Inovelli LED/defaultLevel)<br/>+ switch-taps blueprint (looks, LED, shades, accent)"] -. "a16–a19 gated by push-enable (inverse) = one-switch fallback" .-> CO
 ```
 
 - **Light Man owns (Phase 1):** the 4 source pushes (a16–a19), hold state, dynamic addressing,
@@ -133,7 +140,9 @@ flowchart TD
   LED effects, PowerView shade scenes, accent toggling, held-dim ramp. Light Man only *observes* taps
   to manage holds — it does **not** apply the Day/Night look (the blueprint still does), it just stops
   the adaptive push from overwriting it.
-- **Fallback:** re-enable tick areas a16–a19 to instantly restore the old consolidated flood.
+- **Single-toggle fallback:** the `push_enable` switch is the sole control — flipping it ON drives the
+  legacy a16–a19 enable booleans OFF (and OFF drives them back ON), so Light Man and the tick never
+  flood together and reverting to the old stack is one flip.
 
 ## Phase 0 — Bootstrap (COMPLETE)
 
@@ -188,6 +197,7 @@ PHCC/mypy per `CLAUDE.md`. Memory files `light_man_audit.md` / `light_man_test_e
     "overhead": {
       "al_switch": "switch.adaptive_lighting_al_dummy_overhead_control",
       "consolidated_topic": "zigbee2mqtt/zgb_overhead_all/set",
+      "legacy_enable": "input_boolean.adaptive_lighting_overhead_all",  // tick a16–a19 gate; driven by push_enable (inverse)
       "day_color_mode": "color_temp",      // color_temp | rgb
       "night_color_mode": "color_temp",
       "sleep_switch": null,                 // hallway sources set this
@@ -209,6 +219,10 @@ PHCC/mypy per `CLAUDE.md`. Memory files `light_man_audit.md` / `light_man_test_e
 - **`rooms[*].switches`** carry each room's Inovelli switch base topic(s): `…/action` arms a hold for
   the room, and the switch **state** drives off→on release. These are the same room switches Light Man
   already adapts (defaultLevel/LED).
+- **`sources[*].legacy_enable`** is the tick's a16–a19 enable boolean for that source
+  (`adaptive_lighting_overhead_all`, `…_accent_all`, `…_switch_hallway` for both hallway sources).
+  Light Man drives it to the inverse of `push_enable` so one switch swaps the whole stack (§1.4). It is
+  the only legacy-helper coupling and is removed in Phase 2.
 - **Startup validation:** every **holdable** room (one a switch can arm) must have a per-room
   `set_topic` — without it the push cannot address around the held room (it would fall back to the
   consolidated flood and hit the held bulbs). Validate the `switch → room → set_topic` chain on load;
@@ -223,8 +237,12 @@ PHCC/mypy per `CLAUDE.md`. Memory files `light_man_audit.md` / `light_man_test_e
   `consolidated_topic`; else → one publish per **unheld** room `set_topic`. Payload is stateless
   (`al-push-script-blueprint.yaml:228-230`): `{"brightness", "color_temp"|"color":{r,g,b},
   "transition"}`. Never send `state` (latch fix). Guard publishes on MQTT availability — skip the cycle
-  if the MQTT integration isn't connected (no exceptions on a disconnected broker). A `push_enable`
-  switch being OFF makes the cycle a no-op (fallback mode).
+  if the MQTT integration isn't connected (no exceptions on a disconnected broker).
+- **Single-toggle stack switch** — `switch.light_man_push_enable` is the sole control. ON: the push
+  runs **and** Light Man sets each source's `legacy_enable` boolean OFF (tick a16–a19 stop). OFF: the
+  push is a no-op **and** Light Man sets the `legacy_enable` booleans back ON (tick resumes the old
+  consolidated flood). On startup it reconciles the booleans to match its own state so the two stacks
+  are never active together. This is the one-flip fallback through Phase 1.
 - **Write-on-change dedup** — keep last-published per (source, target) in memory only; skip unchanged.
   Replaces `input_text.al_last_published`. `always_update=False` on the coordinator. No `Store`: the
   push is level-triggered, so after a restart the first cycle per source just re-publishes once
@@ -249,9 +267,10 @@ PHCC/mypy per `CLAUDE.md`. Memory files `light_man_audit.md` / `light_man_test_e
 - **Entities/services** — `sensor`: one **active-holds** sensor (state = count of held rooms; attrs
   list each room + its `expires_at`). A single holds sensor avoids creating/destroying per-room
   entities as holds come and go. Push-health data (last publish, last value, dedup skips, addressing
-  mode) lives in `diagnostics.py`, **not** a live sensor. `switch`: one global push-enable
-  (fallback kill-switch). Services: `release_hold`, `clear_holds`, `force_push`. (No `arm_hold`
-  service — arming is the tap-subscription's job.)
+  mode) lives in `diagnostics.py`, **not** a live sensor. `switch`: one global push-enable — the
+  single-toggle stack switch that also drives the `legacy_enable` booleans (above). Services:
+  `release_hold`, `clear_holds`, `force_push`. (No `arm_hold` service — arming is the
+  tap-subscription's job.)
 
 ### 1.5 Per-source day/night color mode (live feature, baked in)
 Generalize today's hallway-only night-RGB into a per-source **{day, night} × {color_temp, rgb}**
@@ -264,16 +283,19 @@ matrix, enforced **directly in the push** (no blueprint, no shadow config):
   dedup key so an rgb↔color_temp flip always publishes.
 - Stored per source in the seed JSON (§1.3); migrates into the Phase-2 adaptive-target profile.
 
-### 1.6 Deployment & cutover
-1. Robocopy + restart; Light Man starts with **push-enable OFF** (observes only).
-2. Disable tick areas a16–a19 (the 4 consolidated floods) in the tick automation instance.
-3. Flip Light Man push-enable ON. Verify floods now originate from Light Man.
-4. **Fallback at any time:** push-enable OFF + re-enable a16–a19 → old behavior restored in one step.
+### 1.6 Deployment & cutover (single toggle)
+1. Robocopy + restart; Light Man starts with **push-enable OFF** → on startup it reconciles the
+   `legacy_enable` booleans **ON**, so the tick keeps flooding exactly as today (zero behavior change).
+2. **Flip `push_enable` ON** → Light Man drives the `legacy_enable` booleans OFF and takes over the
+   push. Verify floods now originate from Light Man.
+3. **Revert any time:** flip `push_enable` OFF → the `legacy_enable` booleans go back ON and the old
+   consolidated flood resumes. One switch, both directions; the two stacks never overlap.
 
 ### 1.7 Buildable now vs. validate live
 - **Unit-testable against mocked MQTT (build now):** push payload build (bri/mired/color-mode/dedup),
   addressing selection (consolidated vs per-room by hold set), hold arm/release/TTL, action-string →
   hold mapping, off→on release from a switch-state message, immediate-push snap on release,
+  single-toggle behavior (push_enable flip drives `legacy_enable` inverse + startup reconcile),
   config-load validation (incl. holdable-room `set_topic` chain), services.
 - **Requires live HA/Z2M (validate locally):** real group/topic enumeration for the seed JSON;
   AL dummy-switch attribute confirmation; action + switch-state topic shapes; end-to-end scene survival
@@ -303,7 +325,9 @@ matrix, enforced **directly in the push** (no blueprint, no shadow config):
   Functional, after cutover (§1.6): set Day scene in a room → that source switches to per-room floods,
   the held room is skipped, scene survives ≥2 push cycles; tap-on (`up_single`) → instant snap to AL +
   re-included; off→on → adapts; a hold with no tap-on → auto-expires at next solar midnight; steady
-  state with no holds → exactly 4 consolidated floods (today's RF). Color mode: flip a source's
+  state with no holds → exactly 4 consolidated floods (today's RF). **Single toggle:** flip
+  `push_enable` OFF → the `legacy_enable` booleans flip ON and the tick resumes (no double-flood, no
+  gap); flip ON → Light Man takes over and the booleans flip OFF. Color mode: flip a source's
   day/night mode → payload switches rgb↔color_temp; defaults reproduce today (overhead/accent always
   color_temp; hallway rgb at night).
 - **Quality:** drive `light_man_audit.md` toward Silver.

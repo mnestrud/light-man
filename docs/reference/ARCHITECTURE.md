@@ -178,7 +178,12 @@ increase, bounded by hold lifetime; steady state (no holds) is unchanged at 4 co
 - **Switch taps (Phase 1):** Light Man **subscribes to the Inovelli action + state topics** and manages
   holds. Look application, LED effects, PowerView shade scenes, accent toggling, and the held-dim ramp
   stay in the switch-taps blueprint. The tick blueprint keeps a1–a15 (Inovelli unicast); **a16–a19 are
-  disabled and owned by Light Man** — re-enabling them is the instant fallback.
+  owned by Light Man** via the single-toggle below.
+- **Single-toggle fallback (until Phase 2):** `switch.light_man_push_enable` is the sole control — ON
+  runs the push and drives the legacy a16–a19 enable booleans (`adaptive_lighting_overhead_all`,
+  `…_accent_all`, `…_switch_hallway`) OFF; OFF no-ops the push and drives them back ON; startup
+  reconciles them to the switch state. The two stacks are never active together; reverting is one flip.
+  This legacy-boolean coupling is removed in Phase 2 when the tick retires.
 
 ---
 
@@ -226,6 +231,9 @@ increase, bounded by hold lifetime; steady state (no holds) is unchanged at 4 co
    retired), not phase-aligned to it.
 5. **Hold TTL** — single rule: `expires_at = next solar midnight`.
 6. **RF during holds** — accept the transient per-room-flood increase; steady state unchanged.
+7. **Stack toggle** — a single `switch.light_man_push_enable` swaps the whole stack: it drives the
+   legacy a16–a19 enable booleans to the inverse of its own state (with a startup reconcile), so new
+   and old never flood together and reverting is one flip. Temporary; removed in Phase 2.
 
 ---
 
