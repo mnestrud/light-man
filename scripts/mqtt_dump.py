@@ -30,6 +30,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import json
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -460,6 +461,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     """Resolve the connection, connect, and run the requested mode."""
+    # Windows consoles default to cp1252 and crash on non-latin payload bytes
+    # (e.g. U+2212 in Z2M device descriptions); force UTF-8 output.
+    reconfigure = getattr(sys.stdout, "reconfigure", None)
+    if reconfigure is not None:
+        reconfigure(encoding="utf-8")
     args = build_parser().parse_args()
     host, port, user, password = resolve_connection(args)
     print(f"Connecting to {host}:{port} as {user!r} ...")
