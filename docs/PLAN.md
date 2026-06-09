@@ -1,5 +1,11 @@
 # Plan — Light Man Phase 1: own the adaptive push + scene-hold (regression fix)
 
+> **STATUS — Phase 1 DELIVERED & live (2026-06-09, v0.2.0).** Cut over on the live house
+> (`switch.light_man_adaptive_push` ON); soaking for a day or so of observation. `dev` pushed, local
+> gate green (100% cov, mypy-strict). Live-verified: night hold survives, off-respect, real toggle,
+> blueprint + occupancy gated. Open items deliberately deferred to Phase 2 (see roadmap). Not tagged;
+> live HA-config edits intentionally left uncommitted in `ha_vibecode_git`.
+
 > **Redesign note (2026-06-09, v0.2.0).** The live cutover surfaced an architectural conflict: the
 > switch-taps blueprint and Light Man were two adaptive brains fighting over the same rooms, and the
 > hold model inferred release from noisy switch on/off bounce. Light Man is now the **single adaptive
