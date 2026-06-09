@@ -45,46 +45,46 @@ Target: **Silver before first internal release.** Gold/Platinum tracked but not 
 
 | Rule | Status | Notes |
 |---|---|---|
-| `action-setup` | 🔜 | Register `release_hold`/`clear_holds`/`force_push` during `async_setup_entry`; `services.yaml`. |
-| `appropriate-polling` | 🔜 | The own ~30 s push timer is our "poll"; coordinator `update_interval` = push interval, `always_update=False`. |
+| `action-setup` | ✅ | `release_hold`/`clear_holds`/`force_push` registered in `async_setup_entry` (`services.py`, `async_register_services`); `services.yaml` present. |
+| `appropriate-polling` | ✅ | Coordinator `update_interval = push_interval_s`, `always_update=False` (`coordinator.py`). |
 | `brands` | 🚫 | Personal orchestrator, not submitted to `home-assistant/brands`. Revisit only if published to HACS/core. |
-| `common-modules` | 🔜 | `coordinator.py`, `const.py`, base entity module — standard layout. |
-| `config-flow-test-coverage` | 🔜 | 100% on `config_flow` (gated separately from the 95% overall). |
-| `config-flow` | ✅ | `config_flow: true`; single-instance user step exists (trivial confirm in Phase 1). |
+| `common-modules` | ✅ | `coordinator.py`, `const.py`, `entity.py` base — standard layout. |
+| `config-flow-test-coverage` | ✅ | 100% on `config_flow` (`tests/test_config_flow.py`). |
+| `config-flow` | ✅ | `config_flow: true`; single-instance confirm step (`single_config_entry` enforces the abort). |
 | `dependency-transparency` | ✅ | `manifest.requirements: []`; only `dependencies: ["mqtt"]` (HA core). Nothing opaque. |
 | `docs-actions` | ⬜ | Document the three services. (docs) |
 | `docs-high-level-description` | ⬜ | README overview. (docs) |
 | `docs-installation-instructions` | ⬜ | Install + prerequisites. (docs) |
 | `docs-removal-instructions` | ⬜ | Uninstall guidance. (docs) |
-| `entity-event-setup` | 🔜 | MQTT subscriptions set up in `async_added_to_hass`, torn down on remove (no subscribe in `__init__`). |
-| `entity-unique-id` | 🔜 | Locked scheme `{entry_id}_{room|source}_{kind}` (PLAN identity). |
-| `has-entity-name` | 🔜 | `_attr_has_entity_name = True` on the base entity. |
-| `runtime-data` | 🔜 | Store coordinator/state on `ConfigEntry.runtime_data` (typed), not `hass.data[DOMAIN]`. |
+| `entity-event-setup` | ✅ | MQTT subs are coordinator-owned (`_async_setup`), not entity-level; torn down in `async_unload_entry` via `shutdown_subscriptions()`. Entities are `CoordinatorEntity` (no direct event subs). |
+| `entity-unique-id` | ✅ | `{entry_id}_{kind}` in `entity.py` (the `{room\|source}` slot is unused for the singletons). |
+| `has-entity-name` | ✅ | `_attr_has_entity_name = True` on `LightManEntity`. |
+| `runtime-data` | ✅ | Typed `LightManData` on `entry.runtime_data` (`__init__.py`); no `hass.data[DOMAIN]`. |
 | `test-before-configure` | 🚫 | Phase-1 config is a singleton confirm with **no external connection to validate** (topology is Store-seeded; MQTT availability handled at runtime). Revisit in Phase 2 when the OptionsFlow adds validatable input. |
-| `test-before-setup` | 🔜 | `_async_setup()` raises `ConfigEntryNotReady` if the Store load / config validation fails. |
+| `test-before-setup` | ✅ | `async_setup_entry` raises `ConfigEntryNotReady` on missing/invalid seed (`tests/test_init.py`). |
 | `unique-config-entry` | ✅ | `single_config_entry: true`. |
 
 ## 🥈 Silver (10) — release target
 
 | Rule | Status | Notes |
 |---|---|---|
-| `action-exceptions` | 🔜 | Services raise `ServiceValidationError` (bad input) / `HomeAssistantError` (runtime). |
-| `config-entry-unloading` | 🔜 | `async_unload_entry` cancels the timer, unsubscribes MQTT, pops state. |
+| `action-exceptions` | ✅ | `release_hold` raises `ServiceValidationError` (unknown room / not loaded); push wraps broker errors, never raising on a disconnected broker. |
+| `config-entry-unloading` | ✅ | `async_unload_entry` unloads platforms, `shutdown_subscriptions()`, drops services on the last entry; the timer is cancelled by `coordinator.async_shutdown` (auto-registered on unload). |
 | `docs-configuration-parameters` | ⬜ | Document seed-JSON fields. (docs) |
 | `docs-installation-parameters` | ⬜ | Document setup. (docs) |
-| `entity-unavailable` | 🔜 | `available` property tied to coordinator success + MQTT connectivity. |
+| `entity-unavailable` | ✅ | Entities are `CoordinatorEntity` (`available` = `last_update_success`). MQTT outage is surfaced via diagnostics, not entity-unavailable, so hold state stays visible. |
 | `integration-owner` | ✅ | `codeowners: ["@mnestrud"]` in manifest. |
-| `log-when-unavailable` | 🔜 | Log MQTT connectivity transitions once (not per cycle); `LOGGER_HOLD` / coordinator logger. |
-| `parallel-updates` | 🔜 | Set `PARALLEL_UPDATES` in `sensor.py` / `switch.py`. |
+| `log-when-unavailable` | ✅ | `_set_mqtt_available` logs once on each MQTT connectivity transition (not per cycle). |
+| `parallel-updates` | ✅ | `PARALLEL_UPDATES = 0` in `sensor.py` and `switch.py`. |
 | `reauthentication-flow` | 🚫 | No integration-owned credentials; MQTT auth is owned by HA core. N/A. |
-| `test-coverage` | 🔜 | `--cov-fail-under=95` gate (local). |
+| `test-coverage` | ✅ | 100% coverage; local gate `--cov-fail-under=95`. |
 
 ## 🥇 Gold (24 per index; 21 enumerated) — future tier
 
 | Rule | Status | Notes |
 |---|---|---|
-| `devices` | ⬜ | Consider a hub device (or per-source devices). Decide at Gold. |
-| `diagnostics` | 🔜 | `diagnostics.py` is already in the Phase-1 plan (ahead of tier) — push-health + config dump, redacted. |
+| `devices` | ✅ | One hub service device (`DeviceInfo`, `DeviceEntryType.SERVICE`) hosts both singletons (`entity.py`). |
+| `diagnostics` | ✅ | `diagnostics.py` dumps push-health + hold state + config shape (no secrets) — ahead of tier. |
 | `discovery` | 🚫 | Nothing to discover; topology is Store-seeded (Phase 1) / OptionsFlow (Phase 2). |
 | `discovery-update-info` | 🚫 | No discovery. |
 | `docs-data-update` | ⬜ | Document the push/adaptive model. (docs) |
@@ -95,12 +95,12 @@ Target: **Silver before first internal release.** Gold/Platinum tracked but not 
 | `docs-troubleshooting` | ⬜ | (docs) |
 | `docs-use-cases` | ⬜ | (docs) |
 | `dynamic-devices` | 🚫 | Fixed house topology from the seed; no runtime device addition. |
-| `entity-category` | 🔜 | `EntityCategory.DIAGNOSTIC` on the active-holds / health entities (ahead of tier). |
-| `entity-device-class` | 🔜 | No natural device class for a holds-count sensor; apply where applicable, else N/A per-entity. |
-| `entity-disabled-by-default` | 🔜 | Diagnostic entities `entity_registry_enabled_default=False` as appropriate. |
-| `entity-translations` | 🔜 | `translation_key` + `translations/en.json` (ahead of tier). |
-| `exception-translations` | 🔜 | Error `translation_key`s in `strings.json` (ahead of tier). |
-| `icon-translations` | 🔜 | `icons.json` is in the Phase-1 plan; never `_attr_icon` on translated entities (ahead of tier). |
+| `entity-category` | ✅ | active-holds = `DIAGNOSTIC`, push-enable = `CONFIG` (`sensor.py`/`switch.py`). |
+| `entity-device-class` | 🚫 | No natural device class for a holds-count sensor or a stack toggle; N/A per-entity. |
+| `entity-disabled-by-default` | 🔜 | Both singletons are intentionally enabled (control + at-a-glance holds). Revisit if noisier diagnostic entities are added. |
+| `entity-translations` | ✅ | `translation_key` on both entities + `strings.json`/`translations/en.json` (ahead of tier). |
+| `exception-translations` | ✅ | `not_loaded` / `unknown_room` `translation_key`s in `strings.json`; raised from `services.py` (ahead of tier). |
+| `icon-translations` | ✅ | `icons.json` for entities + services; no `_attr_icon` on translated entities (ahead of tier). |
 | `reconfiguration-flow` | ⬜ | The Phase-2 OptionsFlow (adaptive profiles) is the natural home. |
 | `repair-issues` | ⬜ | Strong candidate: surface native-Hue orphan coverage / unmapped bulbs as a repair issue. |
 | `stale-devices` | 🚫 | Only if/when `devices` is implemented; no device churn otherwise. |
@@ -111,7 +111,7 @@ Target: **Silver before first internal release.** Gold/Platinum tracked but not 
 |---|---|---|
 | `async-dependency` | ✅ | No external I/O dependency (MQTT via HA core). `astral` (Phase 2) is sync but CPU-only (<1 ms), not I/O. |
 | `inject-websession` | 🚫 | No HTTP/websession used (MQTT only). N/A. |
-| `strict-typing` | 🔜 | mypy `strict` already on; keep `py.typed`, full annotations, TypedDicts for config/hold/payload. |
+| `strict-typing` | ✅ | mypy `strict` passes with `py.typed`, full annotations, and TypedDicts (config/hold/payload) — 0 errors. |
 
 ---
 
