@@ -24,3 +24,6 @@ htmlcov/
 .vscode/
 .DS_Store
 Thumbs.db
+
+# Local MCP config — contains the HA long-lived token; never commit
+.mcp.json
