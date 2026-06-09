@@ -70,7 +70,7 @@ async def test_enable_floods_and_legacy_off(
     await coordinator.async_set_push_enabled(enabled=True)
     await hass.async_block_till_done()
     pubs = published(mqtt_mock)
-    assert pubs[OVERHEAD_ALL] == DAY
+    assert pubs[LR_SET] == DAY  # overhead now addresses per-room
     assert HALL_UP in pubs
     assert hass.states.get(LEG_OVERHEAD).state == "off"
     assert hass.states.get(LEG_HALL).state == "off"
@@ -159,7 +159,7 @@ async def test_up_single_releases(
     _fire(hass, LR_SWITCH, {"action": "up_single"})
     await hass.async_block_till_done()
     assert coordinator.data["held_count"] == 0
-    assert OVERHEAD_ALL in published(mqtt_mock)
+    assert LR_SET in published(mqtt_mock)
 
 
 async def test_down_single_also_releases(
@@ -185,7 +185,7 @@ async def test_paddle_off_still_staged(
     _fire(hass, LR_SWITCH, {"state": "OFF"})
     await hass.async_block_till_done()
     # All rooms still adaptive -> consolidated flood includes the off room.
-    assert OVERHEAD_ALL in published(mqtt_mock)
+    assert LR_SET in published(mqtt_mock)
 
 
 async def test_paddle_on_repushes_room(
@@ -198,7 +198,7 @@ async def test_paddle_on_repushes_room(
     mqtt_mock.async_publish.reset_mock()
     _fire(hass, LR_SWITCH, {"state": "ON"})
     await hass.async_block_till_done()
-    assert OVERHEAD_ALL in published(mqtt_mock)
+    assert LR_SET in published(mqtt_mock)
 
 
 async def test_paddle_state_unchanged_is_noop(
@@ -285,7 +285,7 @@ async def test_ttl_sweep_clears_expired(
     await coordinator.async_refresh()
     await hass.async_block_till_done()
     assert coordinator.data["held_count"] == 0
-    assert OVERHEAD_ALL in published(mqtt_mock)
+    assert LR_SET in published(mqtt_mock)
 
 
 async def test_dedup_skips_unchanged(
@@ -310,7 +310,7 @@ async def test_force_push_bypasses_dedup(
     mqtt_mock.async_publish.reset_mock()
     await coordinator.async_force_push()
     await hass.async_block_till_done()
-    assert OVERHEAD_ALL in published(mqtt_mock)
+    assert LR_SET in published(mqtt_mock)
 
 
 async def test_disabled_force_push_is_noop(
@@ -355,7 +355,7 @@ async def test_adaptive_unavailable_skips_source(
     await coordinator.async_set_push_enabled(enabled=True)
     await hass.async_block_till_done()
     pubs = published(mqtt_mock)
-    assert OVERHEAD_ALL not in pubs
+    assert LR_SET not in pubs  # overhead source skipped
     assert HALL_UP in pubs
 
 
@@ -368,7 +368,7 @@ async def test_adaptive_missing_attributes_skips_source(
     mqtt_mock.async_publish.reset_mock()
     await coordinator.async_set_push_enabled(enabled=True)
     await hass.async_block_till_done()
-    assert OVERHEAD_ALL not in published(mqtt_mock)
+    assert LR_SET not in published(mqtt_mock)
 
 
 async def test_mqtt_disabled_skips_publish(
@@ -425,4 +425,4 @@ async def test_reconcile_without_legacy_enable(
     await coord._async_setup()
     await coord.async_set_push_enabled(enabled=True)
     await hass.async_block_till_done()
-    assert OVERHEAD_ALL in published(mqtt_mock)
+    assert LR_SET in published(mqtt_mock)

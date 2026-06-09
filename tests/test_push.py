@@ -109,9 +109,12 @@ def _plan(modes: dict[str, str]) -> list[tuple[str, Any]]:
     )
 
 
-def test_plan_consolidated_when_all_adaptive() -> None:
-    # Off rooms are NOT skipped — they stage color-while-off via the flood.
-    assert _plan({}) == [("zigbee2mqtt/zgb_overhead_all/set", DAY)]
+def test_plan_per_room_always() -> None:
+    # Sources with rooms always address per-room (no consolidated flood).
+    plan = dict(_plan({}))
+    assert plan["zigbee2mqtt/zgb_living_room/set"] == DAY
+    assert plan["zigbee2mqtt/zgb_kitchen/set"] == DAY
+    assert "zigbee2mqtt/zgb_overhead_all/set" not in plan
 
 
 def test_plan_per_room_with_a_night_hold() -> None:
