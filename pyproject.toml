@@ -41,7 +41,7 @@ convention = "pep257"
 max-complexity = 10
 
 [tool.ruff.lint.per-file-ignores]
-"tests/*" = ["S101", "D"]   # asserts + docstrings not required in tests
+"tests/*" = ["S101", "D", "SLF001"]   # asserts + docstrings + private access OK in tests
 "scripts/*" = ["T20"]       # dev utilities print to stdout
 
 [tool.pytest.ini_options]
