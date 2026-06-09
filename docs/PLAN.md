@@ -301,6 +301,30 @@ matrix, enforced **directly in the push** (no blueprint, no shadow config):
   AL dummy-switch attribute confirmation; action + switch-state topic shapes; end-to-end scene survival
   and the consolidated↔per-room RF behavior under a hold.
 
+## Quality & compliance (local-first)
+
+Full sourced checklist: **`memory/light_man_audit.md`** — every HA Quality-Scale rule (Bronze 19 /
+Silver 10 / Gold 24 / Platinum 3) and the relevant ADRs, each statused, with ignored items documented
++ reasoned for later work. Sources of truth: the
+[quality-scale rules](https://developers.home-assistant.io/docs/core/integration-quality-scale/rules)
+and the [ADR index](https://github.com/home-assistant/architecture/tree/master/adr). **Target: Silver
+before first internal release.**
+
+**Compliance runs locally, not via GitHub Actions** (the GHA `validate.yml` is only a redundant
+backstop on push — the per-change loop must be fast):
+- **`pre-commit`** (`.pre-commit-config.yaml`, all `repo: local` venv tools): ruff lint+fix, ruff
+  format, mypy-strict on **every commit**; pytest (+coverage) on **pre-push**.
+- **`scripts/check.ps1`**: full local gate on demand (ruff format-check + lint + mypy + pytest+cov).
+- **`pyproject.toml`**: mypy `strict`; ruff strict select + `mccabe max-complexity = 10`; pytest
+  `--cov-fail-under=95`.
+
+**Bake in from the first commit of each file** (design-shaping — costly to retrofit): typed
+`runtime_data` + TypedDicts (config / hold record / push payload); `unique_id` scheme;
+`has_entity_name`; MQTT subscribe/unsubscribe in `async_added_to_hass`/teardown (`entity-event-setup`);
+`available` property; `action-exceptions` with exception `translation_key`s; `async_unload_entry`
+cleanup; `PARALLEL_UPDATES`; tz-aware datetimes (DTZ); lazy `%` logging; diagnostics redaction. The
+mechanical lint rules are enforced continuously by the local stack — no deferred "compliance pass."
+
 ## Phase 2+ — Roadmap (future, not committed by this approval)
 
 - **Replace AL dummy switches with Light Man adaptive-target profiles** (your "adaptive targets only"

@@ -1,3 +1,6 @@
 pytest-homeassistant-custom-component==0.13.316
 mypy==1.20.2
 ruff
+pre-commit
+# Pin ruff and pre-commit to their installed versions once the venv is created
+# (capture `ruff --version` / `pre-commit --version`) for reproducible local gating.

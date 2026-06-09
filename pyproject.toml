@@ -8,8 +8,41 @@ target-version = "py313"
 line-length = 88
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B", "ASYNC"]
+# Curated strict set — the bake-in-now lint gate. Rationale + per-rule sourcing
+# live in memory/light_man_audit.md. Run locally (pre-commit / scripts/check.ps1),
+# not as the per-commit GitHub Actions loop.
+select = [
+    "E", "W", "F",   # pycodestyle + pyflakes
+    "I",             # isort (import order)
+    "UP",            # pyupgrade
+    "B",             # flake8-bugbear
+    "ASYNC",         # async pitfalls (blocking calls in async)
+    "C90",           # mccabe complexity
+    "N",             # pep8-naming
+    "D",             # pydocstyle
+    "S",             # flake8-bandit (security)
+    "DTZ",           # flake8-datetimez (tz-aware datetimes — solar midnight / elevation)
+    "G",             # flake8-logging-format (lazy %, no f-strings in log calls)
+    "LOG",           # flake8-logging
+    "T20",           # flake8-print (no stray print)
+    "SIM",           # flake8-simplify
+    "RET",           # flake8-return
+    "TC",            # flake8-type-checking
+    "TID",           # flake8-tidy-imports
+    "PTH",           # flake8-use-pathlib
+    "RUF",           # ruff-specific
+]
+
+[tool.ruff.lint.pydocstyle]
+convention = "pep257"
+
+[tool.ruff.lint.mccabe]
+# Keep the coordinator from growing a monster method.
+max-complexity = 10
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S101", "D"]  # asserts + docstrings not required in tests
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
-addopts = "-p no:socket --cov=custom_components/light_man --cov-report=term-missing"
+addopts = "-p no:socket --cov=custom_components/light_man --cov-report=term-missing --cov-fail-under=95"

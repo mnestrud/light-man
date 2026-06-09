@@ -1,0 +1,42 @@
+# Local compliance stack — runs entirely from the project venv (no network, no
+# GitHub Actions in the per-change loop). All hooks call the pinned venv tools, so
+# the local gate and any CI backstop use the same versions.
+#
+# One-time install (after the venv exists — see CLAUDE.md "Running Tests Locally"):
+#   .venv/Scripts/pre-commit install --install-hooks
+#   .venv/Scripts/pre-commit install --hook-type pre-push
+# Run on demand:
+#   .venv/Scripts/pre-commit run --all-files
+#
+# Fast hooks (ruff + mypy) run on every commit; pytest runs on push so commits stay quick.
+fail_fast: false
+repos:
+  - repo: local
+    hooks:
+      - id: ruff-check
+        name: ruff (lint + autofix)
+        entry: .venv/Scripts/ruff
+        language: system
+        args: ["check", "--fix"]
+        types_or: [python, pyi]
+      - id: ruff-format
+        name: ruff (format)
+        entry: .venv/Scripts/ruff
+        language: system
+        args: ["format"]
+        types_or: [python, pyi]
+      - id: mypy
+        name: mypy (strict)
+        entry: .venv/Scripts/mypy
+        language: system
+        args: ["custom_components/light_man"]
+        pass_filenames: false
+        types: [python]
+      - id: pytest
+        name: pytest (+coverage ≥95%)
+        entry: .venv/Scripts/pytest
+        language: system
+        args: ["tests/", "-q"]
+        pass_filenames: false
+        types: [python]
+        stages: [pre-push]
