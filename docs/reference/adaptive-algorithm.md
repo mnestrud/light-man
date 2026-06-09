@@ -105,6 +105,8 @@ for "let me set sunrise/sunset but don't screw up mid-day circadian."
   "min_br": 30, "max_br": 90,
   "min_ct": 2700, "max_ct": 6500,
   "sat": 0.5,                       // brightness saturation fraction of today's noon
+  "base_color_mode": "color_temp",  // awake/day color: color_temp | rgb
+  "base_rgb": null,                 // fixed daytime color when base_color_mode == rgb
   "dusk_floor_ct": 2200, "night_floor_br": 30,
   "sleep": { "br": 30, "color_mode": "color_temp", "ct": 2200, "rgb": null,
              "ramp_in": "90m", "ramp_out": "30m" },
@@ -114,6 +116,15 @@ for "let me set sunrise/sunset but don't screw up mid-day circadian."
 ```
 Globals: `REF = 71.5` (fixed), twilight band `−18°`, perceptual brightness + mired color (engine
 constants, not per-source).
+
+**Per-regime color mode — explicit configured RGB (generalizes Phase-1 §1.5).** Each source carries a
+`base_color_mode` (`color_temp` | `rgb`) for the awake/day target; the sleep target already has its own
+`color_mode`/`rgb`. When `base_color_mode == rgb`, the base/day target emits a **fixed configured
+`base_rgb`** (brightness still elevation-driven), *not* an elevation-derived `color_temp` — today there
+is **no** daytime single-color option, so this is new. Night color comes from `sleep.rgb`. So e.g.
+`hallway_up = { base_color_mode: rgb, base_rgb: [r,g,b] }` runs a set day RGB and blends to a set night
+RGB (`sleep.rgb`). Both colors are owned by Light Man, replacing the AL switch's `rgb_color` / sleep-rgb
+(removed in Phase 2). A source with no rgb in either regime is unaffected (pure `color_temp`).
 
 ## Carrying the current AL config forward
 
@@ -126,9 +137,9 @@ hallway `sleep_transition`.
 ## Engine (per push)
 ```
 e = solar_elevation(now + transition_lookahead)
-base = regime_target(e)                      # regimes 1–3 above
+base = regime_target(e)                      # regimes 1–3; color = base_rgb if base_color_mode==rgb
 if day_window.enabled: base = gate(base, now, day_window)
-target = blend(base, sleep_target, sleep_ramp(now))
+target = blend(base, sleep_target, sleep_ramp(now))   # sleep color = sleep.rgb when sleep rgb
 emit(brightness=perceptual→254, color_temp=mired | rgb)   # → push §1.5
 ```
 Pure math, no I/O, <1 ms — fully unit-testable (elevation is the only input; freeze the clock + lat/long

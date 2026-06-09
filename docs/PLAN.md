@@ -377,7 +377,11 @@ mechanical lint rules are enforced continuously by the local stack — no deferr
   dusk ramp, a **sleep toggle switch** (`switch.light_man_sleep`, ramp_in/ramp_out — schedule owned by
   the user) and an **optional forced day-window** that gates the edges without distorting midday. An
   **OptionsFlow** edits the per-source profiles; the coordinator computes values internally and the
-  HACS AL integration is removed. The per-source color mode (§1.5) migrates into the profile.
+  HACS AL integration is removed. The per-source color mode (§1.5) migrates into the profile,
+  **generalized to explicit configured RGB colors per regime**: a fixed daytime/awake `base_rgb`
+  (new — there is no daytime single-color option today) and the night/sleep `sleep.rgb`, both owned by
+  Light Man and replacing the AL switch's sleep-rgb (removed). E.g. hallway_up runs a set day RGB and a
+  set night RGB. (Schema in `docs/reference/adaptive-algorithm.md` → `base_color_mode`/`base_rgb`.)
 - Absorb tick a1–a15 (Inovelli `defaultLevel`/LED unicast) and retire the tick blueprint entirely.
 - Optionally migrate the switch-taps blueprint's look application + held-dim ramp + occupancy.
 - Preserve KB-encoded fixes (latch, off-prestage, hue native control, SBM binding) as behavior +
