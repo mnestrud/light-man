@@ -135,7 +135,8 @@ flowchart TD
   and off→on release via the Inovelli switch state topics.
 - **Z2M keeps owning device I/O:** groups, bindings, `hue_native_control`, Inovelli SBM. Light Man
   talks to Z2M **only via MQTT** — group/switch `/set` publishes (fire-and-forget) + `…/action` and
-  switch-state subscribes.
+  switch-state subscribes. All payloads use only the **validated Z2M command vocabulary** (canonical
+  exposes/options; `docs/reference/z2m-mqtt-commands.md`) — never HA entity state.
 - **Blueprints keep:** tick a1–a15 (Inovelli unicast); the switch-taps blueprint's look application,
   LED effects, PowerView shade scenes, accent toggling, held-dim ramp. Light Man only *observes* taps
   to manage holds — it does **not** apply the Day/Night look (the blueprint still does), it just stops
@@ -151,9 +152,12 @@ Done and committed (`0ddfbec`, `d0412fc`): public repo (MIT), `dev`/`main`, `.gi
 `custom_components/light_man/` scaffold, `hacs.json`, `pyproject.toml`, `requirements_test.txt`.
 (Phase-0 `__init__.py`/`const.py` docstrings cleaned of stale membership/reconciler text.)
 
-**Still outstanding (local, one-time):** Windows PHCC env — venv, copy `sitecustomize.py`, pin
-PHCC/mypy per `CLAUDE.md`. Memory files `light_man_audit.md` / `light_man_test_env.md` and the
-`## Integration: Light Man` MEMORY.md section are created locally (cannot be done in the cloud).
+**Local env — DONE (2026-06-09):** Windows venv (python3.13.13, HA 2026.2.3, `sitecustomize.py`,
+pinned ruff/mypy/PHCC/pre-commit); local gate live (hosted-ruff pre-commit + `scripts/check.sh`,
+see `memory/light_man_test_env.md`); memory files `light_man_audit.md` + `light_man_test_env.md` +
+harness `MEMORY.md` index created; HA MCP wired (`.mcp.json`) and verified; validated MQTT helper
+`scripts/mqtt_dump.py` + command-language reference `docs/reference/z2m-mqtt-commands.md`; `CLAUDE.md`
+"Device I/O" rule (Zigbee read/write over MQTT, not HA state). `.gitattributes` pins LF.
 
 ## Phase 1 — Own the adaptive push + scene-hold (deliverable)
 
@@ -169,20 +173,25 @@ PHCC/mypy per `CLAUDE.md`. Memory files `light_man_audit.md` / `light_man_test_e
 | — | `coordinator.py` (push engine + hold manager + dedup), `sensor.py` (1 active-holds sensor), `switch.py` (1 push-enable switch), `services.yaml`, `icons.json`, `diagnostics.py` (incl. push-health data), `tests/` (incl. `conftest.py`), seed `light_man_config.json` |
 
 ### 1.2 Pre-checks (read-only, live)
-- Enumerate real membership of `zgb_overhead_all` / `zgb_accent_all` and the per-room groups + their
-  `/set` topics (the `z2m-groups.yaml` map is *reconstructed* — verify against `database.db` / the Z2M
-  frontend) → this populates the seed JSON.
+**Tooling:** all live pre-checks use `scripts/mqtt_dump.py` (`bridge`/`caps`/`options`/`tap`) over MQTT
+— Z2M ground truth, not HA state (see `docs/reference/z2m-mqtt-commands.md`).
+- Enumerate real membership of `zgb_overhead_all` (**confirmed 28 members**) / `zgb_accent_all`
+  (**3 members**) + the per-room groups and their `/set` topics via `mqtt_dump.py bridge` → populates
+  the seed JSON. (The `z2m-groups.yaml` map was *reconstructed*; the live read supersedes it.)
 - Confirm the AL dummy-switch entity ids + attributes per source (`al-source-scripts.yaml:12,22,32,43`).
-- Confirm the Inovelli `…/action` payload strings match the blueprint subtypes
-  (`config_single`, `config_double`, `up_single`, `up_held`, `down_held`, …) and the switch **state**
-  topic shape used for off→on detection.
-- **Native-Hue coverage check (load-bearing):** confirm **every** member of `zgb_overhead_all` /
-  `zgb_accent_all` belongs to a per-room group that is also `hue_native_control: true` — that is the
-  group Light Man addresses through during a hold. Per `z2m-groups.yaml` almost all per-room groups
-  already are; suspected orphans (no obvious native per-room group) are **front_door** and
-  **michael_closet** (overhead) and **under_vanity** (accent). For each orphan, create a
-  `hue_native_control: true` per-room group in Z2M (one-time), else that bulb loses color-while-off
-  prestage while another room in its source is held.
+- Capture the Inovelli `…/action` payload strings (`mqtt_dump.py tap`) — `config_single`,
+  `config_double`, `up_single`, `up_held`, `down_held`, … — and the switch **state** topic shape for
+  off→on detection.
+- **Native-Hue coverage check (load-bearing) — VERIFIED 2026-06-09.** Every consolidated member must
+  belong to a per-room group that is also `hue_native_control: true` (that group is what Light Man
+  addresses during a hold). 11 native per-room groups cover all but **4 orphan bulbs** (confirmed via
+  live `bridge/groups` + `configuration.yaml`): overhead → **Front Door Overhead Light 1 & 2**
+  (`0x…487d62`, `0x…487ebf`), **Michael Closet Overhead Light** (`0x…68c587`); accent → **Primary Bath
+  Under Vanity Lights** (`0x…32c84d`). **Action (one-time, before those rooms are hold-safe):** create
+  a `hue_native_control: true` per-room group for each (Z2M `bridge/request/group/add` +
+  `group/members/add` — manual; then `mqtt_dump.py options <group> '{"hue_native_control":true}'
+  --commit`). Until then, holding another room in `overhead`/`accent` leaves those 4 bulbs without
+  color-while-off prestage.
 - **Replaces the old §1.2 linchpin spike** — we no longer bet on Z2M rebuilding a flood for a smaller
   group; we build the per-room payload ourselves. The only "verify our port" check is that a
   hand-built per-room `/set` renders identically to the blueprint's consolidated one.
@@ -350,8 +359,10 @@ mechanical lint rules are enforced continuously by the local stack — no deferr
   color-mode matrix (incl. rgb-invalid fallback), hold arm/release/TTL, action-string mapping,
   off→on release, immediate-push snap on release, config-load validation, services.
 - **Live:** robocopy → `ha_restart` → `ha-integration-validator` "Validate light_man on live HA".
-  Functional, after cutover (§1.6): set Day scene in a room → that source switches to per-room floods,
-  the held room is skipped, scene survives ≥2 push cycles; tap-on (`up_single`) → instant snap to AL +
+  **Device-state checks read MQTT** (`mqtt_dump.py sub`/`bridge`), not HA entity attributes (per the
+  Device-I/O rule). Functional, after cutover (§1.6): set Day scene in a room → that source switches to
+  per-room floods, the held room is skipped (confirm membership via `mqtt_dump.py bridge`), scene
+  survives ≥2 push cycles; tap-on (`up_single`) → instant snap to AL +
   re-included; off→on → adapts; a hold with no tap-on → auto-expires at next solar midnight; steady
   state with no holds → exactly 4 consolidated floods (today's RF). **Single toggle:** flip
   `push_enable` OFF → the `legacy_enable` booleans flip ON and the tick resumes (no double-flood, no
