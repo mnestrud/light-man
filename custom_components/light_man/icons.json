@@ -1,0 +1,19 @@
+{
+  "entity": {
+    "sensor": {
+      "active_holds": {
+        "default": "mdi:lock"
+      }
+    },
+    "switch": {
+      "push_enable": {
+        "default": "mdi:lightbulb-auto"
+      }
+    }
+  },
+  "services": {
+    "release_hold": "mdi:lock-open",
+    "clear_holds": "mdi:lock-open-variant",
+    "force_push": "mdi:refresh"
+  }
+}

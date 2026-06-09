@@ -7,7 +7,47 @@
       }
     },
     "abort": {
-      "already_configured": "Light Man is already configured."
+      "single_instance_allowed": "Light Man is already configured (only one instance is supported)."
+    }
+  },
+  "entity": {
+    "sensor": {
+      "active_holds": {
+        "name": "Active holds"
+      }
+    },
+    "switch": {
+      "push_enable": {
+        "name": "Adaptive push"
+      }
+    }
+  },
+  "exceptions": {
+    "not_loaded": {
+      "message": "Light Man is not set up."
+    },
+    "unknown_room": {
+      "message": "Unknown room '{room}'."
+    }
+  },
+  "services": {
+    "release_hold": {
+      "name": "Release hold",
+      "description": "Release a room's scene hold so it returns to the adaptive push.",
+      "fields": {
+        "room": {
+          "name": "Room",
+          "description": "The room key whose hold should be released."
+        }
+      }
+    },
+    "clear_holds": {
+      "name": "Clear holds",
+      "description": "Release every scene hold and re-assert adaptive lighting everywhere."
+    },
+    "force_push": {
+      "name": "Force push",
+      "description": "Immediately re-publish every source, bypassing write-on-change dedup."
     }
   }
 }
