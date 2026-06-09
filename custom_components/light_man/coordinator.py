@@ -23,6 +23,7 @@ from homeassistant.components import mqtt
 from homeassistant.const import STATE_ON as HA_STATE_ON
 from homeassistant.const import STATE_UNAVAILABLE, STATE_UNKNOWN
 from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers.start import async_at_started
 from homeassistant.helpers.sun import get_astral_event_next
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.util import dt as dt_util
@@ -125,7 +126,7 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
     # --- lifecycle ----------------------------------------------------------
 
     async def _async_setup(self) -> None:
-        """Subscribe to switch topics and put the legacy stack in legacy mode."""
+        """Subscribe to switch topics; reconcile the legacy stack once HA is up."""
         for base in self._switch_map:
             self._unsubs.append(
                 await mqtt.async_subscribe(self.hass, base, self._handle_message)
@@ -135,7 +136,14 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
                     self.hass, base + ACTION_SUFFIX, self._handle_message
                 )
             )
-        # Starts disabled -> legacy stack on (tick + a16-a19 booleans).
+        # Defer the legacy reconcile until HA has started — the automation /
+        # input_boolean services aren't registered yet during entry setup.
+        self._unsubs.append(
+            async_at_started(self.hass, self._reconcile_legacy_on_start)
+        )
+
+    async def _reconcile_legacy_on_start(self, _hass: HomeAssistant) -> None:
+        """Put the legacy stack in legacy mode once HA (and its services) are up."""
         await self._reconcile_legacy(enabled=self.push_enabled)
 
     def shutdown_subscriptions(self) -> None:
