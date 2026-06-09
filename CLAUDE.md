@@ -257,3 +257,30 @@ Never commit to main directly. Open a PR (dev → main) when ready for release.
 ### What NOT to do
 - Do not edit Samba directly — git repo is source of truth; Samba is deploy target only
 - No `ha_write_file`, no patch subagents, no MCP file writes
+
+---
+
+## Device I/O — Zigbee via MQTT (not HA state)
+
+For any **Zigbee device** (Z2M-backed: Hue bulbs, Inovelli switches), read and write state/attributes
+**over MQTT**, never via HA entity state or the MCP `ha_*` tools — HA's attributes are an optimistic
+echo layer on top of Z2M (e.g. `hue_native_control` color is an echo). MQTT/Z2M is the device's ground
+truth. (HA-internal entities — Adaptive Lighting *dummy* switches, `input_boolean`s, template/helper
+entities — aren't Zigbee; use HA/MCP for those.)
+
+Use **`scripts/mqtt_dump.py`** (validated against the live converter data; reads read-only, writes need
+`--commit`). **Never hand-type raw `/set` payloads** — the helper only allows commands the device's own
+exposes/options declare. Canonical command language: `docs/reference/z2m-mqtt-commands.md`.
+
+Two layers (see the reference): **state** (`exposes` → `zigbee2mqtt/<name>/set`) and **options**
+(`ea.SET` config like `hue_native_control` → `bridge/request/{device,group}/options`, read from
+`configuration.yaml`). For a group, `/set` keys are the **union of member exposes**.
+
+```
+python scripts/mqtt_dump.py caps '<name>'                 # what's settable (per model)
+python scripts/mqtt_dump.py sub  'zigbee2mqtt/<name>'     # current state (retained = truth)
+python scripts/mqtt_dump.py set  '<name>' '<json>'        # dry-run; add --commit to apply + read back
+python scripts/mqtt_dump.py options '<group>'             # read hue_native_control etc.
+```
+
+Publishing changes a real device — confirm before `--commit` unless told to proceed.
