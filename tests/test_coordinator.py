@@ -174,20 +174,18 @@ async def test_down_single_also_releases(
     assert coordinator.data["held_count"] == 0
 
 
-async def test_paddle_off_skips_room(
+async def test_paddle_off_still_staged(
     hass: HomeAssistant, coordinator: Coord, mqtt_mock: Any
 ) -> None:
-    """A room whose paddle is off is never sent brightness (no re-on)."""
+    """An off room is NOT skipped — it stages color-while-off via the flood."""
     await coordinator.async_set_push_enabled(enabled=True)
     await hass.async_block_till_done()
     mqtt_mock.async_publish.reset_mock()
 
     _fire(hass, LR_SWITCH, {"state": "OFF"})
     await hass.async_block_till_done()
-    pubs = published(mqtt_mock)
-    assert LR_SET not in pubs
-    assert OVERHEAD_ALL not in pubs  # one room off forces per-room
-    assert pubs[KIT_SET] == DAY
+    # All rooms still adaptive -> consolidated flood includes the off room.
+    assert OVERHEAD_ALL in published(mqtt_mock)
 
 
 async def test_paddle_on_repushes_room(

@@ -39,7 +39,6 @@ from .const import (
     CONF_ROOMS,
     CONF_SLEEP_SWITCH,
     CONF_SOURCES,
-    CONF_SWITCHES,
     CONF_TRANSITION,
     DEFAULT_TRANSITION_S,
     MODE_ADAPTIVE,
@@ -105,11 +104,6 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
             room: source_key
             for source_key, source in config[CONF_SOURCES].items()
             for room in source.get(CONF_ROOMS, {})
-        }
-        self._room_switches: dict[str, list[str]] = {
-            room: list(room_cfg.get(CONF_SWITCHES, []))
-            for source in config[CONF_SOURCES].values()
-            for room, room_cfg in source.get(CONF_ROOMS, {}).items()
         }
         self._last_published: dict[tuple[str, str], PushPayload] = {}
         self._paddle_on: dict[str, bool] = {}
@@ -215,7 +209,6 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
             adaptive_payload=adaptive_payload,
             night_payload=build_night_payload(source, transition),
             modes={r: self._modes.mode_of(r) for r in rooms if self._modes.is_held(r)},
-            off_rooms={r for r in rooms if self._room_is_off(r)},
         )
         self.diagnostics["addressing"][key] = [topic for topic, _ in plan]
         for topic, payload in plan:
@@ -280,15 +273,6 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
             return False
         state = self.hass.states.get(sleep_switch)
         return state is not None and state.state == HA_STATE_ON
-
-    def _room_is_off(self, room: str) -> bool:
-        """Return True when every known paddle for ``room`` reports OFF."""
-        known = [
-            self._paddle_on[base]
-            for base in self._room_switches.get(room, [])
-            if base in self._paddle_on
-        ]
-        return bool(known) and not any(known)
 
     # --- modes --------------------------------------------------------------
 

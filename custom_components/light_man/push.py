@@ -96,12 +96,15 @@ def build_night_payload(source: SourceConfig, transition: float) -> PushPayload:
 def _room_target(
     mode: str,
     *,
-    off: bool,
     adaptive_payload: PushPayload,
     night_payload: PushPayload,
 ) -> PushPayload | None:
-    """Return a room's payload, or None to leave it untouched (off / frozen)."""
-    if off or mode == HELD_MANUAL:
+    """Return a room's payload, or None to leave it untouched (manually frozen).
+
+    Off rooms are still sent the value: ``hue_native_control`` stages it
+    color-while-off so the bulbs adapt while off and turn on uniform.
+    """
+    if mode == HELD_MANUAL:
         return None
     if mode == HELD_NIGHT:
         return night_payload
@@ -114,14 +117,13 @@ def plan_publishes(
     adaptive_payload: PushPayload,
     night_payload: PushPayload,
     modes: dict[str, str],
-    off_rooms: set[str],
 ) -> list[tuple[str, PushPayload]]:
     """Plan ``(topic, payload)`` publishes for a source this cycle.
 
-    Use the **consolidated** flood only when every room is on and wants the live
-    adaptive value (the cheap, uniform case). Otherwise address **per-room**,
-    skipping off and manually-frozen rooms (a brightness flood would re-on an
-    off bulb) and sending held rooms their own target.
+    Use the **consolidated** flood when every room wants the live adaptive value
+    (the cheap, uniform case — including off rooms, which stage color-while-off).
+    Otherwise address **per-room**: held rooms get their own target and
+    manually-frozen rooms are skipped.
     """
     rooms = source.get("rooms", {})
     if not rooms:
@@ -129,7 +131,6 @@ def plan_publishes(
     targets = {
         room: _room_target(
             modes.get(room, MODE_ADAPTIVE),
-            off=room in off_rooms,
             adaptive_payload=adaptive_payload,
             night_payload=night_payload,
         )

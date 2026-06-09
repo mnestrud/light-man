@@ -103,43 +103,35 @@ def test_build_night_payload_defaults() -> None:
     assert payload["color_temp"] == kelvin_to_mired(2700)  # default night ct
 
 
-def _plan(modes: dict[str, str], off: set[str]) -> list[tuple[str, Any]]:
+def _plan(modes: dict[str, str]) -> list[tuple[str, Any]]:
     return plan_publishes(
-        OVERHEAD,
-        adaptive_payload=DAY,
-        night_payload=NIGHT,
-        modes=modes,
-        off_rooms=off,
+        OVERHEAD, adaptive_payload=DAY, night_payload=NIGHT, modes=modes
     )
 
 
-def test_plan_consolidated_when_all_on_adaptive() -> None:
-    assert _plan({}, set()) == [("zigbee2mqtt/zgb_overhead_all/set", DAY)]
+def test_plan_consolidated_when_all_adaptive() -> None:
+    # Off rooms are NOT skipped — they stage color-while-off via the flood.
+    assert _plan({}) == [("zigbee2mqtt/zgb_overhead_all/set", DAY)]
 
 
 def test_plan_per_room_with_a_night_hold() -> None:
-    plan = dict(_plan({"living_room": "night"}, set()))
+    plan = dict(_plan({"living_room": "night"}))
     assert plan["zigbee2mqtt/zgb_living_room/set"] == NIGHT
     assert plan["zigbee2mqtt/zgb_kitchen/set"] == DAY
     assert "zigbee2mqtt/zgb_overhead_all/set" not in plan
 
 
-def test_plan_skips_off_room() -> None:
-    topics = [t for t, _ in _plan({}, {"living_room"})]
-    assert topics == ["zigbee2mqtt/zgb_kitchen/set"]
-
-
 def test_plan_skips_manual_freeze() -> None:
-    topics = [t for t, _ in _plan({"living_room": "manual"}, set())]
+    topics = [t for t, _ in _plan({"living_room": "manual"})]
     assert topics == ["zigbee2mqtt/zgb_kitchen/set"]
 
 
-def test_plan_all_off_publishes_nothing() -> None:
-    assert _plan({}, {"living_room", "kitchen"}) == []
+def test_plan_all_manual_publishes_nothing() -> None:
+    assert _plan({"living_room": "manual", "kitchen": "manual"}) == []
 
 
 def test_plan_no_rooms_is_consolidated() -> None:
     source = {"consolidated_topic": "zigbee2mqtt/zgb_hallway_up/set", "rooms": {}}
     assert plan_publishes(
-        source, adaptive_payload=DAY, night_payload=NIGHT, modes={}, off_rooms=set()
+        source, adaptive_payload=DAY, night_payload=NIGHT, modes={}
     ) == [("zigbee2mqtt/zgb_hallway_up/set", DAY)]
