@@ -1,0 +1,13 @@
+# Normalize all text files to LF in the repo and on checkout. This silences the
+# Windows "LF will be replaced by CRLF" warning and keeps line endings consistent
+# across machines and the cloud sessions (overrides per-machine core.autocrlf).
+* text=auto eol=lf
+
+# Common binaries — never touch line endings.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.db binary
+*.zip binary
