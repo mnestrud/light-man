@@ -71,7 +71,7 @@
       "al_switch": "switch.hallway_uplights_adaptive_adaptive_lighting_hallway_uplights_adaptive",
       "consolidated_topic": "zigbee2mqtt/zgb_hallway_up/set",
       "legacy_enable": "input_boolean.adaptive_lighting_switch_hallway",
-      "day_color_mode": "color_temp",
+      "day_color_mode": "rgb",
       "night_color_mode": "rgb",
       "sleep_switch": "switch.adaptive_lighting_hallway_uplights_adaptive_adaptive_lighting_sleep_mode_hallway_uplights_adaptive",
       "rooms": {}
