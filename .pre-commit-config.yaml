@@ -1,42 +1,20 @@
-# Local compliance stack — runs entirely from the project venv (no network, no
-# GitHub Actions in the per-change loop). All hooks call the pinned venv tools, so
-# the local gate and any CI backstop use the same versions.
+# Local compliance — fast per-commit lint/format (no GitHub Actions in the loop).
 #
-# One-time install (after the venv exists — see CLAUDE.md "Running Tests Locally"):
-#   .venv/Scripts/pre-commit install --install-hooks
-#   .venv/Scripts/pre-commit install --hook-type pre-push
-# Run on demand:
-#   .venv/Scripts/pre-commit run --all-files
+# Why this shape: pre-commit's `language: system` cannot reliably spawn the relative
+# Windows venv path (`.venv\Scripts\*.exe`) — forward slashes fail CreateProcess and
+# backslashes get stripped. So ruff runs via pre-commit's own pinned, managed env
+# (matched to the venv's ruff version), and the FULL gate — ruff + mypy-strict +
+# pytest(+coverage>=95) — runs from the venv via `scripts/check.sh` (mypy/pytest need
+# the HA-aware venv, which pre-commit's isolated envs can't provide cheaply).
 #
-# Fast hooks (ruff + mypy) run on every commit; pytest runs on push so commits stay quick.
-fail_fast: false
+# Install once (after the venv exists — see CLAUDE.md):  .venv/Scripts/pre-commit install
+# Run on demand:                                          .venv/Scripts/pre-commit run --all-files
+# Before pushing (full gate):                             ./scripts/check.sh
+minimum_pre_commit_version: "3.5.0"
 repos:
-  - repo: local
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.16  # keep in lockstep with ruff in requirements_test.txt
     hooks:
       - id: ruff-check
-        name: ruff (lint + autofix)
-        entry: .venv/Scripts/ruff
-        language: system
-        args: ["check", "--fix"]
-        types_or: [python, pyi]
+        args: ["--fix"]
       - id: ruff-format
-        name: ruff (format)
-        entry: .venv/Scripts/ruff
-        language: system
-        args: ["format"]
-        types_or: [python, pyi]
-      - id: mypy
-        name: mypy (strict)
-        entry: .venv/Scripts/mypy
-        language: system
-        args: ["custom_components/light_man"]
-        pass_filenames: false
-        types: [python]
-      - id: pytest
-        name: pytest (+coverage ≥95%)
-        entry: .venv/Scripts/pytest
-        language: system
-        args: ["tests/", "-q"]
-        pass_filenames: false
-        types: [python]
-        stages: [pre-push]

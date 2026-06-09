@@ -312,9 +312,13 @@ before first internal release.**
 
 **Compliance runs locally, not via GitHub Actions** (the GHA `validate.yml` is only a redundant
 backstop on push — the per-change loop must be fast):
-- **`pre-commit`** (`.pre-commit-config.yaml`, all `repo: local` venv tools): ruff lint+fix, ruff
-  format, mypy-strict on **every commit**; pytest (+coverage) on **pre-push**.
-- **`scripts/check.ps1`**: full local gate on demand (ruff format-check + lint + mypy + pytest+cov).
+- **`pre-commit`** (`.pre-commit-config.yaml`): ruff **lint + format** on every commit via the pinned
+  hosted `ruff-pre-commit` (kept in lockstep with the venv's ruff). *Why hosted, not the venv:*
+  pre-commit's `language: system` can't reliably spawn the relative Windows venv path
+  (`.venv\Scripts\*.exe`) — forward slashes fail `CreateProcess`, backslashes get stripped.
+- **`scripts/check.sh`** (Git Bash): the **full gate** — ruff format-check + ruff lint + mypy-strict +
+  pytest(+coverage >=95%) — run from the venv before pushing. mypy/pytest live here because they need
+  the HA-aware venv. (pytest is expectedly red until Phase-1 tests exist.)
 - **`pyproject.toml`**: mypy `strict`; ruff strict select + `mccabe max-complexity = 10`; pytest
   `--cov-fail-under=95`.
 
