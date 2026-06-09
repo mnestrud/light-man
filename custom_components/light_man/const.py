@@ -6,9 +6,6 @@ from typing import Final
 
 DOMAIN: Final = "light_man"
 
-# Logger for hold lifecycle events (arm / release / TTL-expiry info lines).
-LOGGER_HOLD: Final = "light_man.hold"
-
 # Platforms loaded by the entry.
 PLATFORMS: Final = ["sensor", "switch"]
 
@@ -16,9 +13,9 @@ PLATFORMS: Final = ["sensor", "switch"]
 # Seed topology, written/edited out of band (live enumeration — see §1.2).
 CONFIG_STORE_KEY: Final = "light_man_config"
 CONFIG_STORE_VERSION: Final = 1
-# Hold intent; must survive restarts so a held scene is not re-clobbered.
-HOLDS_STORE_KEY: Final = "light_man_holds"
-HOLDS_STORE_VERSION: Final = 1
+# Per-room mode intent; must survive restarts so a held look is not dropped.
+MODES_STORE_KEY: Final = "light_man_modes"
+MODES_STORE_VERSION: Final = 1
 
 # --- Seed-config JSON keys --------------------------------------------------
 CONF_PUSH_INTERVAL: Final = "push_interval_s"
@@ -33,6 +30,10 @@ CONF_TRANSITION: Final = "transition_s"
 CONF_ROOMS: Final = "rooms"
 CONF_SET_TOPIC: Final = "set_topic"
 CONF_SWITCHES: Final = "switches"
+# Night-hold target (Light-Man-owned; Phase 2's engine replaces these).
+CONF_NIGHT_BRIGHTNESS_PCT: Final = "night_brightness_pct"
+CONF_NIGHT_COLOR_TEMP_KELVIN: Final = "night_color_temp_kelvin"
+CONF_NIGHT_RGB: Final = "night_rgb"
 
 # --- Color modes ------------------------------------------------------------
 COLOR_MODE_COLOR_TEMP: Final = "color_temp"
@@ -43,6 +44,9 @@ COLOR_MODES: Final = frozenset({COLOR_MODE_COLOR_TEMP, COLOR_MODE_RGB})
 DEFAULT_PUSH_INTERVAL_S: Final = 30
 DEFAULT_TRANSITION_S: Final = 1.0
 DEFAULT_COLOR_MODE: Final = COLOR_MODE_COLOR_TEMP
+# Night-hold fallback when a source declares no night target.
+DEFAULT_NIGHT_BRIGHTNESS_PCT: Final = 20.0
+DEFAULT_NIGHT_COLOR_TEMP_KELVIN: Final = 2700.0
 
 # --- Device value ranges (Z2M) ---------------------------------------------
 BRIGHTNESS_MAX: Final = 254
@@ -57,22 +61,32 @@ ATTR_RGB_COLOR: Final = "rgb_color"
 # --- MQTT topic suffixes ----------------------------------------------------
 ACTION_SUFFIX: Final = "/action"
 
-# --- Inovelli action strings -> hold ops ------------------------------------
-# Arm a hold: Day/Night config taps and the held-dim ramp. Never the
-# double/triple taps (PowerView shade scenes) or accent toggles.
-ACTIONS_ARM: Final = frozenset(
-    {"config_single", "config_double", "up_held", "down_held"}
-)
-# Release a hold: a tap-on (paddle up).
-ACTIONS_RELEASE: Final = frozenset({"up_single"})
+# --- Room modes -------------------------------------------------------------
+# A room is either `adaptive` (the default — no hold) or held at a look.
+MODE_ADAPTIVE: Final = "adaptive"
+HELD_NIGHT: Final = "night"  # config_single -> hold at Light Man's night target
+HELD_DAY: Final = "day"  # config_double -> hold at the day value
+HELD_MANUAL: Final = "manual"  # up/down_held -> freeze (blueprint owns the level)
+HELD_KINDS: Final = frozenset({HELD_NIGHT, HELD_DAY, HELD_MANUAL})
 
-# Z2M device-state values (aggregate topic) used for off->on release.
+# Inovelli action string -> resulting room mode. Single taps release to
+# `adaptive` (down differs only in the resulting paddle state). Double/triple
+# taps (PowerView shade scenes) and everything else map to nothing (ignored).
+ACTION_MODE: Final = {
+    "config_single": HELD_NIGHT,
+    "config_double": HELD_DAY,
+    "up_held": HELD_MANUAL,
+    "down_held": HELD_MANUAL,
+    "up_single": MODE_ADAPTIVE,
+    "down_single": MODE_ADAPTIVE,
+}
+
+# Z2M paddle state values (aggregate topic) for on/off respect.
 STATE_ON: Final = "ON"
 STATE_OFF: Final = "OFF"
 
-# --- Hold ops ---------------------------------------------------------------
-OP_ARM: Final = "arm"
-OP_RELEASE: Final = "release"
+# --- Legacy stack the single toggle disables while Light Man owns the push ---
+TICK_AUTOMATION: Final = "automation.ataraxia_lighting_master_tick_automation"
 
 # --- Services ---------------------------------------------------------------
 SERVICE_RELEASE_HOLD: Final = "release_hold"

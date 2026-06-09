@@ -36,6 +36,10 @@ class SourceConfig(TypedDict, total=False):
     night_color_mode: str
     sleep_switch: str | None
     transition_s: float
+    # Light-Man-owned night-hold target (Phase 2's engine replaces these).
+    night_brightness_pct: float
+    night_color_temp_kelvin: float
+    night_rgb: list[int] | None
     rooms: dict[str, RoomConfig]
 
 
@@ -72,9 +76,10 @@ class AdaptiveValues(TypedDict):
 
 
 @dataclass(slots=True)
-class HoldRecord:
-    """A single room hold: when it was armed and when it auto-expires."""
+class HeldRecord:
+    """A room held at a look: which kind, when set, and when it auto-expires."""
 
     room: str
+    kind: str  # one of const.HELD_KINDS
     armed_at: datetime
     expires_at: datetime

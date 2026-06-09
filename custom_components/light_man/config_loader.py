@@ -133,7 +133,14 @@ def _validate_source(
         CONF_CONSOLIDATED_TOPIC: consolidated,
     }
     _apply_color_modes(source_key, raw, source, issues)
-    for opt in ("legacy_enable", "sleep_switch", "transition_s"):
+    for opt in (
+        "legacy_enable",
+        "sleep_switch",
+        "transition_s",
+        "night_brightness_pct",
+        "night_color_temp_kelvin",
+        "night_rgb",
+    ):
         if opt in raw:
             source[opt] = raw[opt]
     source[CONF_ROOMS] = _validate_rooms(

@@ -1,5 +1,18 @@
 # Plan — Light Man Phase 1: own the adaptive push + scene-hold (regression fix)
 
+> **Redesign note (2026-06-09, v0.2.0).** The live cutover surfaced an architectural conflict: the
+> switch-taps blueprint and Light Man were two adaptive brains fighting over the same rooms, and the
+> hold model inferred release from noisy switch on/off bounce. Light Man is now the **single adaptive
+> brain**: per-room **mode** (`adaptive | held(night|day|manual)`) driven by **explicit Inovelli action
+> intents** (config = hold, single taps = release, held-dim = freeze) — never off→on inference; **paddle
+> off-respect** (an off room is never sent brightness, fixing "can't turn it off"); Light-Man-owned
+> **night target** (config, not a blueprint scene); and a **real single toggle** that disables the master
+> tick automation (`automation.turn_off`) — not just the four a16–a19 booleans — and restores it on
+> unload. Full design: `~/.claude/plans/synchronous-hugging-avalanche.md`. The §1.4 hold language below
+> is superseded by this mode model; addressing now uses `push.plan_publishes` (consolidated only when
+> every room is on + adaptive). Day/Night ownership fully moves to Light Man via a gated edit to the
+> switch-taps blueprint (runs only in legacy mode) — a separate HA-config-repo change.
+>
 > **Revision note (2026-06-08).** This supersedes the earlier "dynamic Zigbee group membership"
 > design. After reading the reference pack we chose to **do it right the first time**: Light Man owns
 > the per-source adaptive push and excludes held rooms by **addressing** (consolidated groupcast vs.

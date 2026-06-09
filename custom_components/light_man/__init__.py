@@ -1,11 +1,11 @@
 """The Light Man integration.
 
-Light Man owns the per-source adaptive push (formerly tick areas a16-a19) and
-excludes held rooms by *addressing* (consolidated vs. per-room groupcasts), not
-by mutating Zigbee group membership. The coordinator drives a timer push + hold
-manager + write-on-change dedup; MQTT subscriptions arm/release holds (Inovelli
-action topics) and detect room off->on (switch state topics). Topology is loaded
-from a Store-seeded JSON. See docs/PLAN.md and docs/reference/ARCHITECTURE.md.
+Light Man is the single adaptive brain for the Zigbee bulbs: it owns the
+per-source push, the per-room mode (adaptive / held look / off-respect), and a
+single ``push_enable`` toggle that swaps the whole legacy stack. Modes are
+driven by explicit Inovelli action intents over MQTT. Topology + per-source
+night targets load from a Store-seeded JSON (bundled default on first run).
+See docs/PLAN.md and docs/reference/ARCHITECTURE.md.
 """
 
 from __future__ import annotations
@@ -24,12 +24,12 @@ from .const import (
     CONFIG_STORE_KEY,
     CONFIG_STORE_VERSION,
     DOMAIN,
-    HOLDS_STORE_KEY,
-    HOLDS_STORE_VERSION,
+    MODES_STORE_KEY,
+    MODES_STORE_VERSION,
     PLATFORMS,
 )
 from .coordinator import LightManCoordinator
-from .holds import HoldManager
+from .modes import ModeManager
 from .services import async_register_services, async_unregister_services
 
 if TYPE_CHECKING:
@@ -71,11 +71,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: LightManConfigEntry) -> 
     except ValueError as err:
         raise ConfigEntryNotReady(f"Invalid Light Man config: {err}") from err
 
-    holds_store: Store[Any] = Store(hass, HOLDS_STORE_VERSION, HOLDS_STORE_KEY)
-    holds = HoldManager(holds_store)
-    await holds.async_load()
+    modes_store: Store[Any] = Store(hass, MODES_STORE_VERSION, MODES_STORE_KEY)
+    modes = ModeManager(modes_store)
+    await modes.async_load()
 
-    coordinator = LightManCoordinator(hass, entry, validated, holds)
+    coordinator = LightManCoordinator(hass, entry, validated, modes)
     await coordinator.async_config_entry_first_refresh()
     entry.runtime_data = LightManData(coordinator=coordinator)
 
@@ -88,7 +88,10 @@ async def async_unload_entry(hass: HomeAssistant, entry: LightManConfigEntry) ->
     """Unload a config entry: cancel subs, drop services on the last entry."""
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unload_ok:
-        entry.runtime_data.coordinator.shutdown_subscriptions()
+        coordinator = entry.runtime_data.coordinator
+        coordinator.shutdown_subscriptions()
+        # Hand the house back to the legacy stack (tick + booleans on).
+        await coordinator.async_restore_legacy()
         if not hass.config_entries.async_loaded_entries(DOMAIN):
             async_unregister_services(hass)
     return unload_ok

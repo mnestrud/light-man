@@ -7,6 +7,8 @@
       "legacy_enable": "input_boolean.adaptive_lighting_overhead_all",
       "day_color_mode": "color_temp",
       "night_color_mode": "color_temp",
+      "night_brightness_pct": 20,
+      "night_color_temp_kelvin": 2700,
       "rooms": {
         "living_room": {
           "set_topic": "zigbee2mqtt/zgb_living_room/set",
@@ -56,6 +58,8 @@
       "legacy_enable": "input_boolean.adaptive_lighting_accent_all",
       "day_color_mode": "color_temp",
       "night_color_mode": "color_temp",
+      "night_brightness_pct": 20,
+      "night_color_temp_kelvin": 2700,
       "rooms": {
         "kitchen_island": {
           "set_topic": "zigbee2mqtt/zgb_kitchen_island/set",

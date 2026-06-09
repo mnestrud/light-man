@@ -10,10 +10,16 @@ from typing import TYPE_CHECKING, cast
 
 from .const import (
     BRIGHTNESS_MAX,
+    COLOR_MODE_COLOR_TEMP,
     COLOR_MODE_RGB,
     DEFAULT_COLOR_MODE,
+    DEFAULT_NIGHT_BRIGHTNESS_PCT,
+    DEFAULT_NIGHT_COLOR_TEMP_KELVIN,
+    HELD_MANUAL,
+    HELD_NIGHT,
     MIRED_MAX,
     MIRED_MIN,
+    MODE_ADAPTIVE,
 )
 
 if TYPE_CHECKING:
@@ -72,15 +78,67 @@ def build_payload(
     return payload
 
 
-def select_targets(source: SourceConfig, held_rooms: set[str]) -> list[str]:
-    """Choose which topic(s) to flood for a source given the held set.
+def build_night_payload(source: SourceConfig, transition: float) -> PushPayload:
+    """Build the source's night-hold payload from its Light-Man-owned target."""
+    rgb = source.get("night_rgb")
+    use_rgb = valid_rgb(rgb)
+    return build_payload(
+        brightness_pct=source.get("night_brightness_pct", DEFAULT_NIGHT_BRIGHTNESS_PCT),
+        color_temp_kelvin=source.get(
+            "night_color_temp_kelvin", DEFAULT_NIGHT_COLOR_TEMP_KELVIN
+        ),
+        rgb_color=rgb if use_rgb else None,
+        mode=COLOR_MODE_RGB if use_rgb else COLOR_MODE_COLOR_TEMP,
+        transition=transition,
+    )
 
-    No room in this source is held -> the single consolidated groupcast (today's
-    RF). Otherwise -> one per-room groupcast for every *unheld* room, skipping
-    the held ones (held rooms keep their manual scene).
+
+def _room_target(
+    mode: str,
+    *,
+    off: bool,
+    adaptive_payload: PushPayload,
+    night_payload: PushPayload,
+) -> PushPayload | None:
+    """Return a room's payload, or None to leave it untouched (off / frozen)."""
+    if off or mode == HELD_MANUAL:
+        return None
+    if mode == HELD_NIGHT:
+        return night_payload
+    return adaptive_payload  # adaptive or HELD_DAY both ride the live day value
+
+
+def plan_publishes(
+    source: SourceConfig,
+    *,
+    adaptive_payload: PushPayload,
+    night_payload: PushPayload,
+    modes: dict[str, str],
+    off_rooms: set[str],
+) -> list[tuple[str, PushPayload]]:
+    """Plan ``(topic, payload)`` publishes for a source this cycle.
+
+    Use the **consolidated** flood only when every room is on and wants the live
+    adaptive value (the cheap, uniform case). Otherwise address **per-room**,
+    skipping off and manually-frozen rooms (a brightness flood would re-on an
+    off bulb) and sending held rooms their own target.
     """
     rooms = source.get("rooms", {})
-    held_here = held_rooms & set(rooms)
-    if not held_here:
-        return [source["consolidated_topic"]]
-    return [cfg["set_topic"] for room, cfg in rooms.items() if room not in held_here]
+    if not rooms:
+        return [(source["consolidated_topic"], adaptive_payload)]
+    targets = {
+        room: _room_target(
+            modes.get(room, MODE_ADAPTIVE),
+            off=room in off_rooms,
+            adaptive_payload=adaptive_payload,
+            night_payload=night_payload,
+        )
+        for room in rooms
+    }
+    if all(target == adaptive_payload for target in targets.values()):
+        return [(source["consolidated_topic"], adaptive_payload)]
+    return [
+        (rooms[room]["set_topic"], target)
+        for room, target in targets.items()
+        if target is not None
+    ]

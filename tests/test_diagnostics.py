@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 async def test_diagnostics_shape(hass: HomeAssistant, mqtt_mock: Any) -> None:
     """The diagnostics dump exposes push-health, holds, and the config shape."""
     entry = await setup_lightman(hass)
-    await entry.runtime_data.coordinator.async_arm_hold("kitchen")
+    await entry.runtime_data.coordinator.async_hold("kitchen", "night")
 
     diag = await async_get_config_entry_diagnostics(hass, entry)
     assert diag["push_enabled"] is False

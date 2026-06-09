@@ -42,10 +42,10 @@ class ActiveHoldsSensor(LightManEntity, SensorEntity):
 
     @property
     def native_value(self) -> int:
-        """Number of rooms currently holding a manual scene."""
+        """Number of rooms currently holding a look."""
         return self.coordinator.data["held_count"]
 
     @property
-    def extra_state_attributes(self) -> dict[str, dict[str, str]]:
-        """Per-room ``expires_at`` map."""
+    def extra_state_attributes(self) -> dict[str, dict[str, dict[str, str]]]:
+        """Per-room ``{mode, expires_at}`` map."""
         return {"rooms": self.coordinator.data["held"]}
