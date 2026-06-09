@@ -21,11 +21,11 @@ Rule counts per the index at snapshot: **Bronze 19, Silver 10, Gold 24 (21 enume
 
 The per-change gate is **local** (GHA `validate.yml` is only a redundant backstop on push):
 
-- **`pre-commit`** (`.pre-commit-config.yaml`, all `repo: local` venv tools): ruff lint+fix and ruff
-  format and mypy-strict run on **every commit**; pytest (+coverage) runs on **pre-push** so commits
-  stay fast.
-- **`scripts/check.ps1`**: full local run (ruff format-check + ruff lint + mypy + pytest +coverage)
-  on demand.
+- **`pre-commit`** (`.pre-commit-config.yaml`): ruff **lint + format** on every commit via the pinned
+  hosted `ruff-pre-commit` (matched to the venv's ruff). pre-commit's `language: system` can't spawn
+  the relative Windows venv path, so mypy/pytest live in the full gate below.
+- **`scripts/check.sh`** (Git Bash): the full gate — ruff format-check + ruff lint + mypy-strict +
+  pytest (+coverage >=95%) — run from the venv before pushing.
 - **`pyproject.toml`**: mypy `strict`; ruff curated strict select + `mccabe max-complexity = 10`;
   pytest `--cov-fail-under=95`.
 
