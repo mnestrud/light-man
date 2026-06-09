@@ -396,9 +396,32 @@ mechanical lint rules are enforced continuously by the local stack — no deferr
   Light Man and replacing the AL switch's sleep-rgb (removed). E.g. hallway_up runs a set day RGB and a
   set night RGB. (Schema in `docs/reference/adaptive-algorithm.md` → `base_color_mode`/`base_rgb`.)
 - Absorb tick a1–a15 (Inovelli `defaultLevel`/LED unicast) and retire the tick blueprint entirely.
+- **Absorb the occupancy/motion adaptive push.** The three occupancy automations (Hallway East/West,
+  Stairwell) currently do their own `light.turn_on` with adaptive brightness/color on motion (read from
+  `input_text.al_last_published` / the AL dummy switch) — a second adaptive writer that doubles Light
+  Man. Phase-1 only gated their **helper re-enable** off when Light Man owns; the light push remains.
+  Phase 2: Light Man owns motion-triggered lighting — on occupancy, address the room at the current
+  adaptive target (respecting on/off), and drop the per-automation adaptive `light.turn_on`. Until then
+  the motion light-on is left intact (gated edits live in `automations.yaml`, not the light-man repo).
 - Optionally migrate the switch-taps blueprint's look application + held-dim ramp + occupancy.
 - Preserve KB-encoded fixes (latch, off-prestage, hue native control, SBM binding) as behavior +
   regression tests.
+
+## Live HA-config edits made during cutover (NOT in this repo)
+
+These live in the HA config (`ha_vibecode_git`), gated on `switch.light_man_adaptive_push` so they run
+**only in legacy mode** (Light Man owns when the switch is on). All are reversible and default-safe (if
+the switch is off/unavailable they behave exactly as before). Recorded here because they are part of the
+v0.2.0 cutover but not version-controlled in the light-man repo:
+
+- **Switch-taps blueprint** (`Ataraxia Inovelli Switch Automations.yaml`): gated the config **Day/Night**
+  `light.turn_on` look (SCENE_DAY/SCENE_NIGHT) and **every `adaptive_script` call** (up_single ON,
+  down_single OFF-prestage, light-off RESET OFF) — so the blueprint does zero adaptive work when Light
+  Man owns. Accent, LED, shades, held-dim (binding) untouched.
+- **Occupancy automations** (`automations.yaml`: Hallway East, Hallway West, Stairwell): gated the
+  `input_boolean.turn_on` of the adaptive helpers (`adaptive_lighting_switch_hallway` / `_stairwell`) so
+  motion no longer re-enables them when Light Man owns. The per-automation adaptive `light.turn_on` on
+  motion is **left intact** (a remaining double — see the Phase-2 "absorb the occupancy adaptive push").
 
 ## Verification
 

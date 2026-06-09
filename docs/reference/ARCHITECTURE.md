@@ -1,5 +1,12 @@
 # Light Man — Architecture & Design Reference
 
+> **Superseded in part by the v0.2.0 redesign (2026-06-09).** The hold model below (off→on release,
+> consolidated-vs-per-room "exclude held rooms") is replaced by an explicit per-room **mode**
+> (`adaptive | held(night/day/manual)`) driven only by Inovelli action intents, **paddle off-respect**,
+> a Light-Man-owned **night target**, and a single toggle that disables the **master tick automation**.
+> Day/Night and the occupancy helper re-enable are gated off the live blueprint/automations when Light
+> Man owns. Authoritative: `docs/PLAN.md` redesign note + `~/.claude/plans/synchronous-hugging-avalanche.md`.
+
 Snapshot date: 2026-06-06. This document is the ground-truth context for the implementation plan
 (refined remotely via Ultraplan). It captures the existing "Ataraxia Adaptive Lighting" YAML stack,
 the regression Light Man must fix, and the agreed design.
