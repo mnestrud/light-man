@@ -43,6 +43,11 @@ COLOR_MODES: Final = frozenset({COLOR_MODE_COLOR_TEMP, COLOR_MODE_RGB})
 # --- Defaults ---------------------------------------------------------------
 DEFAULT_PUSH_INTERVAL_S: Final = 30
 DEFAULT_TRANSITION_S: Final = 1.0
+# A small gap between per-group publishes so the Zigbee multicasts (network
+# broadcasts) don't all land in the same instant — gentle-on-mesh hygiene, not
+# correctness (the color-mode split was a stale bulb group membership, fixed at
+# the device; see docs/reference/bulb-split-investigation.md).
+INTER_PUBLISH_DELAY_S: Final = 0.15
 DEFAULT_COLOR_MODE: Final = COLOR_MODE_COLOR_TEMP
 # Night-hold fallback when a source declares no night target.
 DEFAULT_NIGHT_BRIGHTNESS_PCT: Final = 20.0

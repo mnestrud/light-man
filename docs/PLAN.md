@@ -412,6 +412,15 @@ mechanical lint rules are enforced continuously by the local stack — no deferr
 - Optionally migrate the switch-taps blueprint's look application + held-dim ramp + occupancy.
 - Preserve KB-encoded fixes (latch, off-prestage, hue native control, SBM binding) as behavior +
   regression tests.
+- **Bulk group-membership normalize (device maintenance, house-wide).** The bulb color-mode split
+  (RESOLVED 2026-06-09) was a **stale Zigbee group ID in 3 living-room bulbs' firmware NVRAM** that
+  Z2M's `bridge/groups` never showed; group commands are multicasts (network broadcasts), so a stray
+  member applied the hallway's `color`/rgb. Those 3 were fixed by `remove_all` + re-add. **Follow-up:**
+  audit/normalize **every** bulb — for each, genGroups `removeAll` then re-add to exactly its
+  Z2M-known groups — to clear any other stale membership house-wide. Z2M exposes no MQTT read of a
+  device's real group table, so detection is **behavioral** (probe each rgb-pushing group in isolation,
+  `/get` all bulbs, flag non-member adopters) or **blind** (normalize all). Detail + root-cause trace:
+  `docs/reference/bulb-split-investigation.md`.
 
 ## Live HA-config edits made during cutover (NOT in this repo)
 

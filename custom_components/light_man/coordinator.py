@@ -14,6 +14,7 @@ OFF restores them and goes inert.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from datetime import datetime, timedelta
@@ -41,6 +42,7 @@ from .const import (
     CONF_SOURCES,
     CONF_TRANSITION,
     DEFAULT_TRANSITION_S,
+    INTER_PUBLISH_DELAY_S,
     MODE_ADAPTIVE,
     SOLAR_MIDNIGHT_EVENT,
     STATE_ON,
@@ -179,21 +181,27 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
     # --- push ---------------------------------------------------------------
 
     async def _run_push(self, *, force: bool, only_source: str | None = None) -> None:
-        """Push every source (or just one). No-op unless Light Man owns the push."""
+        """Plan every source (or one) and publish with a small inter-send gap.
+
+        Group commands are Zigbee multicasts (network broadcasts); a short space
+        between sends keeps them from all landing in the same instant.
+        """
         if not self.push_enabled:
             return
+        plan: list[tuple[str, str, PushPayload]] = []
         for key, source in self._config[CONF_SOURCES].items():
             if only_source is not None and key != only_source:
                 continue
-            await self._push_source(key, source, force=force)
+            plan.extend(self._plan_source(key, source))
+        await self._publish_spaced(plan, force=force)
 
-    async def _push_source(
-        self, key: str, source: SourceConfig, *, force: bool
-    ) -> None:
-        """Plan and publish one source's per-room targets."""
+    def _plan_source(
+        self, key: str, source: SourceConfig
+    ) -> list[tuple[str, str, PushPayload]]:
+        """Plan one source's ``(source_key, topic, payload)`` publishes."""
         adaptive = self._read_adaptive(source)
         if adaptive is None:
-            return
+            return []
         transition = float(source.get(CONF_TRANSITION, DEFAULT_TRANSITION_S))
         sleeping = self._is_sleeping(source)
         adaptive_payload = build_payload(
@@ -211,20 +219,34 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
             modes={r: self._modes.mode_of(r) for r in rooms if self._modes.is_held(r)},
         )
         self.diagnostics["addressing"][key] = [topic for topic, _ in plan]
-        for topic, payload in plan:
-            await self._publish(key, topic, payload, force=force)
+        return [(key, topic, payload) for topic, payload in plan]
+
+    async def _publish_spaced(
+        self, plan: list[tuple[str, str, PushPayload]], *, force: bool
+    ) -> None:
+        """Publish a plan with a small gap between real sends.
+
+        The gap only follows a real publish — deduped no-ops don't pace.
+        """
+        awaiting_gap = False
+        for source_key, topic, payload in plan:
+            if awaiting_gap:
+                await asyncio.sleep(INTER_PUBLISH_DELAY_S)
+            awaiting_gap = await self._publish(source_key, topic, payload, force=force)
 
     async def _publish(
         self, source_key: str, topic: str, payload: PushPayload, *, force: bool
-    ) -> None:
-        """Publish to a topic, applying write-on-change dedup unless forced."""
+    ) -> bool:
+        """Publish to a topic with write-on-change dedup; True if it published."""
         dedup_key = (source_key, topic)
         if not force and self._last_published.get(dedup_key) == payload:
             self.diagnostics["dedup_skips"] += 1
-            return
+            return False
         if await self._mqtt_publish(topic, payload):
             self._last_published[dedup_key] = payload
             self.diagnostics["last_publish"][topic] = payload
+            return True
+        return False
 
     async def _mqtt_publish(self, topic: str, payload: PushPayload) -> bool:
         """Publish JSON to MQTT, guarding on broker availability."""

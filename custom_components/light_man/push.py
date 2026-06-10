@@ -120,24 +120,27 @@ def plan_publishes(
 ) -> list[tuple[str, PushPayload]]:
     """Plan ``(topic, payload)`` publishes for a source this cycle.
 
-    Always address **per-room** (each room's native group) for sources with
-    rooms. The consolidated ``hue_native_control`` multiColor groupcast to the
-    big overhead group delivers color *non-uniformly* across its bulbs (some
-    flip to xy, some stay color_temp — proven live), while the small per-room
-    groups apply cleanly and uniformly. Held rooms get their target; a
-    manually-frozen room is skipped. Sources with no rooms (hallway) push their
-    single consolidated group.
+    Use the **consolidated** flood when every room wants the live adaptive value
+    (the cheap, uniform case — including off rooms, which stage color-while-off).
+    Otherwise address **per-room**: held rooms get their own target and
+    manually-frozen rooms are skipped. Sources with no rooms (hallway) always
+    push their single consolidated group.
     """
     rooms = source.get("rooms", {})
     if not rooms:
         return [(source["consolidated_topic"], adaptive_payload)]
-    plan: list[tuple[str, PushPayload]] = []
-    for room, room_cfg in rooms.items():
-        target = _room_target(
+    targets = {
+        room: _room_target(
             modes.get(room, MODE_ADAPTIVE),
             adaptive_payload=adaptive_payload,
             night_payload=night_payload,
         )
-        if target is not None:
-            plan.append((room_cfg["set_topic"], target))
-    return plan
+        for room in rooms
+    }
+    if all(target == adaptive_payload for target in targets.values()):
+        return [(source["consolidated_topic"], adaptive_payload)]
+    return [
+        (rooms[room]["set_topic"], target)
+        for room, target in targets.items()
+        if target is not None
+    ]
