@@ -6,8 +6,9 @@ status boxes as items are picked up. Last reviewed: **2026-06-10**.
 
 ## Pending (next, but not started)
 
-- [x] **dev→main release PR + tag + version bump (0.3.0 → 0.4.0).** Phase 2 lived on
-  `feature/adaptive-engine` only. — *Release cut 2026-06-10 (v0.4.0).*
+- [x] **Release tag + version bump (0.3.0 → 0.4.0).** Phase 2 lived on `feature/adaptive-engine` only.
+  — *Tagged `v0.4.0` on `dev` 2026-06-10. Repo is dev-centric: there is no `main` branch and no prior
+  tags (v0.3.0 was a commit message, never tagged), so the release is tagged on `dev` by decision.*
 - [x] **Inovelli `defaultLevel`/LED absorption (#8) — hardware-verified live.** — *Verified 2026-06-10
   via `force_push` MQTT trace: `defaultLevelLocal/Remote` per-source (overhead 229 / accent 76), LED-bar
   `brightness` published only for the paddle-on switch. PASS.*
