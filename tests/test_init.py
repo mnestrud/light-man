@@ -98,7 +98,7 @@ async def test_setup_with_invalid_config_retries(
     hass: HomeAssistant, mqtt_mock: Any
 ) -> None:
     """A current-version but structurally invalid Store -> retry (not re-seeded)."""
-    entry = await setup_lightman(hass, seed={"seed_version": 2, "push_interval_s": 30})
+    entry = await setup_lightman(hass, seed={"seed_version": 3, "push_interval_s": 30})
     assert entry.state is ConfigEntryState.SETUP_RETRY
 
 
@@ -128,7 +128,7 @@ async def test_setup_reseeds_when_stored_seed_is_old(
         await hass.config_entries.async_setup(entry.entry_id)
         await hass.async_block_till_done()
     assert entry.state is ConfigEntryState.LOADED
-    assert stores[CONFIG_STORE_KEY]._data.get("seed_version") == 2
+    assert stores[CONFIG_STORE_KEY]._data.get("seed_version") == 3
 
 
 def test_bundled_seed_is_valid() -> None:

@@ -36,16 +36,20 @@ from .const import (
     ATTR_RGB_COLOR,
     CONF_AL_SWITCH,
     CONF_LEGACY_ENABLE,
+    CONF_OCCUPANCY,
     CONF_PUSH_INTERVAL,
     CONF_ROOMS,
     CONF_SOURCES,
     CONF_TRANSITION,
+    DEFAULT_OCCUPANCY_KEY,
+    DEFAULT_OCCUPANCY_TRANSITION_S,
     DEFAULT_SLEEP_RAMP_IN_S,
     DEFAULT_SLEEP_RAMP_OUT_S,
     DEFAULT_TRANSITION_S,
     INTER_PUBLISH_DELAY_S,
     MODE_ADAPTIVE,
     SOLAR_MIDNIGHT_EVENT,
+    STATE_OFF,
     STATE_ON,
     TICK_AUTOMATION,
 )
@@ -65,7 +69,13 @@ if TYPE_CHECKING:
     from homeassistant.helpers.typing import StateType
 
     from .config_loader import ValidatedConfig
-    from .models import EngineTarget, LightManConfig, PushPayload, SourceConfig
+    from .models import (
+        EngineTarget,
+        LightManConfig,
+        OccupancyZone,
+        PushPayload,
+        SourceConfig,
+    )
     from .modes import ModeManager
 
 _LOGGER = logging.getLogger(__name__)
@@ -119,6 +129,14 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         self.sleep_on = False
         self._sleep_start = 0.0
         self._sleep_changed_at: datetime | None = None
+        # Occupancy: zone defs + a topic->zones index + per-sensor / per-zone state.
+        self._occupancy = config[CONF_OCCUPANCY]
+        self._mmwave_zones: dict[str, list[str]] = {}
+        for zone_key, zone in self._occupancy.items():
+            for topic in zone.get("mmwave_topics", []):
+                self._mmwave_zones.setdefault(topic, []).append(zone_key)
+        self._sensor_occupied: dict[str, bool] = {}
+        self._zone_occupied: dict[str, bool] = {}
         self.diagnostics: dict[str, Any] = {
             "issues": validated.issues,
             "dedup_skips": 0,
@@ -126,6 +144,7 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
             "last_publish": {},
             "engine": {},
             "sleep": {"on": False, "s": 0.0},
+            "occupancy": {},
         }
 
     # --- lifecycle ----------------------------------------------------------
@@ -140,6 +159,10 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
                 await mqtt.async_subscribe(
                     self.hass, base + ACTION_SUFFIX, self._handle_message
                 )
+            )
+        for topic in self._mmwave_zones:
+            self._unsubs.append(
+                await mqtt.async_subscribe(self.hass, topic, self._handle_occupancy)
             )
         # Defer the legacy reconcile until HA has started — the automation /
         # input_boolean services aren't registered yet during entry setup.
@@ -250,6 +273,39 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         self.diagnostics["addressing"][key] = [topic for topic, _ in plan]
         return [(key, topic, payload) for topic, payload in plan]
 
+    def _source_payload(
+        self,
+        source: SourceConfig,
+        elevation: float,
+        noon: float,
+        now_minutes: float,
+        sleep_s: float,
+        transition: float,
+    ) -> tuple[PushPayload, EngineTarget | None] | None:
+        """Return ``(payload, engine_target | None)`` for a source, or None.
+
+        Profile sources use the real-elevation engine; a profile-less source
+        falls back to its AL dummy switch (its color mode follows the global
+        sleep flag). Shared by the periodic push and occupancy turn-on.
+        """
+        profile = source.get("profile")
+        if profile is not None:
+            target = compute_target(
+                elevation, noon, profile, sleep_s=sleep_s, now_minutes=now_minutes
+            )
+            return _target_to_payload(target, transition), target
+        adaptive = self._read_adaptive(source)
+        if adaptive is None:
+            return None
+        payload = build_payload(
+            brightness_pct=adaptive["brightness_pct"],
+            color_temp_kelvin=adaptive["color_temp_kelvin"],
+            rgb_color=adaptive["rgb_color"],
+            mode=resolve_color_mode(source, sleeping=self.sleep_on),
+            transition=transition,
+        )
+        return payload, None
+
     def _adaptive_payload(
         self,
         key: str,
@@ -260,22 +316,14 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         sleep_s: float,
         transition: float,
     ) -> PushPayload | None:
-        """Return the live adaptive payload for a source.
-
-        Phase 2: the real-elevation engine computes it from the source's profile
-        and the global ``sleep_s`` ramp (recorded in diagnostics). A source with
-        no profile falls back to its AL dummy switch so a partial config still
-        runs (its color mode then follows the global sleep flag).
-        """
-        profile = source.get("profile")
-        if profile is not None:
-            target = compute_target(
-                elevation,
-                noon,
-                profile,
-                sleep_s=sleep_s,
-                now_minutes=now_minutes,
-            )
+        """Return the live adaptive payload for a source, recording diagnostics."""
+        result = self._source_payload(
+            source, elevation, noon, now_minutes, sleep_s, transition
+        )
+        if result is None:
+            return None
+        payload, target = result
+        if target is not None:
             self.diagnostics["engine"][key] = {
                 "elevation": round(elevation, 2),
                 "brightness_pct": round(target.brightness_pct, 1),
@@ -283,17 +331,7 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
                 "color_temp_kelvin": target.color_temp_kelvin,
                 "rgb_color": list(target.rgb_color) if target.rgb_color else None,
             }
-            return _target_to_payload(target, transition)
-        adaptive = self._read_adaptive(source)
-        if adaptive is None:
-            return None
-        return build_payload(
-            brightness_pct=adaptive["brightness_pct"],
-            color_temp_kelvin=adaptive["color_temp_kelvin"],
-            rgb_color=adaptive["rgb_color"],
-            mode=resolve_color_mode(source, sleeping=self.sleep_on),
-            transition=transition,
-        )
+        return payload
 
     def _look_payloads(
         self, source: SourceConfig, adaptive_payload: PushPayload, transition: float
@@ -341,6 +379,10 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         return False
 
     async def _mqtt_publish(self, topic: str, payload: PushPayload) -> bool:
+        """Publish a push payload (delegates to the raw publisher)."""
+        return await self._raw_publish(topic, dict(payload))
+
+    async def _raw_publish(self, topic: str, payload: dict[str, Any]) -> bool:
         """Publish JSON to MQTT, guarding on broker availability."""
         if not mqtt.mqtt_config_entry_enabled(self.hass):
             self._set_mqtt_available(available=False)
@@ -404,6 +446,71 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         self.sleep_on = enabled
         await self._run_push(force=True)
         self.async_set_updated_data(self._snapshot())
+
+    # --- occupancy (mmwave presence -> zone lights, MQTT-driven) ------------
+
+    async def _handle_occupancy(self, msg: mqtt.ReceiveMessage) -> None:
+        """Update a zone's presence from an mmwave message and drive its lights."""
+        zones = self._mmwave_zones.get(msg.topic)
+        if not zones or not self.push_enabled:
+            return
+        data = _parse_json(str(msg.payload))
+        if data is None:
+            return
+        key = self._occupancy[zones[0]].get("occupancy_key", DEFAULT_OCCUPANCY_KEY)
+        value = data.get(key)
+        if value is None:
+            return  # a non-occupancy update on the same topic (state/action)
+        self._sensor_occupied[msg.topic] = _truthy(value)
+        for zone_key in zones:
+            await self._evaluate_zone(zone_key)
+
+    async def _evaluate_zone(self, zone_key: str) -> None:
+        """Turn a zone's lights on/off on the occupied/cleared edge only."""
+        zone = self._occupancy[zone_key]
+        occupied = any(
+            self._sensor_occupied.get(topic) for topic in zone.get("mmwave_topics", [])
+        )
+        if occupied == self._zone_occupied.get(zone_key):
+            return
+        self._zone_occupied[zone_key] = occupied
+        self.diagnostics["occupancy"][zone_key] = occupied
+        transition = zone.get("transition_s", DEFAULT_OCCUPANCY_TRANSITION_S)
+        if occupied:
+            await self._zone_on(zone, transition)
+        else:
+            await self._zone_off(zone, transition)
+
+    async def _zone_on(self, zone: OccupancyZone, transition: float) -> None:
+        """Turn a zone's lights on at each light's live engine value."""
+        for light in zone.get("lights", []):
+            payload = self._engine_payload_for(light["source"], transition)
+            if payload is None:
+                continue
+            await self._raw_publish(light["set_topic"], {**payload, "state": STATE_ON})
+
+    async def _zone_off(self, zone: OccupancyZone, transition: float) -> None:
+        """Turn a zone's lights off (color/brightness stay staged for next on)."""
+        off = {"state": STATE_OFF, "transition": transition}
+        for light in zone.get("lights", []):
+            await self._raw_publish(light["set_topic"], off)
+
+    def _engine_payload_for(
+        self, source_key: str, transition: float
+    ) -> PushPayload | None:
+        """Return the live engine payload for a source (occupancy turn-on)."""
+        source = self._config[CONF_SOURCES][source_key]  # loader-validated
+        now = dt_util.utcnow()
+        try:
+            elevation, noon = solar_inputs(self.hass, now)
+        except ValueError:
+            return None
+        local = dt_util.as_local(now)
+        now_minutes = local.hour * 60 + local.minute + local.second / 60
+        result = self._source_payload(
+            source, elevation, noon, now_minutes, self._compute_sleep_s(now), transition
+        )
+        return result[0] if result is not None else None
 
     # --- modes --------------------------------------------------------------
 
@@ -542,6 +649,17 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         return CoordinatorData(
             held=held, held_count=len(held), push_enabled=self.push_enabled
         )
+
+
+def _truthy(value: object) -> bool:
+    """Coerce an mmwave occupancy field (bool / "ON" / 1 / ...) to a bool."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in ("true", "on", "1", "occupied", "detected")
+    if isinstance(value, (int, float)):
+        return value != 0
+    return False
 
 
 def _target_to_payload(target: EngineTarget, transition: float) -> PushPayload:

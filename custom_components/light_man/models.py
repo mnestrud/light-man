@@ -46,11 +46,33 @@ class SourceConfig(TypedDict, total=False):
     rooms: dict[str, RoomConfig]
 
 
+class OccupancyLight(TypedDict):
+    """One light a zone turns on (at ``source``'s engine value) on presence."""
+
+    set_topic: str
+    source: str
+
+
+class OccupancyZone(TypedDict, total=False):
+    """A presence zone: mmwave sensors that gate a set of lights.
+
+    Occupied when **any** ``mmwave_topics`` reports presence; cleared when all
+    do not. On the occupied edge the lights turn on at their source's live
+    engine value; on the cleared edge they turn off.
+    """
+
+    mmwave_topics: list[str]
+    occupancy_key: str  # JSON field in the mmwave payload (default "occupancy")
+    lights: list[OccupancyLight]
+    transition_s: float
+
+
 class LightManConfig(TypedDict):
     """Top-level seed config (``light_man_config`` Store)."""
 
     push_interval_s: int
     sources: dict[str, SourceConfig]
+    occupancy: dict[str, OccupancyZone]
 
 
 class RGB(TypedDict):

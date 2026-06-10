@@ -17,7 +17,7 @@ from pytest_homeassistant_custom_component.common import (
 
 from custom_components.light_man.config_loader import validate_config
 from custom_components.light_man.const import DOMAIN, TICK_AUTOMATION
-from custom_components.light_man.coordinator import LightManCoordinator
+from custom_components.light_man.coordinator import LightManCoordinator, _truthy
 from custom_components.light_man.modes import ModeManager
 
 from .conftest import (
@@ -28,6 +28,8 @@ from .conftest import (
     LEG_OVERHEAD,
     LR_SET,
     LR_SWITCH,
+    MMWAVE_EAST,
+    MMWAVE_WEST,
     OVERHEAD_ALL,
     SEED,
     TICK_CALLS_KEY,
@@ -535,3 +537,115 @@ async def test_solar_unavailable_skips_push(
         await coordinator.async_force_push()
         await hass.async_block_till_done()
     assert published(mqtt_mock) == {}
+
+
+# --- occupancy (mmwave presence -> zone lights) ----------------------------
+
+
+async def test_occupancy_on_publishes_engine_value(
+    hass: HomeAssistant, coordinator: Coord, mqtt_mock: Any
+) -> None:
+    """Presence turns the zone lights on at the live engine value + state ON."""
+    await coordinator.async_set_push_enabled(enabled=True)
+    await hass.async_block_till_done()
+    mqtt_mock.async_publish.reset_mock()
+
+    _fire(hass, MMWAVE_EAST, {"occupancy": True})
+    await hass.async_block_till_done()
+
+    payload = published(mqtt_mock)[HALL_UP]
+    assert payload["state"] == "ON"
+    assert payload["color"] == {"r": 135, "g": 206, "b": 235}  # hallway_up engine rgb
+    assert payload["transition"] == 1.5
+    assert coordinator.diagnostics["occupancy"]["hallway"] is True
+
+
+async def test_occupancy_clears_when_all_sensors_off(
+    hass: HomeAssistant, coordinator: Coord, mqtt_mock: Any
+) -> None:
+    """When the last sensor clears, the zone lights turn off."""
+    await coordinator.async_set_push_enabled(enabled=True)
+    _fire(hass, MMWAVE_EAST, {"occupancy": True})
+    await hass.async_block_till_done()
+    mqtt_mock.async_publish.reset_mock()
+
+    _fire(hass, MMWAVE_EAST, {"occupancy": False})
+    await hass.async_block_till_done()
+    assert published(mqtt_mock)[HALL_UP] == {"state": "OFF", "transition": 1.5}
+
+
+async def test_occupancy_stays_on_until_all_clear(
+    hass: HomeAssistant, coordinator: Coord, mqtt_mock: Any
+) -> None:
+    """One sensor clearing while another is occupied is not an edge."""
+    await coordinator.async_set_push_enabled(enabled=True)
+    _fire(hass, MMWAVE_EAST, {"occupancy": True})
+    _fire(hass, MMWAVE_WEST, {"occupancy": True})
+    await hass.async_block_till_done()
+    mqtt_mock.async_publish.reset_mock()
+
+    _fire(hass, MMWAVE_EAST, {"occupancy": False})  # west still occupied
+    await hass.async_block_till_done()
+    assert HALL_UP not in published(mqtt_mock)
+
+
+async def test_occupancy_inert_when_push_disabled(
+    hass: HomeAssistant, coordinator: Coord, mqtt_mock: Any
+) -> None:
+    """In legacy mode mmwave presence is ignored."""
+    mqtt_mock.async_publish.reset_mock()
+    _fire(hass, MMWAVE_EAST, {"occupancy": True})
+    await hass.async_block_till_done()
+    assert published(mqtt_mock) == {}
+
+
+async def test_occupancy_ignores_non_occupancy_message(
+    hass: HomeAssistant, coordinator: Coord, mqtt_mock: Any
+) -> None:
+    """A message on the topic without the occupancy field is ignored."""
+    await coordinator.async_set_push_enabled(enabled=True)
+    await hass.async_block_till_done()
+    mqtt_mock.async_publish.reset_mock()
+    _fire(hass, MMWAVE_EAST, {"linkquality": 80})
+    await hass.async_block_till_done()
+    assert published(mqtt_mock) == {}
+
+
+async def test_occupancy_malformed_payload_ignored(
+    hass: HomeAssistant, coordinator: Coord, mqtt_mock: Any
+) -> None:
+    """A non-JSON mmwave payload is ignored, not fatal."""
+    await coordinator.async_set_push_enabled(enabled=True)
+    await hass.async_block_till_done()
+    mqtt_mock.async_publish.reset_mock()
+    _fire(hass, MMWAVE_EAST, "not-json")
+    await hass.async_block_till_done()
+    assert published(mqtt_mock) == {}
+
+
+async def test_occupancy_skips_when_solar_unavailable(
+    hass: HomeAssistant, coordinator: Coord, mqtt_mock: Any
+) -> None:
+    """If solar is unavailable, the turn-on has no engine value and is skipped."""
+    await coordinator.async_set_push_enabled(enabled=True)
+    await hass.async_block_till_done()
+    mqtt_mock.async_publish.reset_mock()
+    with patch(
+        "custom_components.light_man.coordinator.solar_inputs",
+        side_effect=ValueError("polar night"),
+    ):
+        _fire(hass, MMWAVE_EAST, {"occupancy": True})
+        await hass.async_block_till_done()
+    assert HALL_UP not in published(mqtt_mock)
+
+
+def test_truthy_coercions() -> None:
+    """Occupancy fields parse from bool / string / number forms."""
+    assert _truthy(True) is True
+    assert _truthy(False) is False
+    assert _truthy("ON") is True
+    assert _truthy("off") is False
+    assert _truthy(1) is True
+    assert _truthy(0.0) is False
+    assert _truthy(None) is False
+    assert _truthy(["x"]) is False

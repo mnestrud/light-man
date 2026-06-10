@@ -9,7 +9,7 @@ import pytest
 
 from custom_components.light_man.config_loader import validate_config
 
-from .conftest import SEED
+from .conftest import MMWAVE_EAST, MMWAVE_WEST, SEED
 
 
 def test_valid_config_builds_switch_map() -> None:
@@ -32,6 +32,53 @@ def test_profile_passes_through_untouched() -> None:
     assert profile["base_color_mode"] == "color_temp"
     assert profile["day_window"]["start"] == "08:00"
     assert profile["sleep"]["ct"] == 2700
+
+
+def test_occupancy_passes_through() -> None:
+    result = validate_config(copy.deepcopy(SEED))
+    zone = result.config["occupancy"]["hallway"]
+    assert zone["mmwave_topics"] == [MMWAVE_EAST, MMWAVE_WEST]
+    assert zone["lights"][0]["source"] == "hallway_up"
+    assert zone["occupancy_key"] == "occupancy"
+    assert zone["transition_s"] == 1.5
+
+
+def test_occupancy_non_dict_is_soft_issue() -> None:
+    cfg = copy.deepcopy(SEED)
+    cfg["occupancy"] = "nope"
+    result = validate_config(cfg)
+    assert result.config["occupancy"] == {}
+    assert any("occupancy" in issue for issue in result.issues)
+
+
+def test_occupancy_bad_zones_dropped_with_issues() -> None:
+    cfg = copy.deepcopy(SEED)
+    cfg["occupancy"] = {
+        "z1": "not-a-mapping",
+        "z2": {"mmwave_topics": [], "lights": []},
+        "z3": {"mmwave_topics": ["t"], "lights": [{"set_topic": "", "source": "x"}]},
+        "z4": {
+            "mmwave_topics": ["t"],
+            "lights": [{"set_topic": "x", "source": "ghost"}],
+        },
+        "z5": {"mmwave_topics": "not-a-list", "lights": ["not-a-dict"]},
+    }
+    result = validate_config(cfg)
+    assert result.config["occupancy"] == {}  # every zone invalid
+    assert len([i for i in result.issues if "occupancy" in i]) >= 4
+
+
+def test_occupancy_defaults_applied() -> None:
+    cfg = copy.deepcopy(SEED)
+    cfg["occupancy"] = {
+        "z": {
+            "mmwave_topics": ["t"],
+            "lights": [{"set_topic": "x", "source": "overhead"}],
+        }
+    }
+    zone = validate_config(cfg).config["occupancy"]["z"]
+    assert zone["occupancy_key"] == "occupancy"  # default key
+    assert zone["transition_s"] == 1.5  # default transition
 
 
 def test_non_dict_raises() -> None:

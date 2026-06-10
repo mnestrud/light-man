@@ -39,9 +39,11 @@ LR_SET = "zigbee2mqtt/zgb_living_room/set"
 KIT_SET = "zigbee2mqtt/zgb_kitchen/set"
 LR_SWITCH = "zigbee2mqtt/Living Room Switch"
 KIT_SWITCH = "zigbee2mqtt/Kitchen Switch"
+MMWAVE_EAST = "zigbee2mqtt/Hall East mmwave"
+MMWAVE_WEST = "zigbee2mqtt/Hall West mmwave"
 
 SEED: dict[str, Any] = {
-    "seed_version": 2,
+    "seed_version": 3,
     "push_interval_s": 30,
     "sources": {
         "overhead": {
@@ -91,6 +93,14 @@ SEED: dict[str, Any] = {
                 "day_window": {"enabled": False, "start": "08:00", "end": "17:00"},
             },
             "rooms": {},
+        },
+    },
+    "occupancy": {
+        "hallway": {
+            "mmwave_topics": [MMWAVE_EAST, MMWAVE_WEST],
+            "occupancy_key": "occupancy",
+            "lights": [{"set_topic": HALL_UP, "source": "hallway_up"}],
+            "transition_s": 1.5,
         },
     },
 }

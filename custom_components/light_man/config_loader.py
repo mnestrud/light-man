@@ -16,16 +16,30 @@ from .const import (
     CONF_AL_SWITCH,
     CONF_CONSOLIDATED_TOPIC,
     CONF_DAY_COLOR_MODE,
+    CONF_LIGHTS,
+    CONF_MMWAVE_TOPICS,
     CONF_NIGHT_COLOR_MODE,
+    CONF_OCCUPANCY,
+    CONF_OCCUPANCY_KEY,
     CONF_PUSH_INTERVAL,
     CONF_ROOMS,
     CONF_SET_TOPIC,
+    CONF_SOURCE,
     CONF_SOURCES,
     CONF_SWITCHES,
+    CONF_TRANSITION,
     DEFAULT_COLOR_MODE,
+    DEFAULT_OCCUPANCY_KEY,
+    DEFAULT_OCCUPANCY_TRANSITION_S,
     DEFAULT_PUSH_INTERVAL_S,
 )
-from .models import LightManConfig, RoomConfig, SourceConfig
+from .models import (
+    LightManConfig,
+    OccupancyLight,
+    OccupancyZone,
+    RoomConfig,
+    SourceConfig,
+)
 
 
 @dataclass(slots=True)
@@ -150,6 +164,55 @@ def _validate_source(
     return source
 
 
+def _validate_occupancy(
+    raw: dict[str, object], source_keys: set[str], issues: list[str]
+) -> dict[str, OccupancyZone]:
+    """Validate the optional occupancy block; collect soft issues, never fail."""
+    raw_occ = raw.get(CONF_OCCUPANCY, {})
+    if not isinstance(raw_occ, dict):
+        issues.append(f"{CONF_OCCUPANCY}: expected a mapping; ignoring")
+        return {}
+    zones: dict[str, OccupancyZone] = {}
+    for zone_key, zone_raw in raw_occ.items():
+        if not isinstance(zone_raw, dict):
+            issues.append(f"occupancy.{zone_key}: zone must be a mapping")
+            continue
+        raw_topics = zone_raw.get(CONF_MMWAVE_TOPICS, [])
+        topics = (
+            [t for t in raw_topics if isinstance(t, str)]
+            if isinstance(raw_topics, list)
+            else []
+        )
+        lights: list[OccupancyLight] = []
+        for light_raw in zone_raw.get(CONF_LIGHTS, []) or []:
+            if not isinstance(light_raw, dict):
+                continue
+            set_topic = light_raw.get(CONF_SET_TOPIC)
+            source = light_raw.get(CONF_SOURCE)
+            if not isinstance(set_topic, str) or not set_topic:
+                issues.append(f"occupancy.{zone_key}: light missing set_topic")
+            elif not isinstance(source, str) or source not in source_keys:
+                issues.append(f"occupancy.{zone_key}: light source {source!r} unknown")
+            else:
+                lights.append(OccupancyLight(set_topic=set_topic, source=source))
+        if not topics or not lights:
+            issues.append(f"occupancy.{zone_key}: needs mmwave_topics and lights")
+            continue
+        key = zone_raw.get(CONF_OCCUPANCY_KEY, DEFAULT_OCCUPANCY_KEY)
+        transition = zone_raw.get(CONF_TRANSITION, DEFAULT_OCCUPANCY_TRANSITION_S)
+        zones[zone_key] = OccupancyZone(
+            mmwave_topics=topics,
+            occupancy_key=key
+            if isinstance(key, str) and key
+            else DEFAULT_OCCUPANCY_KEY,
+            lights=lights,
+            transition_s=float(transition)
+            if isinstance(transition, (int, float)) and not isinstance(transition, bool)
+            else DEFAULT_OCCUPANCY_TRANSITION_S,
+        )
+    return zones
+
+
 def validate_config(raw: object) -> ValidatedConfig:
     """Validate raw seed data into a typed config + switch map + issue list."""
     if not isinstance(raw, dict):
@@ -179,5 +242,6 @@ def validate_config(raw: object) -> ValidatedConfig:
     config: LightManConfig = {
         CONF_PUSH_INTERVAL: interval,
         CONF_SOURCES: sources,
+        CONF_OCCUPANCY: _validate_occupancy(raw, set(sources), issues),
     }
     return ValidatedConfig(config=config, switch_map=switch_map, issues=issues)
