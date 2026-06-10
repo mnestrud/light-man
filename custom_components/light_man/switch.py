@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Any
 
 from homeassistant.components.switch import SwitchEntity
 from homeassistant.const import STATE_ON, EntityCategory
+from homeassistant.core import CoreState
 from homeassistant.helpers.restore_state import RestoreEntity
 
 from .const import UID_PUSH_ENABLE, UID_SLEEP_ENABLE
@@ -47,10 +48,18 @@ class PushEnableSwitch(LightManEntity, RestoreEntity, SwitchEntity):
         super().__init__(coordinator, UID_PUSH_ENABLE)
 
     async def async_added_to_hass(self) -> None:
-        """Take over the push on startup unless it was explicitly turned off."""
+        """Take over the push on startup unless it was explicitly turned off.
+
+        On a cold boot the ``automation`` / ``input_boolean`` services aren't
+        registered yet, so we only set the desired state here; the coordinator's
+        ``async_at_started`` hook does the legacy reconcile + takeover once HA is
+        fully up. When added while HA is already running (a reload), reconcile now.
+        """
         await super().async_added_to_hass()
         last = await self.async_get_last_state()
-        if last is None or last.state == STATE_ON:
+        enabled = last is None or last.state == STATE_ON
+        self.coordinator.push_enabled = enabled
+        if enabled and self.hass.state is CoreState.running:
             await self.coordinator.async_set_push_enabled(enabled=True)
 
     @property

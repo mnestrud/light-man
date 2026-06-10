@@ -87,6 +87,23 @@ async def test_enable_floods_and_legacy_off(
     assert hass.states.get(LEG_HALL).state == "off"
 
 
+async def test_start_hook_takes_over_when_enabled(
+    hass: HomeAssistant, coordinator: Coord, mqtt_mock: Any
+) -> None:
+    """The async_at_started hook floods on takeover when push is already enabled.
+
+    Mirrors a cold boot where the switch restored ON before HA finished starting:
+    the switch sets the flag, and the deferred hook does the reconcile + push.
+    """
+    coordinator.push_enabled = True
+    mqtt_mock.async_publish.reset_mock()
+    await coordinator._reconcile_legacy_on_start(hass)
+    await hass.async_block_till_done()
+    pubs = published(mqtt_mock)
+    assert pubs[OVERHEAD_ALL] == DAY
+    assert hass.states.get(LEG_OVERHEAD).state == "off"
+
+
 async def test_toggle_drives_tick_automation(
     hass: HomeAssistant, coordinator: Coord
 ) -> None:

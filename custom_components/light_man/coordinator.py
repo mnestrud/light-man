@@ -186,8 +186,11 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         )
 
     async def _reconcile_legacy_on_start(self, _hass: HomeAssistant) -> None:
-        """Put the legacy stack in legacy mode once HA (and its services) are up."""
+        """Take over once HA (and its services) are up: reconcile, then push."""
         await self._reconcile_legacy(enabled=self.push_enabled)
+        if self.push_enabled:
+            await self._run_push(force=True)
+            self.async_set_updated_data(self._snapshot())
 
     def shutdown_subscriptions(self) -> None:
         """Unsubscribe all MQTT subscriptions (called on unload)."""
@@ -658,19 +661,26 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         self.async_set_updated_data(self._snapshot())
 
     async def _reconcile_legacy(self, *, enabled: bool) -> None:
-        """Drive the legacy stack to the inverse of Light Man ownership."""
-        await self.hass.services.async_call(
-            "automation",
-            "turn_off" if enabled else "turn_on",
-            {"entity_id": TICK_AUTOMATION},
-            blocking=False,
-        )
+        """Drive the legacy stack to the inverse of Light Man ownership.
+
+        The ``automation`` / ``input_boolean`` services may not be registered yet
+        if this runs early in boot, so each call is guarded — a missing service is
+        skipped rather than raised (the ``async_at_started`` hook re-runs the
+        reconcile once HA is fully up).
+        """
+        if self.hass.services.has_service("automation", "turn_off"):
+            await self.hass.services.async_call(
+                "automation",
+                "turn_off" if enabled else "turn_on",
+                {"entity_id": TICK_AUTOMATION},
+                blocking=False,
+            )
         entity_ids = [
             legacy
             for source in self._config[CONF_SOURCES].values()
             if (legacy := source.get(CONF_LEGACY_ENABLE))
         ]
-        if entity_ids:
+        if entity_ids and self.hass.services.has_service("input_boolean", "turn_off"):
             await self.hass.services.async_call(
                 "input_boolean",
                 "turn_off" if enabled else "turn_on",
