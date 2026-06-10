@@ -33,8 +33,13 @@ not in `exposes`, are never published, and are set via a different topic.**
 - **Value constraints are per model** and matter — e.g. Hue `color_temp` is **153–500 mired** on most
   models but **222–454** on the filament A60, and white-only models expose **no** color. `brightness`
   is `0–254`; Inovelli `defaultLevelLocal/Remote` is `0–255`. Read them with `caps`, don't assume.
-- **Read current state:** the retained `zigbee2mqtt/<name>` payload *is* the device's reported truth.
-  Force a fresh read with `zigbee2mqtt/<name>/get` + `{"<key>":""}`.
+- **Read current state:** the retained `zigbee2mqtt/<name>` payload is normally the device's reported
+  truth. Force a fresh read with `zigbee2mqtt/<name>/get` + `{"<key>":""}`.
+- **Caveat — `optimistic: true`:** for devices carrying the `optimistic` option (e.g. these Hue bulbs),
+  the retained payload **after a `/set` is an echo of the commanded value**, not a hardware read. To get
+  true device state — notably `color_mode` under `hue_native_control` — issue a `/get` and confirm a
+  *fresh* message actually arrived (`last_seen`/`linkquality` advancing, or a changed value). Trusting
+  the post-`/set` echo will report "uniform" even when the bulbs disagree.
 
 ## Options via the bridge API
 
@@ -61,12 +66,23 @@ helper sends and interprets the response rather than maintaining a hand-written 
   color-while-off prestage) instead of per-bulb commands. This is the mechanism Light Man relies on
   (see `ARCHITECTURE.md` §5.1, §5.5).
 
-## Available but intentionally NOT used by Light Man
+## Group-membership mutation — maintenance only, never runtime
 
-These exist in the Z2M bridge API; Light Man avoids them by design (see `docs/PLAN.md`):
-
-- `bridge/request/group/members/{add,remove,remove_all}` — membership mutation (the rejected
-  "dynamic group membership" approach; Light Man excludes held rooms by *addressing*, not membership).
+```
+zigbee2mqtt/bridge/request/group/members/add         {"group":"<g>","device":"<d>","endpoint":<ep>}
+zigbee2mqtt/bridge/request/group/members/remove      {"group":"<g>","device":"<d>","endpoint":<ep>}
+zigbee2mqtt/bridge/request/group/members/remove_all  {"device":"<d>","endpoint":<ep>}
+```
+- Light Man's **runtime never mutates membership** — held rooms are excluded by *addressing*, not
+  membership (the rejected "dynamic group membership" approach; see `docs/PLAN.md`).
+- It **is** the sanctioned **out-of-band maintenance** op for stale group state. `remove_all` sends the
+  genGroups `removeAll` ZCL command, clearing the bulb's **entire NVRAM group table** — including stale
+  entries Z2M's `bridge/groups` doesn't track — after which you re-add to the correct groups. Used
+  2026-06-09 to fix the living-room color-mode split (bulbs had a stale group the hallway also used;
+  group commands are broadcasts, so they applied the hallway rgb); the Phase 2 bulk-normalize does this
+  house-wide. Detail: `docs/reference/bulb-split-investigation.md`.
+- Responses land on `bridge/response/group/members/<op>` (echo `transaction` for correlation).
+  `mqtt_dump.py` does **not** wrap these — send the raw `bridge/request/group/members/*` publishes.
 - `bridge/request/group/{add,remove,rename}` — group lifecycle. Creating a `hue_native_control:true`
   per-room group for an orphan bulb (PLAN §1.2) is a deliberate one-time manual step, not automated.
 

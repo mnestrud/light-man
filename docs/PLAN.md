@@ -10,8 +10,10 @@
 > switch-taps blueprint and Light Man were two adaptive brains fighting over the same rooms, and the
 > hold model inferred release from noisy switch on/off bounce. Light Man is now the **single adaptive
 > brain**: per-room **mode** (`adaptive | held(night|day|manual)`) driven by **explicit Inovelli action
-> intents** (config = hold, single taps = release, held-dim = freeze) — never off→on inference; **paddle
-> off-respect** (an off room is never sent brightness, fixing "can't turn it off"); Light-Man-owned
+> intents** (config = hold, single taps = release, held-dim = freeze) — never off→on inference;
+> **off rooms still get the flood** (the stateless `multiColor` stages color-while-off and the SBM
+> binding owns on/off, so flooding an off room never turns it on — v0.2.1 dropped the earlier off-skip);
+> Light-Man-owned
 > **night target** (config, not a blueprint scene); and a **real single toggle** that disables the master
 > tick automation (`automation.turn_off`) — not just the four a16–a19 booleans — and restores it on
 > unload. Full design: `~/.claude/plans/synchronous-hugging-avalanche.md`. The §1.4 hold language below
@@ -89,7 +91,9 @@ The reference pack settled three things that flipped the mechanism:
 `transaction` correlation, the 3-attempt retry state machine, the membership reconciler, and bind
 churn. Arming a hold becomes a `Store` write; the next push addresses around it. Lost reliability is
 recovered for free: the push is level-triggered (re-asserts every cycle), so a dropped flood self-heals
-next cycle exactly as the tick does today.
+next cycle exactly as the tick does today. (Membership mutation survives only as an out-of-band
+**maintenance** op — `remove_all`+re-add to clear stale bulb NVRAM groups; see
+`docs/reference/bulb-split-investigation.md` — never a runtime Light Man behavior.)
 
 ## Integration identity
 
@@ -122,7 +126,8 @@ next cycle exactly as the tick does today.
   being retired), not phase-aligned to it.
 - **Hold TTL:** a single rule — `expires_at = next solar midnight` (holds always clear overnight).
 - **RF during holds:** the transient per-room-flood increase for a held source is **accepted**;
-  steady state (no holds) is unchanged at 4 consolidated floods.
+  steady state (no holds) is unchanged at 4 consolidated floods (emitted ~0.15 s apart —
+  `INTER_PUBLISH_DELAY_S`, mesh hygiene).
 - **Single-toggle fallback (until Phase 2):** one switch — `switch.light_man_push_enable` — swaps the
   whole stack. ON runs Light Man's push **and** turns the legacy a16–a19 enable booleans OFF; OFF
   no-ops Light Man **and** turns them back ON. The new and old stacks are therefore never flooding at

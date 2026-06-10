@@ -276,6 +276,17 @@ Two layers (see the reference): **state** (`exposes` → `zigbee2mqtt/<name>/set
 (`ea.SET` config like `hue_native_control` → `bridge/request/{device,group}/options`, read from
 `configuration.yaml`). For a group, `/set` keys are the **union of member exposes**.
 
+**Group commands are Zigbee multicasts (network broadcasts), not unicasts.** Every bulb on the mesh
+hears them; group membership is a **receiver-side filter** the bulb applies from its own NVRAM group
+table — which can **drift** from Z2M's `bridge/groups` view. A bulb can therefore apply a group's
+command (e.g. flip to the hallway's rgb) for a group Z2M doesn't list it in. Reconcile with
+`bridge/request/group/members/remove_all` then re-add to the correct groups (used 2026-06-09 to fix
+the living-room color-mode split; Phase 2 normalizes house-wide). **Read true device color via `/get`**,
+not the retained state — with `optimistic: true` bulbs the retained payload echoes the *commanded*
+value, not what the silicon settled on (confirm a fresh message arrived). `mqtt_dump.py` has no
+group-membership helper yet — those go via raw `bridge/request/group/members/*`. Full trace:
+`docs/reference/bulb-split-investigation.md`.
+
 ```
 python scripts/mqtt_dump.py caps '<name>'                 # what's settable (per model)
 python scripts/mqtt_dump.py sub  'zigbee2mqtt/<name>'     # current state (retained = truth)

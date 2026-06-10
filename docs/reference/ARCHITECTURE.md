@@ -2,8 +2,10 @@
 
 > **Superseded in part by the v0.2.0 redesign (2026-06-09).** The hold model below (off→on release,
 > consolidated-vs-per-room "exclude held rooms") is replaced by an explicit per-room **mode**
-> (`adaptive | held(night/day/manual)`) driven only by Inovelli action intents, **paddle off-respect**,
-> a Light-Man-owned **night target**, and a single toggle that disables the **master tick automation**.
+> (`adaptive | held(night/day/manual)`) driven only by Inovelli action intents, **off rooms still
+> getting the flood** (stateless `multiColor` stages color-while-off — the SBM binding owns on/off, so
+> it never turns them on; v0.2.1 dropped the earlier off-skip), a Light-Man-owned **night target**, and
+> a single toggle that disables the **master tick automation**.
 > Day/Night and the occupancy helper re-enable are gated off the live blueprint/automations when Light
 > Man owns. Authoritative: `docs/PLAN.md` redesign note + `~/.claude/plans/synchronous-hugging-avalanche.md`.
 
@@ -116,6 +118,10 @@ the hold set — no Zigbee topology is mutated:
 - **No held room in a source** → one publish to the consolidated group `/set` (`zgb_overhead_all`,
   etc.) — byte-identical to today: same group, same RF (4 floods), full native Hue.
 - **A room is held** → publish per **unheld** room to its per-room group `/set`, skipping the held one.
+- **Inter-publish spacing** — consecutive group `/set`s are spaced ~`INTER_PUBLISH_DELAY_S` (0.15 s)
+  so the per-group Zigbee multicasts don't all land in the same instant. This is mesh hygiene, **not**
+  correctness — the color-mode split once blamed on simultaneity was a stale bulb group membership
+  (`docs/reference/bulb-split-investigation.md`).
 
 This works because **every bulb is in both its per-room group AND the consolidated source group**
 (`z2m-groups.yaml:31-34`). Per-room groups + SBM bindings are untouched → paddle on/off keeps working
@@ -132,22 +138,26 @@ device-level option (see §5.5).
 No `bridge/request/group/members/{add,remove}` primitive, no unique-per-attempt `transaction`
 correlation, no 3-attempt retry state machine, no membership reconciler, no bind churn. Reliability is
 recovered for free: the push is **level-triggered** (re-asserts every cycle), so a dropped flood
-self-heals on the next cycle exactly as the tick does today.
+self-heals on the next cycle exactly as the tick does today. (Group-membership mutation isn't gone from
+the *toolkit* — it's a sanctioned **out-of-band maintenance** op, e.g. `remove_all`+re-add to clear
+stale bulb NVRAM groups; the **runtime** integration just never uses it. See §8 and
+`docs/reference/bulb-split-investigation.md`.)
 
 ### 5.3 Hold model + arm/release
 - **Hold state** — `Store` (`al_held_rooms`): `room → {armed_at, expires_at}`. Intent set immediately;
   the next push honors it. Holds persist across restart (the intent must survive — else a restart
   re-clobbers a held scene). No convergence step (addressing is recomputed each push).
 - **Tap seam** — Light Man **subscribes to `zigbee2mqtt/<switch>/action`** (arm/release) and to the
-  Inovelli switch **state** topics (off→on release — the same room switches Light Man adapts). The
+  Inovelli switch **state** topics (used only for an **immediate re-push** on a paddle change, *not*
+  for release — the off→on *state* release was dropped; it fired spuriously on paddle bounce). The
   switch-taps blueprint still applies the actual look/LED/shades; Light Man only decides whether the
   adaptive push skips that room.
 - **Arm** (on `config_single`/`config_double` = Day/Night, or `up_held`/`down_held` = dim — **never**
   `*_double`/`*_triple`, which are PowerView shades): record the room held; the tap already applied the
   look. `expires_at = next solar midnight` (holds always clear overnight).
-- **Release** (on `up_single` = tap-on, or room off→on via the switch state topic): clear the hold,
+- **Release** (on `up_single` *or* `down_single` — **either single paddle tap**): clear the hold,
   then **trigger an immediate push cycle** so the room snaps to adaptive at once (reuses the push path,
-  no bespoke single-room publish).
+  no bespoke single-room publish). Release is tap-driven only — never inferred from on/off state.
 - **TTL sweep** (piggyback the push loop) clears expired holds; info line on expiry.
 - **Holdable rooms** must have a per-room `set_topic` — without one the push cannot address around the
   room (it would fall back to the consolidated flood and hit the held bulbs). Validate the
@@ -180,8 +190,9 @@ targeting; rides the stateless flood, never turns on). No orphan groups needed.
 ### 5.6 RF during holds
 While a source has a held room, that source addresses per-room, so on each AL step the unheld rooms
 get individual floods instead of one consolidated flood (~9 vs 1 for overhead). This is a transient
-increase, bounded by hold lifetime; steady state (no holds) is unchanged at 4 consolidated floods.
-**Accepted** — holds are transient.
+increase, bounded by hold lifetime; steady state (no holds) is unchanged at 4 consolidated floods
+(now emitted ~0.15 s apart, not simultaneously — `INTER_PUBLISH_DELAY_S`, §5.1). **Accepted** — holds
+are transient.
 
 ---
 
@@ -192,7 +203,8 @@ increase, bounded by hold lifetime; steady state (no holds) is unchanged at 4 co
   subscribe.
 - **Z2M keeps owning:** groups, membership, bindings, `hue_native_control`, Inovelli SBM, all device
   I/O. Light Man talks to Z2M **only over MQTT** (group/switch `/set` publishes + `…/action` and
-  switch-state subscribes) — no `bridge/request` group mutation.
+  switch-state subscribes) — no `bridge/request` group mutation **at runtime** (membership mutation is
+  reserved for out-of-band maintenance; see §5.2).
 - **Switch taps (Phase 1):** Light Man **subscribes to the Inovelli action + state topics** and manages
   holds. Look application, LED effects, PowerView shade scenes, accent toggling, and the held-dim ramp
   stay in the switch-taps blueprint. The tick blueprint keeps a1–a15 (Inovelli unicast); **a16–a19 are
