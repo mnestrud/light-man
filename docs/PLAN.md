@@ -444,15 +444,10 @@ mechanical lint rules are enforced continuously by the local stack — no deferr
   emission (2). Confirm with a one-tap-per-room night+day sniff across every overhead/accent switch.
 - Preserve KB-encoded fixes (latch, off-prestage, hue native control, SBM binding) as behavior +
   regression tests.
-- **Bulk group-membership normalize (device maintenance, house-wide).** The bulb color-mode split
-  (RESOLVED 2026-06-09) was a **stale Zigbee group ID in 3 living-room bulbs' firmware NVRAM** that
-  Z2M's `bridge/groups` never showed; group commands are multicasts (network broadcasts), so a stray
-  member applied the hallway's `color`/rgb. Those 3 were fixed by `remove_all` + re-add. **Follow-up:**
-  audit/normalize **every** bulb — for each, genGroups `removeAll` then re-add to exactly its
-  Z2M-known groups — to clear any other stale membership house-wide. Z2M exposes no MQTT read of a
-  device's real group table, so detection is **behavioral** (probe each rgb-pushing group in isolation,
-  `/get` all bulbs, flag non-member adopters) or **blind** (normalize all). Detail + root-cause trace:
-  `docs/reference/bulb-split-investigation.md`.
+- ~~Bulk group-membership normalize~~ **— DONE (house-wide, `scripts/zgb_groups.py`, commit 19680fe).**
+  Every bulb's NVRAM group table was `removeAll`+re-added to exactly its Z2M-known groups, clearing the
+  stale membership behind the 2026-06-09 color-mode split house-wide. No longer a Phase-2 item. Root-cause
+  trace retained: `docs/reference/bulb-split-investigation.md`.
 
 ## Live HA-config edits made during cutover (NOT in this repo)
 
