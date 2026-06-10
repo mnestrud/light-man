@@ -48,6 +48,7 @@ from .const import (
     DEFAULT_TRANSITION_S,
     INTER_PUBLISH_DELAY_S,
     MODE_ADAPTIVE,
+    SET_SUFFIX,
     SOLAR_MIDNIGHT_EVENT,
     STATE_OFF,
     STATE_ON,
@@ -56,6 +57,7 @@ from .const import (
 from .models import AdaptiveValues
 from .modes import action_to_mode
 from .push import (
+    _room_target,
     build_night_payload,
     build_payload,
     plan_publishes,
@@ -120,6 +122,7 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
             for room in source.get(CONF_ROOMS, {})
         }
         self._last_published: dict[tuple[str, str], PushPayload] = {}
+        self._last_inovelli: dict[str, dict[str, Any]] = {}
         self._paddle_on: dict[str, bool] = {}
         self._unsubs: list[Any] = []
         self.push_enabled = False
@@ -145,6 +148,7 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
             "engine": {},
             "sleep": {"on": False, "s": 0.0},
             "occupancy": {},
+            "inovelli": {},
         }
 
     # --- lifecycle ----------------------------------------------------------
@@ -235,13 +239,17 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         sleep_s = self._compute_sleep_s(now)
         self.diagnostics["sleep"] = {"on": self.sleep_on, "s": round(sleep_s, 3)}
         plan: list[tuple[str, str, PushPayload]] = []
+        inovelli: list[tuple[str, dict[str, Any]]] = []
         for key, source in self._config[CONF_SOURCES].items():
             if only_source is not None and key != only_source:
                 continue
-            plan.extend(
-                self._plan_source(key, source, elevation, noon, now_minutes, sleep_s)
+            bulb, switches = self._plan_source(
+                key, source, elevation, noon, now_minutes, sleep_s
             )
+            plan.extend(bulb)
+            inovelli.extend(switches)
         await self._publish_spaced(plan, force=force)
+        await self._publish_inovelli(inovelli, force=force)
 
     def _plan_source(
         self,
@@ -251,27 +259,67 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         noon: float,
         now_minutes: float,
         sleep_s: float,
-    ) -> list[tuple[str, str, PushPayload]]:
-        """Plan one source's ``(source_key, topic, payload)`` publishes."""
+    ) -> tuple[list[tuple[str, str, PushPayload]], list[tuple[str, dict[str, Any]]]]:
+        """Plan a source's bulb publishes + its rooms' Inovelli switch publishes."""
         transition = float(source.get(CONF_TRANSITION, DEFAULT_TRANSITION_S))
         adaptive_payload = self._adaptive_payload(
             key, source, elevation, noon, now_minutes, sleep_s, transition
         )
         if adaptive_payload is None:
-            return []
+            return [], []
         day_payload, night_payload = self._look_payloads(
             source, adaptive_payload, transition
         )
         rooms = source.get(CONF_ROOMS, {})
+        modes = {r: self._modes.mode_of(r) for r in rooms if self._modes.is_held(r)}
         plan = plan_publishes(
             source,
             adaptive_payload=adaptive_payload,
             day_payload=day_payload,
             night_payload=night_payload,
-            modes={r: self._modes.mode_of(r) for r in rooms if self._modes.is_held(r)},
+            modes=modes,
         )
         self.diagnostics["addressing"][key] = [topic for topic, _ in plan]
-        return [(key, topic, payload) for topic, payload in plan]
+        bulb = [(key, topic, payload) for topic, payload in plan]
+        switches = self._inovelli_plan(
+            source, adaptive_payload, day_payload, night_payload, modes
+        )
+        return bulb, switches
+
+    def _inovelli_plan(
+        self,
+        source: SourceConfig,
+        adaptive_payload: PushPayload,
+        day_payload: PushPayload,
+        night_payload: PushPayload,
+        modes: dict[str, str],
+    ) -> list[tuple[str, dict[str, Any]]]:
+        """Plan per-room Inovelli switch writes (absorbs the tick's a1-a15).
+
+        Each room's switch gets the room's target brightness as ``defaultLevel``
+        (tap-on prestage) plus the LED-bar ``brightness`` while its paddle is on.
+        A manually-frozen room is skipped (its switch is left as-is).
+        """
+        plan: list[tuple[str, dict[str, Any]]] = []
+        for room, room_cfg in source.get(CONF_ROOMS, {}).items():
+            target = _room_target(
+                modes.get(room, MODE_ADAPTIVE),
+                adaptive_payload=adaptive_payload,
+                day_payload=day_payload,
+                night_payload=night_payload,
+            )
+            if target is None:
+                continue
+            bri = target["brightness"]  # build_payload always sets it
+            for base in room_cfg.get("switches", []):
+                payload: dict[str, Any] = {
+                    "defaultLevelLocal": bri,
+                    "defaultLevelRemote": bri,
+                }
+                if self._paddle_on.get(base):
+                    payload["brightness"] = bri  # LED bar, only while the paddle is on
+                plan.append((base + SET_SUFFIX, payload))
+        return plan
 
     def _source_payload(
         self,
@@ -363,6 +411,20 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
             if awaiting_gap:
                 await asyncio.sleep(INTER_PUBLISH_DELAY_S)
             awaiting_gap = await self._publish(source_key, topic, payload, force=force)
+
+    async def _publish_inovelli(
+        self, plan: list[tuple[str, dict[str, Any]]], *, force: bool
+    ) -> None:
+        """Publish per-room Inovelli switch writes with write-on-change dedup.
+
+        These are unicasts to individual switches (no mesh-multicast spacing).
+        """
+        for topic, payload in plan:
+            if not force and self._last_inovelli.get(topic) == payload:
+                continue
+            if await self._raw_publish(topic, payload):
+                self._last_inovelli[topic] = payload
+                self.diagnostics["inovelli"][topic] = payload
 
     async def _publish(
         self, source_key: str, topic: str, payload: PushPayload, *, force: bool

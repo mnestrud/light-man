@@ -88,6 +88,7 @@ ATTR_RGB_COLOR: Final = "rgb_color"
 
 # --- MQTT topic suffixes ----------------------------------------------------
 ACTION_SUFFIX: Final = "/action"
+SET_SUFFIX: Final = "/set"
 
 # --- Room modes -------------------------------------------------------------
 # A room is either `adaptive` (the default — no hold) or held at a look.

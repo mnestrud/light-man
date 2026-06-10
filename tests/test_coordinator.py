@@ -649,3 +649,63 @@ def test_truthy_coercions() -> None:
     assert _truthy(0.0) is False
     assert _truthy(None) is False
     assert _truthy(["x"]) is False
+
+
+# --- Inovelli defaultLevel/LED (absorb tick a1-a15) ------------------------
+
+LR_SET_TOPIC = "zigbee2mqtt/Living Room Switch/set"
+
+
+async def test_inovelli_defaultlevel_published(
+    hass: HomeAssistant, coordinator: Coord, mqtt_mock: Any
+) -> None:
+    """Each room's switch gets the room's target brightness as defaultLevel."""
+    await coordinator.async_set_push_enabled(enabled=True)
+    await hass.async_block_till_done()
+    # living_room is adaptive -> DAY brightness 229; paddle state unknown -> no LED bar.
+    assert published(mqtt_mock)[LR_SET_TOPIC] == {
+        "defaultLevelLocal": 229,
+        "defaultLevelRemote": 229,
+    }
+
+
+async def test_inovelli_led_bar_when_paddle_on(
+    hass: HomeAssistant, coordinator: Coord, mqtt_mock: Any
+) -> None:
+    """While the paddle is on, the LED-bar brightness is included."""
+    await coordinator.async_set_push_enabled(enabled=True)
+    _fire(hass, LR_SWITCH, {"state": "ON"})
+    await hass.async_block_till_done()
+    mqtt_mock.async_publish.reset_mock()
+    await coordinator.async_force_push()
+    await hass.async_block_till_done()
+    assert published(mqtt_mock)[LR_SET_TOPIC] == {
+        "defaultLevelLocal": 229,
+        "defaultLevelRemote": 229,
+        "brightness": 229,
+    }
+
+
+async def test_inovelli_skips_manually_frozen_room(
+    hass: HomeAssistant, coordinator: Coord, mqtt_mock: Any
+) -> None:
+    """A held-manual room leaves its switch's defaultLevel untouched."""
+    await coordinator.async_set_push_enabled(enabled=True)
+    _fire(hass, LR_SWITCH, {"action": "up_held"})  # -> HELD_MANUAL
+    await hass.async_block_till_done()
+    mqtt_mock.async_publish.reset_mock()
+    await coordinator.async_force_push()
+    await hass.async_block_till_done()
+    assert LR_SET_TOPIC not in published(mqtt_mock)
+
+
+async def test_inovelli_dedup_skips_unchanged(
+    hass: HomeAssistant, coordinator: Coord, mqtt_mock: Any
+) -> None:
+    """An unchanged defaultLevel is not re-published next cycle."""
+    await coordinator.async_set_push_enabled(enabled=True)
+    await hass.async_block_till_done()
+    mqtt_mock.async_publish.reset_mock()
+    await coordinator.async_refresh()
+    await hass.async_block_till_done()
+    assert LR_SET_TOPIC not in published(mqtt_mock)
