@@ -418,6 +418,30 @@ mechanical lint rules are enforced continuously by the local stack — no deferr
   adaptive target (respecting on/off), and drop the per-automation adaptive `light.turn_on`. Until then
   the motion light-on is left intact (gated edits live in `automations.yaml`, not the light-man repo).
 - Optionally migrate the switch-taps blueprint's look application + held-dim ramp + occupancy.
+- **Own the config-tap night/day intent end-to-end (fix the soak-test hold gap).** Symptom (soak
+  2026-06-10): `config_single`/`config_double` night/day holds take in some rooms (office) but not others
+  (kitchen, living room, Primary Bath, shower). All affected rooms **are** configured — `overhead_bath` =
+  "Primary Bath Front Smart Switch", `shower` = "Primary Bath Shower Smart Switch" — so this is **not** a
+  topology gap (an earlier note wrongly read "downstairs bath" as unmapped; it is `overhead_bath`). Two
+  distinct, verified causes:
+  1. **Day mode applies nothing under Light Man ownership (code-verified, uniform — the bath/shower
+     "no day mode" report).** `config_double` → `HELD_DAY`, and `push._room_target` returns the live
+     *adaptive* payload for `HELD_DAY`, so `plan_publishes` floods the consolidated group with the value
+     the room already has — **no visible change**. The legacy blueprint's hardcoded bright day scene is
+     gated off and Light Man never reproduces it. Light Man has **no distinct "day look" target** yet —
+     `HELD_DAY` only *freezes* live-adaptive. Fix: give Light Man an explicit day-look target to apply on
+     `config_double` (ties directly into the Phase-2 `base_rgb`/day-window per-regime targets above), not
+     a freeze-at-adaptive no-op.
+  2. **Night mode is the only tap with a distinct payload today** (`config_single` → `HELD_NIGHT` →
+     20 %/2700 K), so any *per-switch* failure there is **input-side** — whether each Inovelli's
+     config-button scene action is actually emitted to MQTT (a per-switch Z2M/firmware setting). Light
+     Man's own path is symmetric across rooms (verified: per-room groups all exist and are populated —
+     `zgb_kitchen` 3, `zgb_living_room` 6, `zgb_office_overhead` 2 via live `mqtt_dump.py bridge`; switch
+     topics match the seed). Audit with a tap sniff and normalize the emitters.
+
+  **Fix both once, when Light Man fully owns taps** (this blueprint-absorption milestone, so intent is no
+  longer split with the gated blueprint): add the explicit day target (1) and normalize config-button
+  emission (2). Confirm with a one-tap-per-room night+day sniff across every overhead/accent switch.
 - Preserve KB-encoded fixes (latch, off-prestage, hue native control, SBM binding) as behavior +
   regression tests.
 - **Bulk group-membership normalize (device maintenance, house-wide).** The bulb color-mode split
