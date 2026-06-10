@@ -62,7 +62,7 @@ SEED: dict[str, Any] = {
                 "dusk_floor_ct": 2200,
                 "night_floor_br": 30,
                 "sleep": {"br": 30, "color_mode": "color_temp", "ct": 2700},
-                "day_window": {"enabled": True, "start": "08:00", "end": "17:00"},
+                "day_window": {"enabled": False, "start": "08:00", "end": "17:00"},
             },
             "rooms": {
                 "living_room": {"set_topic": LR_SET, "switches": [LR_SWITCH]},
@@ -87,7 +87,7 @@ SEED: dict[str, Any] = {
                 "dusk_floor_ct": 2200,
                 "night_floor_br": 30,
                 "sleep": {"br": 40, "color_mode": "rgb", "rgb": [255, 126, 30]},
-                "day_window": {"enabled": True, "start": "08:00", "end": "17:00"},
+                "day_window": {"enabled": False, "start": "08:00", "end": "17:00"},
             },
             "rooms": {},
         },
@@ -125,6 +125,20 @@ def event_loop_policy() -> asyncio.AbstractEventLoopPolicy:
     if sys.platform == "win32":
         return asyncio.WindowsSelectorEventLoopPolicy()
     return asyncio.DefaultEventLoopPolicy()
+
+
+@pytest.fixture(autouse=True)
+def _fixed_solar() -> Iterator[None]:
+    """Pin solar elevation so the engine's adaptive payload is deterministic.
+
+    The push reads real solar elevation; tests freeze it (45 deg now, 71.5 deg
+    noon) so the computed payload is reproducible regardless of wall clock.
+    """
+    with patch(
+        "custom_components.light_man.coordinator.solar_inputs",
+        return_value=(45.0, 71.5),
+    ):
+        yield
 
 
 async def seed_states(hass: HomeAssistant) -> None:

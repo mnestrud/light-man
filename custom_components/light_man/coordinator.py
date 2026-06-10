@@ -119,7 +119,7 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
             "dedup_skips": 0,
             "addressing": {},
             "last_publish": {},
-            "shadow": {},
+            "engine": {},
         }
 
     # --- lifecycle ----------------------------------------------------------
@@ -172,100 +172,59 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         }
 
     async def _async_update_data(self) -> CoordinatorData:
-        """Periodic tick: sweep expired held modes, record shadow, then push."""
+        """Periodic tick: sweep expired held modes, then push."""
         now = dt_util.utcnow()
         expired = await self._modes.sweep_expired(now)
         for room in expired:
             self._invalidate_room(room)
             _LOGGER.info("hold expired for room %s", room)
-        self._record_shadow(now)
         await self._run_push(force=bool(expired))
         return self._snapshot()
 
-    # --- Phase 2 shadow mode (engine vs AL — does not change the push) -------
-
-    def _record_shadow(self, now: datetime) -> None:
-        """Compute the Phase-2 engine target alongside the AL read, per source.
-
-        Shadow mode: the result is recorded in diagnostics and logged at debug,
-        but **nothing about the published payload changes**. This is the live
-        de-risk before cutover — it exercises the real solar-elevation read and
-        surfaces engine-vs-AL so the curve can be eyeballed on the running house.
-        """
-        try:
-            elevation, noon = solar_inputs(self.hass, now)
-        except ValueError:
-            _LOGGER.debug("shadow: solar elevation unavailable this cycle")
-            return
-        local = dt_util.as_local(now)
-        now_minutes = local.hour * 60 + local.minute + local.second / 60
-        sources: dict[str, Any] = {}
-        for key, source in self._config[CONF_SOURCES].items():
-            profile = source.get("profile")
-            if profile is None:
-                continue
-            target = compute_target(
-                elevation,
-                noon,
-                profile,
-                sleep_s=1.0 if self._is_sleeping(source) else 0.0,
-                now_minutes=now_minutes,
-            )
-            sources[key] = {
-                "engine": {
-                    "brightness_pct": round(target.brightness_pct, 1),
-                    "color_mode": target.color_mode,
-                    "color_temp_kelvin": target.color_temp_kelvin,
-                    "rgb_color": list(target.rgb_color) if target.rgb_color else None,
-                },
-                "al": self._read_adaptive(source),
-            }
-            _LOGGER.debug(
-                "shadow %s: e=%.1f engine=%s al=%s",
-                key,
-                elevation,
-                sources[key]["engine"],
-                sources[key]["al"],
-            )
-        self.diagnostics["shadow"] = {
-            "elevation": round(elevation, 2),
-            "noon": round(noon, 2),
-            "sources": sources,
-        }
-
-    # --- push ---------------------------------------------------------------
+    # --- push (engine-driven adaptive value) --------------------------------
 
     async def _run_push(self, *, force: bool, only_source: str | None = None) -> None:
         """Plan every source (or one) and publish with a small inter-send gap.
 
-        Group commands are Zigbee multicasts (network broadcasts); a short space
-        between sends keeps them from all landing in the same instant.
+        The adaptive value comes from the real-elevation engine (per-source
+        profile); a source with no profile falls back to its AL dummy switch.
+        Solar elevation is read once per cycle; if it is unavailable (a polar
+        edge) the cycle is skipped rather than publishing a bad value. Group
+        commands are Zigbee multicasts — a short inter-send gap keeps them from
+        all landing in the same instant.
         """
         if not self.push_enabled:
             return
+        now = dt_util.utcnow()
+        try:
+            elevation, noon = solar_inputs(self.hass, now)
+        except ValueError:
+            _LOGGER.warning("solar elevation unavailable; skipping push cycle")
+            return
+        local = dt_util.as_local(now)
+        now_minutes = local.hour * 60 + local.minute + local.second / 60
         plan: list[tuple[str, str, PushPayload]] = []
         for key, source in self._config[CONF_SOURCES].items():
             if only_source is not None and key != only_source:
                 continue
-            plan.extend(self._plan_source(key, source))
+            plan.extend(self._plan_source(key, source, elevation, noon, now_minutes))
         await self._publish_spaced(plan, force=force)
 
     def _plan_source(
-        self, key: str, source: SourceConfig
+        self,
+        key: str,
+        source: SourceConfig,
+        elevation: float,
+        noon: float,
+        now_minutes: float,
     ) -> list[tuple[str, str, PushPayload]]:
         """Plan one source's ``(source_key, topic, payload)`` publishes."""
-        adaptive = self._read_adaptive(source)
-        if adaptive is None:
-            return []
         transition = float(source.get(CONF_TRANSITION, DEFAULT_TRANSITION_S))
-        sleeping = self._is_sleeping(source)
-        adaptive_payload = build_payload(
-            brightness_pct=adaptive["brightness_pct"],
-            color_temp_kelvin=adaptive["color_temp_kelvin"],
-            rgb_color=adaptive["rgb_color"],
-            mode=resolve_color_mode(source, sleeping=sleeping),
-            transition=transition,
+        adaptive_payload = self._adaptive_payload(
+            key, source, elevation, noon, now_minutes, transition
         )
+        if adaptive_payload is None:
+            return []
         rooms = source.get(CONF_ROOMS, {})
         plan = plan_publishes(
             source,
@@ -275,6 +234,56 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         )
         self.diagnostics["addressing"][key] = [topic for topic, _ in plan]
         return [(key, topic, payload) for topic, payload in plan]
+
+    def _adaptive_payload(
+        self,
+        key: str,
+        source: SourceConfig,
+        elevation: float,
+        noon: float,
+        now_minutes: float,
+        transition: float,
+    ) -> PushPayload | None:
+        """Return the live adaptive payload for a source.
+
+        Phase 2: the real-elevation engine computes it from the source's profile
+        (the value is recorded in diagnostics for inspection). A source with no
+        profile falls back to its AL dummy switch so a partial config still runs.
+        """
+        profile = source.get("profile")
+        if profile is not None:
+            target = compute_target(
+                elevation,
+                noon,
+                profile,
+                sleep_s=1.0 if self._is_sleeping(source) else 0.0,
+                now_minutes=now_minutes,
+            )
+            rgb = list(target.rgb_color) if target.rgb_color else None
+            self.diagnostics["engine"][key] = {
+                "elevation": round(elevation, 2),
+                "brightness_pct": round(target.brightness_pct, 1),
+                "color_mode": target.color_mode,
+                "color_temp_kelvin": target.color_temp_kelvin,
+                "rgb_color": rgb,
+            }
+            return build_payload(
+                brightness_pct=target.brightness_pct,
+                color_temp_kelvin=target.color_temp_kelvin or 0.0,
+                rgb_color=rgb,
+                mode=target.color_mode,
+                transition=transition,
+            )
+        adaptive = self._read_adaptive(source)
+        if adaptive is None:
+            return None
+        return build_payload(
+            brightness_pct=adaptive["brightness_pct"],
+            color_temp_kelvin=adaptive["color_temp_kelvin"],
+            rgb_color=adaptive["rgb_color"],
+            mode=resolve_color_mode(source, sleeping=self._is_sleeping(source)),
+            transition=transition,
+        )
 
     async def _publish_spaced(
         self, plan: list[tuple[str, str, PushPayload]], *, force: bool

@@ -43,8 +43,11 @@ if TYPE_CHECKING:
 
     from custom_components.light_man.coordinator import LightManCoordinator as Coord
 
-# Expected payloads for the test seed (AL overhead 50%/4000K; night 20%/2700K).
-DAY = {"brightness": 127, "transition": 1.0, "color_temp": 250}
+# Expected payloads for the test seed. DAY is now the engine's output for the
+# overhead profile at the pinned elevation (e=45, noon=71.5, day_window off,
+# awake): 90% -> 229, ct_pct 0.629 in mired -> ~234. NIGHT is the config-driven
+# hold target (20%/2700K), unchanged by the engine cutover.
+DAY = {"brightness": 229, "transition": 1.0, "color_temp": 234}
 NIGHT = {"brightness": 51, "transition": 1.0, "color_temp": 370}
 
 
@@ -109,13 +112,14 @@ async def test_unload_restore_calls_tick_on(
 async def test_sleep_switches_hallway_to_rgb(
     hass: HomeAssistant, coordinator: Coord, mqtt_mock: Any
 ) -> None:
-    """The hallway source emits rgb when its sleep switch is on."""
+    """With its sleep switch on, the hallway emits the engine's sleep rgb."""
     hass.states.async_set(SLEEP_SWITCH, "on", {})
     await hass.async_block_till_done()
     mqtt_mock.async_publish.reset_mock()
     await coordinator.async_set_push_enabled(enabled=True)
     await hass.async_block_till_done()
-    assert published(mqtt_mock)[HALL_UP]["color"] == {"r": 255, "g": 100, "b": 50}
+    # Engine sleep target for hallway_up's profile (sleep_s=1): rgb [255,126,30].
+    assert published(mqtt_mock)[HALL_UP]["color"] == {"r": 255, "g": 126, "b": 30}
 
 
 async def test_config_single_holds_night_per_room(
@@ -346,28 +350,75 @@ async def test_invalidate_unknown_room_is_noop(
     coordinator._invalidate_room("ghost")
 
 
-async def test_adaptive_unavailable_skips_source(
+async def test_profiled_source_ignores_unavailable_al(
     hass: HomeAssistant, coordinator: Coord, mqtt_mock: Any
 ) -> None:
-    """An unavailable AL switch skips that source, not the whole push."""
+    """A profiled source is engine-driven, so an unavailable AL switch is moot."""
     hass.states.async_set(AL_OVERHEAD, "unavailable", {})
     await hass.async_block_till_done()
     mqtt_mock.async_publish.reset_mock()
     await coordinator.async_set_push_enabled(enabled=True)
     await hass.async_block_till_done()
-    pubs = published(mqtt_mock)
-    assert OVERHEAD_ALL not in pubs
-    assert HALL_UP in pubs
+    assert published(mqtt_mock)[OVERHEAD_ALL] == DAY
 
 
-async def test_adaptive_missing_attributes_skips_source(
-    hass: HomeAssistant, coordinator: Coord, mqtt_mock: Any
-) -> None:
-    """An AL switch missing brightness is skipped."""
-    hass.states.async_set(AL_OVERHEAD, "on", {"color_temp_kelvin": 4000})
+async def _coord_for(hass: HomeAssistant, seed: Any) -> Coord:
+    """Build + set up a coordinator from a custom seed (push starts disabled)."""
+    entry = MockConfigEntry(domain=DOMAIN, title="Light Man")
+    entry.add_to_hass(hass)
+    modes = ModeManager(FakeStore(None))
+    await modes.async_load()
+    coord = LightManCoordinator(hass, entry, validate_config(seed), modes)
+    await coord._async_setup()
+    await coord.async_refresh()
     await hass.async_block_till_done()
+    return coord
+
+
+async def test_profileless_source_uses_al_fallback(
+    hass: HomeAssistant, mqtt_mock: Any
+) -> None:
+    """A source with no profile falls back to its AL dummy switch value."""
+    await seed_states(hass)
+    seed = copy.deepcopy(SEED)
+    del seed["sources"]["overhead"]["profile"]
+    coord = await _coord_for(hass, seed)
     mqtt_mock.async_publish.reset_mock()
-    await coordinator.async_set_push_enabled(enabled=True)
+    await coord.async_set_push_enabled(enabled=True)
+    await hass.async_block_till_done()
+    assert published(mqtt_mock)[OVERHEAD_ALL] == {
+        "brightness": 127,
+        "transition": 1.0,
+        "color_temp": 250,
+    }
+
+
+async def test_profileless_source_skips_on_unavailable_al(
+    hass: HomeAssistant, mqtt_mock: Any
+) -> None:
+    """A profile-less source with an unavailable AL switch is skipped."""
+    await seed_states(hass)
+    seed = copy.deepcopy(SEED)
+    del seed["sources"]["overhead"]["profile"]
+    hass.states.async_set(AL_OVERHEAD, "unavailable", {})
+    coord = await _coord_for(hass, seed)
+    mqtt_mock.async_publish.reset_mock()
+    await coord.async_set_push_enabled(enabled=True)
+    await hass.async_block_till_done()
+    assert OVERHEAD_ALL not in published(mqtt_mock)
+
+
+async def test_profileless_source_skips_on_missing_attrs(
+    hass: HomeAssistant, mqtt_mock: Any
+) -> None:
+    """A profile-less source whose AL switch lacks brightness is skipped."""
+    await seed_states(hass)
+    seed = copy.deepcopy(SEED)
+    del seed["sources"]["overhead"]["profile"]
+    hass.states.async_set(AL_OVERHEAD, "on", {"color_temp_kelvin": 4000})
+    coord = await _coord_for(hass, seed)
+    mqtt_mock.async_publish.reset_mock()
+    await coord.async_set_push_enabled(enabled=True)
     await hass.async_block_till_done()
     assert OVERHEAD_ALL not in published(mqtt_mock)
 
@@ -429,61 +480,31 @@ async def test_reconcile_without_legacy_enable(
     assert OVERHEAD_ALL in published(mqtt_mock)
 
 
-async def test_shadow_records_engine_vs_al(
-    hass: HomeAssistant, coordinator: Coord
+async def test_engine_drives_the_push_and_records_diagnostics(
+    hass: HomeAssistant, coordinator: Coord, mqtt_mock: Any
 ) -> None:
-    """Shadow mode records the engine target + the AL read per profiled source."""
-    with patch(
-        "custom_components.light_man.coordinator.solar_inputs",
-        return_value=(45.0, 71.5),
-    ):
-        await coordinator.async_refresh()
-        await hass.async_block_till_done()
-    shadow = coordinator.diagnostics["shadow"]
-    assert shadow["elevation"] == 45.0
-    assert shadow["noon"] == 71.5
-    over = shadow["sources"]["overhead"]
-    assert over["engine"]["color_mode"] == "color_temp"
-    assert 30 <= over["engine"]["brightness_pct"] <= 90
-    assert over["al"]["brightness_pct"] == 50  # AL read is reported, not changed
-    hall = shadow["sources"]["hallway_up"]
-    assert hall["engine"]["color_mode"] == "rgb"
-    assert hall["engine"]["rgb_color"] == [135, 206, 235]
+    """The push value comes from the engine; rgb sources publish a color."""
+    await coordinator.async_set_push_enabled(enabled=True)
+    await hass.async_block_till_done()
+    pubs = published(mqtt_mock)
+    assert pubs[OVERHEAD_ALL] == DAY  # engine-derived, not the AL read
+    assert pubs[HALL_UP]["color"] == {"r": 135, "g": 206, "b": 235}  # rgb base
+    engine = coordinator.diagnostics["engine"]
+    assert engine["overhead"]["color_mode"] == "color_temp"
+    assert engine["hallway_up"]["rgb_color"] == [135, 206, 235]
 
 
-async def test_shadow_skips_when_solar_unavailable(
-    hass: HomeAssistant, coordinator: Coord
+async def test_solar_unavailable_skips_push(
+    hass: HomeAssistant, coordinator: Coord, mqtt_mock: Any
 ) -> None:
-    """A solar ValueError (e.g. polar night) is swallowed; shadow is left as-is."""
-    coordinator.diagnostics["shadow"] = {"sentinel": True}
+    """A solar ValueError (polar edge) skips the cycle instead of pushing junk."""
+    await coordinator.async_set_push_enabled(enabled=True)
+    await hass.async_block_till_done()
+    mqtt_mock.async_publish.reset_mock()
     with patch(
         "custom_components.light_man.coordinator.solar_inputs",
         side_effect=ValueError("polar night"),
     ):
-        await coordinator.async_refresh()
+        await coordinator.async_force_push()
         await hass.async_block_till_done()
-    assert coordinator.diagnostics["shadow"] == {"sentinel": True}
-
-
-async def test_shadow_skips_sources_without_profile(
-    hass: HomeAssistant, mqtt_mock: Any
-) -> None:
-    """A source with no Phase-2 profile is skipped in the shadow record."""
-    await seed_states(hass)
-    seed = copy.deepcopy(SEED)
-    del seed["sources"]["hallway_up"]["profile"]
-    entry = MockConfigEntry(domain=DOMAIN, title="Light Man")
-    entry.add_to_hass(hass)
-    modes = ModeManager(FakeStore(None))
-    await modes.async_load()
-    coord = LightManCoordinator(hass, entry, validate_config(seed), modes)
-    await coord._async_setup()
-    with patch(
-        "custom_components.light_man.coordinator.solar_inputs",
-        return_value=(45.0, 71.5),
-    ):
-        await coord.async_refresh()
-        await hass.async_block_till_done()
-    sources = coord.diagnostics["shadow"]["sources"]
-    assert "overhead" in sources
-    assert "hallway_up" not in sources
+    assert published(mqtt_mock) == {}
