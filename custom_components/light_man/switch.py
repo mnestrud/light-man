@@ -32,8 +32,12 @@ async def async_setup_entry(
     async_add_entities([PushEnableSwitch(coordinator), SleepSwitch(coordinator)])
 
 
-class PushEnableSwitch(LightManEntity, SwitchEntity):
-    """ON: Light Man owns the push (legacy floods off). OFF: revert to legacy."""
+class PushEnableSwitch(LightManEntity, RestoreEntity, SwitchEntity):
+    """ON: Light Man owns the push (legacy floods off). OFF: revert to legacy.
+
+    Defaults ON and restores across restarts, so Light Man is the house default
+    and you never have to re-enable it after a reboot.
+    """
 
     _attr_translation_key = UID_PUSH_ENABLE
     _attr_entity_category = EntityCategory.CONFIG
@@ -41,6 +45,13 @@ class PushEnableSwitch(LightManEntity, SwitchEntity):
     def __init__(self, coordinator: LightManCoordinator) -> None:
         """Bind to the coordinator as the push-enable singleton."""
         super().__init__(coordinator, UID_PUSH_ENABLE)
+
+    async def async_added_to_hass(self) -> None:
+        """Take over the push on startup unless it was explicitly turned off."""
+        await super().async_added_to_hass()
+        last = await self.async_get_last_state()
+        if last is None or last.state == STATE_ON:
+            await self.coordinator.async_set_push_enabled(enabled=True)
 
     @property
     def is_on(self) -> bool:

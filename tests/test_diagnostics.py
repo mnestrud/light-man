@@ -20,7 +20,7 @@ async def test_diagnostics_shape(hass: HomeAssistant, mqtt_mock: Any) -> None:
     await entry.runtime_data.coordinator.async_hold("kitchen", "night")
 
     diag = await async_get_config_entry_diagnostics(hass, entry)
-    assert diag["push_enabled"] is False
+    assert diag["push_enabled"] is True  # Light Man is the default on startup
     assert diag["mqtt_available"] is True
     assert "kitchen" in diag["held"]
     assert diag["config"]["push_interval_s"] == 30

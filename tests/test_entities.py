@@ -48,16 +48,12 @@ async def test_active_holds_sensor_tracks_holds(
 async def test_push_enable_switch_toggles_stack(
     hass: HomeAssistant, mqtt_mock: Any
 ) -> None:
-    """Toggling the switch drives the coordinator + legacy booleans."""
+    """The switch defaults ON, and toggling drives the coordinator + booleans."""
     entry = await setup_lightman(hass)
     coordinator = entry.runtime_data.coordinator
     switch_id = _entity_id(hass, "switch", entry.entry_id, UID_PUSH_ENABLE)
 
-    assert hass.states.get(switch_id).state == "off"
-
-    await hass.services.async_call(
-        "switch", "turn_on", {"entity_id": switch_id}, blocking=True
-    )
+    # Defaults ON on startup (Light Man is the house default).
     assert coordinator.push_enabled is True
     assert hass.states.get(switch_id).state == "on"
 
@@ -66,6 +62,12 @@ async def test_push_enable_switch_toggles_stack(
     )
     assert coordinator.push_enabled is False
     assert hass.states.get(switch_id).state == "off"
+
+    await hass.services.async_call(
+        "switch", "turn_on", {"entity_id": switch_id}, blocking=True
+    )
+    assert coordinator.push_enabled is True
+    assert hass.states.get(switch_id).state == "on"
 
 
 async def test_sleep_switch_toggles(hass: HomeAssistant, mqtt_mock: Any) -> None:
