@@ -86,15 +86,35 @@ Chosen: **custom HTML panel** for the flexibility (explicit user call, 2026-06-1
 frontend + API surface. We can still expose a *few* core toggles (`push_enable`, `sleep`) as HA entities
 in parallel so they remain scriptable/voice-controllable.
 
+## Sequencing principle — design first, API last
+
+**Hard rule (user, 2026-06-10): we design the panel's layout and configuration approach first, confirm it,
+and only THEN design the API.** The API shape is *derived from* what the confirmed UI actually needs — never
+the other way round. Do not write or design any HTTP/WS endpoint until the design approach is signed off.
+The "Architecture" section above is the *delivery mechanism* (how a panel gets into the sidebar at all),
+not a commitment to specific endpoints; treat its API bullets as candidates to be settled in Phase 2.
+
 ## Implementation phases
 
-1. **Backend API.** Add `http.py` (HomeAssistantView config read/write + actions) and a websocket command
-   module (live engine/diagnostics/occupancy/publish-log streams). Wire to the coordinator + Store. Tests.
-2. **Panel registration + static serving.** Register the sidebar panel and serve a placeholder bundle;
-   confirm it loads in the sidebar with the `hass` socket available.
-3. **Frontend app.** Build the SPA + the five tabs against the API. Start read-only (Overview/Activity),
-   then add the editors (Profiles/Sleep/Occupancy) with write-back + reset-to-seed.
-4. **Polish.** Curve/visualizer, auth/admin gating (`require_admin`), mobile layout.
+1. **Design the panel (UX + configuration approach).** No code. Produce:
+   - Tab structure + wireframes/mockups for each tab (Overview / Profiles / Sleep / Occupancy / Activity).
+   - The **configuration model** as the user experiences it: exactly what is editable, at what granularity
+     (source-level vs. per-room), how edits map onto the Store shapes (`SourceProfile` / sleep /
+     `OccupancyZone`), validation/limits, apply semantics (live vs. save button), and reset-to-seed.
+   - The live/read-only surfaces (current targets, occupancy, activity log) and how "live" they need to be.
+   - **Gate: confirm the design approach with the user before proceeding.** Nothing past this phase starts
+     until sign-off.
+2. **Design the API (only after sign-off).** Derive the minimal HTTP views + websocket commands from the
+   confirmed UI: config read/write endpoints, action endpoints, and the live streams the design requires —
+   shaped to the screens, not invented up front. (Confirm current `panel_custom` / static-path /
+   WS-command API signatures with the `ha-dev` agent here.)
+3. **Build the backend.** Implement the designed API (`http.py` views + websocket command module) wired to
+   the coordinator + Store. Tests, 100% cov.
+4. **Panel registration + static serving.** Register the sidebar panel; serve a placeholder bundle; confirm
+   it loads with the `hass` socket available.
+5. **Build the frontend.** The SPA + tabs against the API — read-only surfaces first, then the editors with
+   write-back + reset-to-seed.
+6. **Polish.** Curve/visualizer, auth/admin gating (`require_admin`), mobile layout.
 
 ## Open decisions (resolve at build time)
 
