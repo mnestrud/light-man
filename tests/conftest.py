@@ -41,6 +41,7 @@ LR_SWITCH = "zigbee2mqtt/Living Room Switch"
 KIT_SWITCH = "zigbee2mqtt/Kitchen Switch"
 
 SEED: dict[str, Any] = {
+    "seed_version": 2,
     "push_interval_s": 30,
     "sources": {
         "overhead": {

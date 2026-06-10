@@ -21,6 +21,7 @@ from homeassistant.helpers.storage import Store
 
 from .config_loader import validate_config
 from .const import (
+    BUNDLED_SEED_VERSION,
     CONFIG_STORE_KEY,
     CONFIG_STORE_VERSION,
     DOMAIN,
@@ -59,8 +60,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: LightManConfigEntry) -> 
     """Set up Light Man from a config entry."""
     config_store: Store[Any] = Store(hass, CONFIG_STORE_VERSION, CONFIG_STORE_KEY)
     raw = await config_store.async_load()
-    if raw is None:
-        # First run: self-seed the Store from the bundled default.
+    if (
+        raw is None
+        or not isinstance(raw, dict)
+        or raw.get("seed_version", 0) < BUNDLED_SEED_VERSION
+    ):
+        # (Re-)seed the Store from the bundled default: first run, a corrupt
+        # store, or a store predating the shipped seed_version (e.g. Phase 2
+        # added per-source profiles). Overwriting is safe while the config is
+        # code-owned; once the OptionsFlow lets users edit it, merge instead.
         try:
             raw = await hass.async_add_executor_job(_read_bundled_seed)
         except (OSError, ValueError) as err:
