@@ -23,6 +23,17 @@ def test_valid_config_builds_switch_map() -> None:
     assert set(result.config["sources"]) == {"overhead", "hallway_up"}
 
 
+def test_profile_passes_through_untouched() -> None:
+    # The Phase 2 adaptive profile is carried through the loader verbatim (the
+    # engine reads it; the loader does not normalize it).
+    result = validate_config(copy.deepcopy(SEED))
+    profile = result.config["sources"]["overhead"]["profile"]
+    assert profile["max_ct"] == 6500
+    assert profile["base_color_mode"] == "color_temp"
+    assert profile["day_window"]["start"] == "08:00"
+    assert profile["sleep"]["ct"] == 2700
+
+
 def test_non_dict_raises() -> None:
     with pytest.raises(ValueError, match="must be a mapping"):
         validate_config("nope")

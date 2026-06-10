@@ -140,6 +140,7 @@ def _validate_source(
         "night_brightness_pct",
         "night_color_temp_kelvin",
         "night_rgb",
+        "profile",
     ):
         if opt in raw:
             source[opt] = raw[opt]

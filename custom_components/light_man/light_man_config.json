@@ -9,6 +9,19 @@
       "night_color_mode": "color_temp",
       "night_brightness_pct": 20,
       "night_color_temp_kelvin": 2700,
+      "profile": {
+        "min_br": 30,
+        "max_br": 90,
+        "min_ct": 2700,
+        "max_ct": 6500,
+        "sat": 0.5,
+        "base_color_mode": "color_temp",
+        "base_rgb": null,
+        "dusk_floor_ct": 2200,
+        "night_floor_br": 30,
+        "sleep": {"br": 30, "color_mode": "color_temp", "ct": 2700},
+        "day_window": {"enabled": true, "start": "08:00", "end": "17:00"}
+      },
       "rooms": {
         "living_room": {
           "set_topic": "zigbee2mqtt/zgb_living_room/set",
@@ -60,6 +73,19 @@
       "night_color_mode": "color_temp",
       "night_brightness_pct": 20,
       "night_color_temp_kelvin": 2700,
+      "profile": {
+        "min_br": 10,
+        "max_br": 30,
+        "min_ct": 2700,
+        "max_ct": 6000,
+        "sat": 0.5,
+        "base_color_mode": "color_temp",
+        "base_rgb": null,
+        "dusk_floor_ct": 2200,
+        "night_floor_br": 10,
+        "sleep": {"br": 10, "color_mode": "color_temp", "ct": 2500},
+        "day_window": {"enabled": true, "start": "08:00", "end": "17:00"}
+      },
       "rooms": {
         "kitchen_island": {
           "set_topic": "zigbee2mqtt/zgb_kitchen_island/set",
@@ -78,6 +104,19 @@
       "day_color_mode": "rgb",
       "night_color_mode": "rgb",
       "sleep_switch": "switch.adaptive_lighting_hallway_uplights_adaptive_adaptive_lighting_sleep_mode_hallway_uplights_adaptive",
+      "profile": {
+        "min_br": 30,
+        "max_br": 90,
+        "min_ct": 2700,
+        "max_ct": 6500,
+        "sat": 0.5,
+        "base_color_mode": "rgb",
+        "base_rgb": [135, 206, 235],
+        "dusk_floor_ct": 2200,
+        "night_floor_br": 30,
+        "sleep": {"br": 40, "color_mode": "rgb", "rgb": [255, 126, 30]},
+        "day_window": {"enabled": true, "start": "08:00", "end": "17:00"}
+      },
       "rooms": {}
     },
     "hallway_down": {
@@ -87,6 +126,19 @@
       "day_color_mode": "color_temp",
       "night_color_mode": "rgb",
       "sleep_switch": "switch.adaptive_lighting_hallway_downlights_adaptive_adaptive_lighting_sleep_mode_hallway_downlights_adaptive",
+      "profile": {
+        "min_br": 30,
+        "max_br": 90,
+        "min_ct": 2700,
+        "max_ct": 6500,
+        "sat": 0.5,
+        "base_color_mode": "color_temp",
+        "base_rgb": null,
+        "dusk_floor_ct": 2200,
+        "night_floor_br": 30,
+        "sleep": {"br": 5, "color_mode": "rgb", "rgb": [155, 123, 232]},
+        "day_window": {"enabled": true, "start": "08:00", "end": "17:00"}
+      },
       "rooms": {}
     }
   }

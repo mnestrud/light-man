@@ -40,6 +40,9 @@ class SourceConfig(TypedDict, total=False):
     night_brightness_pct: float
     night_color_temp_kelvin: float
     night_rgb: list[int] | None
+    # Phase 2 adaptive-engine profile (seeded from the live AL config). Carried
+    # through the loader untouched until the engine wires into the coordinator.
+    profile: SourceProfile
     rooms: dict[str, RoomConfig]
 
 
