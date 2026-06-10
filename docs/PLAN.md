@@ -1,10 +1,13 @@
 # Plan — Light Man Phase 1: own the adaptive push + scene-hold (regression fix)
 
-> **STATUS — Phase 1 DELIVERED & live (2026-06-09, v0.2.0).** Cut over on the live house
-> (`switch.light_man_adaptive_push` ON); soaking for a day or so of observation. `dev` pushed, local
-> gate green (100% cov, mypy-strict). Live-verified: night hold survives, off-respect, real toggle,
-> blueprint + occupancy gated. Open items deliberately deferred to Phase 2 (see roadmap). Not tagged;
-> live HA-config edits intentionally left uncommitted in `ha_vibecode_git`.
+> **STATUS — Phase 1 COMPLETE (2026-06-09, v0.3.0, `quality_scale: silver`).** Live on the house:
+> consolidated-flood addressing (4 floods, per-room only when held) + per-room hold model + real
+> single toggle + 0.15s inter-publish spacing, all validated. The bulb color-mode split that surfaced
+> during the build was root-caused (a **stale bulb-NVRAM Zigbee group**, not Light Man) and fixed
+> house-wide — see `docs/reference/bulb-split-investigation.md` + `group-normalize-audit.md`. Bronze +
+> Silver rules code-complete + docs (`README.md`); manifest tagged. Gate green (100% cov, mypy-strict,
+> ruff). Phase 2 roadmap below. Live HA-config gating edits intentionally uncommitted in
+> `ha_vibecode_git`.
 
 > **Redesign note (2026-06-09, v0.2.0).** The live cutover surfaced an architectural conflict: the
 > switch-taps blueprint and Light Man were two adaptive brains fighting over the same rooms, and the

@@ -37,7 +37,8 @@ The per-change gate is **local** (GHA `validate.yml` is only a redundant backsto
 - ⬜ **todo** — not yet addressed (mostly docs / later tiers)
 - 🚫 **ignored** — not applicable; reason recorded (see also the consolidated register at the end)
 
-Target: **Silver before first internal release.** Gold/Platinum tracked but not gated yet.
+**Silver: code-complete and tagged** (`manifest quality_scale: silver`, 2026-06-09) — the
+"Silver before first internal release" target is met. Gold/Platinum tracked but not gated yet.
 
 ---
 
@@ -52,10 +53,10 @@ Target: **Silver before first internal release.** Gold/Platinum tracked but not 
 | `config-flow-test-coverage` | ✅ | 100% on `config_flow` (`tests/test_config_flow.py`). |
 | `config-flow` | ✅ | `config_flow: true`; single-instance confirm step (`single_config_entry` enforces the abort). |
 | `dependency-transparency` | ✅ | `manifest.requirements: []`; only `dependencies: ["mqtt"]` (HA core). Nothing opaque. |
-| `docs-actions` | ⬜ | Document the three services. (docs) |
-| `docs-high-level-description` | ⬜ | README overview. (docs) |
-| `docs-installation-instructions` | ⬜ | Install + prerequisites. (docs) |
-| `docs-removal-instructions` | ⬜ | Uninstall guidance. (docs) |
+| `docs-actions` | ✅ | Three services documented in `README.md` (Actions table). |
+| `docs-high-level-description` | ✅ | `README.md` overview ("What it does"). |
+| `docs-installation-instructions` | ✅ | `README.md` Installation (HACS/manual + requirements). |
+| `docs-removal-instructions` | ✅ | `README.md` Removal section. |
 | `entity-event-setup` | ✅ | MQTT subs are coordinator-owned (`_async_setup`), not entity-level; torn down in `async_unload_entry` via `shutdown_subscriptions()`. Entities are `CoordinatorEntity` (no direct event subs). |
 | `entity-unique-id` | ✅ | `{entry_id}_{kind}` in `entity.py` (the `{room\|source}` slot is unused for the singletons). |
 | `has-entity-name` | ✅ | `_attr_has_entity_name = True` on `LightManEntity`. |
@@ -70,8 +71,8 @@ Target: **Silver before first internal release.** Gold/Platinum tracked but not 
 |---|---|---|
 | `action-exceptions` | ✅ | `release_hold` raises `ServiceValidationError` (unknown room / not loaded); push wraps broker errors, never raising on a disconnected broker. |
 | `config-entry-unloading` | ✅ | `async_unload_entry` unloads platforms, `shutdown_subscriptions()`, drops services on the last entry; the timer is cancelled by `coordinator.async_shutdown` (auto-registered on unload). |
-| `docs-configuration-parameters` | ⬜ | Document seed-JSON fields. (docs) |
-| `docs-installation-parameters` | ⬜ | Document setup. (docs) |
+| `docs-configuration-parameters` | ✅ | `README.md` Configuration table (seed-JSON fields). |
+| `docs-installation-parameters` | ✅ | `README.md` Installation (single-instance confirm; no params). |
 | `entity-unavailable` | ✅ | Entities are `CoordinatorEntity` (`available` = `last_update_success`). MQTT outage is surfaced via diagnostics, not entity-unavailable, so hold state stays visible. |
 | `integration-owner` | ✅ | `codeowners: ["@mnestrud"]` in manifest. |
 | `log-when-unavailable` | ✅ | `_set_mqtt_available` logs once on each MQTT connectivity transition (not per cycle). |
@@ -124,7 +125,7 @@ Target: **Silver before first internal release.** Gold/Platinum tracked but not 
 | 0008 — code owners | ✅ | `manifest.codeowners: ["@mnestrud"]`. |
 | 0009 — translations 2.0 | 🔜 | `strings.json` ↔ `translations/en.json` mirrored; entity/exception/icon translation keys. |
 | 0010 — integration configuration | ✅/🔜 | UI config-flow; **no** YAML platform config. Phase-1 topology via Store seed; Phase-2 OptionsFlow. |
-| 0022 — integration quality scale | ✅ | Adopted; tracked by this audit. Add `quality_scale` to manifest on reaching a tier. |
+| 0022 — integration quality scale | ✅ | Adopted; **`manifest.json` `quality_scale: silver`** set (2026-06-09) — all Bronze + Silver rules ✅/N-A. |
 
 ### ADRs ignored as not applicable (with reason)
 
