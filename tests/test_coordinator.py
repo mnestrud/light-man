@@ -6,6 +6,7 @@ import copy
 import json
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any
+from unittest.mock import patch
 
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.util import dt as dt_util
@@ -426,3 +427,63 @@ async def test_reconcile_without_legacy_enable(
     await coord.async_set_push_enabled(enabled=True)
     await hass.async_block_till_done()
     assert OVERHEAD_ALL in published(mqtt_mock)
+
+
+async def test_shadow_records_engine_vs_al(
+    hass: HomeAssistant, coordinator: Coord
+) -> None:
+    """Shadow mode records the engine target + the AL read per profiled source."""
+    with patch(
+        "custom_components.light_man.coordinator.solar_inputs",
+        return_value=(45.0, 71.5),
+    ):
+        await coordinator.async_refresh()
+        await hass.async_block_till_done()
+    shadow = coordinator.diagnostics["shadow"]
+    assert shadow["elevation"] == 45.0
+    assert shadow["noon"] == 71.5
+    over = shadow["sources"]["overhead"]
+    assert over["engine"]["color_mode"] == "color_temp"
+    assert 30 <= over["engine"]["brightness_pct"] <= 90
+    assert over["al"]["brightness_pct"] == 50  # AL read is reported, not changed
+    hall = shadow["sources"]["hallway_up"]
+    assert hall["engine"]["color_mode"] == "rgb"
+    assert hall["engine"]["rgb_color"] == [135, 206, 235]
+
+
+async def test_shadow_skips_when_solar_unavailable(
+    hass: HomeAssistant, coordinator: Coord
+) -> None:
+    """A solar ValueError (e.g. polar night) is swallowed; shadow is left as-is."""
+    coordinator.diagnostics["shadow"] = {"sentinel": True}
+    with patch(
+        "custom_components.light_man.coordinator.solar_inputs",
+        side_effect=ValueError("polar night"),
+    ):
+        await coordinator.async_refresh()
+        await hass.async_block_till_done()
+    assert coordinator.diagnostics["shadow"] == {"sentinel": True}
+
+
+async def test_shadow_skips_sources_without_profile(
+    hass: HomeAssistant, mqtt_mock: Any
+) -> None:
+    """A source with no Phase-2 profile is skipped in the shadow record."""
+    await seed_states(hass)
+    seed = copy.deepcopy(SEED)
+    del seed["sources"]["hallway_up"]["profile"]
+    entry = MockConfigEntry(domain=DOMAIN, title="Light Man")
+    entry.add_to_hass(hass)
+    modes = ModeManager(FakeStore(None))
+    await modes.async_load()
+    coord = LightManCoordinator(hass, entry, validate_config(seed), modes)
+    await coord._async_setup()
+    with patch(
+        "custom_components.light_man.coordinator.solar_inputs",
+        return_value=(45.0, 71.5),
+    ):
+        await coord.async_refresh()
+        await hass.async_block_till_done()
+    sources = coord.diagnostics["shadow"]["sources"]
+    assert "overhead" in sources
+    assert "hallway_up" not in sources

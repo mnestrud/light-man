@@ -29,6 +29,7 @@ from homeassistant.helpers.sun import get_astral_event_next
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.util import dt as dt_util
 
+from .adaptive import compute_target
 from .const import (
     ACTION_SUFFIX,
     ATTR_BRIGHTNESS_PCT,
@@ -56,6 +57,7 @@ from .push import (
     plan_publishes,
     resolve_color_mode,
 )
+from .solar import solar_inputs
 
 if TYPE_CHECKING:
     from homeassistant.config_entries import ConfigEntry
@@ -117,6 +119,7 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
             "dedup_skips": 0,
             "addressing": {},
             "last_publish": {},
+            "shadow": {},
         }
 
     # --- lifecycle ----------------------------------------------------------
@@ -169,14 +172,66 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         }
 
     async def _async_update_data(self) -> CoordinatorData:
-        """Periodic tick: sweep expired held modes, then push."""
+        """Periodic tick: sweep expired held modes, record shadow, then push."""
         now = dt_util.utcnow()
         expired = await self._modes.sweep_expired(now)
         for room in expired:
             self._invalidate_room(room)
             _LOGGER.info("hold expired for room %s", room)
+        self._record_shadow(now)
         await self._run_push(force=bool(expired))
         return self._snapshot()
+
+    # --- Phase 2 shadow mode (engine vs AL — does not change the push) -------
+
+    def _record_shadow(self, now: datetime) -> None:
+        """Compute the Phase-2 engine target alongside the AL read, per source.
+
+        Shadow mode: the result is recorded in diagnostics and logged at debug,
+        but **nothing about the published payload changes**. This is the live
+        de-risk before cutover — it exercises the real solar-elevation read and
+        surfaces engine-vs-AL so the curve can be eyeballed on the running house.
+        """
+        try:
+            elevation, noon = solar_inputs(self.hass, now)
+        except ValueError:
+            _LOGGER.debug("shadow: solar elevation unavailable this cycle")
+            return
+        local = dt_util.as_local(now)
+        now_minutes = local.hour * 60 + local.minute + local.second / 60
+        sources: dict[str, Any] = {}
+        for key, source in self._config[CONF_SOURCES].items():
+            profile = source.get("profile")
+            if profile is None:
+                continue
+            target = compute_target(
+                elevation,
+                noon,
+                profile,
+                sleep_s=1.0 if self._is_sleeping(source) else 0.0,
+                now_minutes=now_minutes,
+            )
+            sources[key] = {
+                "engine": {
+                    "brightness_pct": round(target.brightness_pct, 1),
+                    "color_mode": target.color_mode,
+                    "color_temp_kelvin": target.color_temp_kelvin,
+                    "rgb_color": list(target.rgb_color) if target.rgb_color else None,
+                },
+                "al": self._read_adaptive(source),
+            }
+            _LOGGER.debug(
+                "shadow %s: e=%.1f engine=%s al=%s",
+                key,
+                elevation,
+                sources[key]["engine"],
+                sources[key]["al"],
+            )
+        self.diagnostics["shadow"] = {
+            "elevation": round(elevation, 2),
+            "noon": round(noon, 2),
+            "sources": sources,
+        }
 
     # --- push ---------------------------------------------------------------
 
