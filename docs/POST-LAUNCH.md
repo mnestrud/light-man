@@ -24,10 +24,12 @@ status boxes as items are picked up. Last reviewed: **2026-06-10**.
   `legacy_enable` reads, and simplify `async_set_push_enabled` to just own the push (no legacy reconcile).
   Keep `push_enable` as the inert-vs-owning toggle. Update tests accordingly. *(Live legacy entities stay
   disabled regardless; the integration just stops trying to manage them.)*
-- [ ] **Web-based control dashboard.** A tabbed Lovelace dashboard with smart, live settings to configure
-  Light Man — replacing the static `light_man_config.json` seed and avoiding a config/options flow as much
-  as possible. Two parts: (A) integration exposes tunables as Number/Select/Switch/Button **config
-  entities** backed by the Store; (B) a tabbed dashboard surfaces them. Full plan:
+- [ ] **Web control panel (self-hosted, sidebar app).** A standalone HTML/JS app in the HA left sidebar —
+  like Zigbee2MQTT / Node-RED present their own UIs — not a Lovelace dashboard. The integration registers
+  a custom **panel** and serves the SPA + a backend **API** (HTTP views for Store config read/write +
+  actions; websocket commands for live engine/diagnostics/occupancy/publish-log streams). Full layout
+  freedom (tabs, live curves, occupancy visualizer, MQTT activity log); replaces the static
+  `light_man_config.json` for day-to-day tuning and avoids the config/options flow. Full plan:
   [`docs/DASHBOARD-PLAN.md`](DASHBOARD-PLAN.md).
 
 ## Deferred to the user, by their call
