@@ -42,12 +42,15 @@ if TYPE_CHECKING:
 
     from custom_components.light_man.coordinator import LightManCoordinator as Coord
 
-# Expected payloads for the test seed. DAY is now the engine's output for the
-# overhead profile at the pinned elevation (e=45, noon=71.5, day_window off,
-# awake): 90% -> 229, ct_pct 0.629 in mired -> ~234. NIGHT is the config-driven
-# hold target (20%/2700K), unchanged by the engine cutover.
+# Expected payloads for the test seed (overhead profile).
+# DAY: live adaptive at the pinned elevation (e=45, day_window off, awake) ->
+# 90% / ct_pct 0.629 -> 229 / 234 mired.
+# NIGHT: the forced night look (config_single) = engine night/sleep target,
+# 30% / 2700K -> 76 / 370 mired.
+# DAY_LOOK: the forced day look (config_double) = peak sun, 90% / 6500K -> 229 / 154.
 DAY = {"brightness": 229, "transition": 1.0, "color_temp": 234}
-NIGHT = {"brightness": 51, "transition": 1.0, "color_temp": 370}
+NIGHT = {"brightness": 76, "transition": 1.0, "color_temp": 370}
+DAY_LOOK = {"brightness": 229, "transition": 1.0, "color_temp": 154}
 
 
 def _fire(hass: HomeAssistant, topic: str, payload: Any) -> None:
@@ -158,15 +161,22 @@ async def test_config_single_holds_night_per_room(
     assert OVERHEAD_ALL not in pubs
 
 
-async def test_config_double_holds_day_consolidated(
-    hass: HomeAssistant, coordinator: Coord
+async def test_config_double_holds_day_per_room(
+    hass: HomeAssistant, coordinator: Coord, mqtt_mock: Any
 ) -> None:
-    """config_double holds at the day value -> still uniform -> consolidated."""
+    """config_double applies a distinct forced day look per-room (not a no-op)."""
     await coordinator.async_set_push_enabled(enabled=True)
     await hass.async_block_till_done()
+    mqtt_mock.async_publish.reset_mock()
+
     _fire(hass, LR_SWITCH, {"action": "config_double"})
     await hass.async_block_till_done()
     assert coordinator.data["held"]["living_room"]["mode"] == "day"
+
+    pubs = published(mqtt_mock)
+    assert pubs[LR_SET] == DAY_LOOK  # forced peak-day look, distinct from adaptive
+    assert pubs[KIT_SET] == DAY
+    assert OVERHEAD_ALL not in pubs
 
 
 async def test_up_single_releases(

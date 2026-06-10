@@ -15,6 +15,7 @@ from .const import (
     DEFAULT_COLOR_MODE,
     DEFAULT_NIGHT_BRIGHTNESS_PCT,
     DEFAULT_NIGHT_COLOR_TEMP_KELVIN,
+    HELD_DAY,
     HELD_MANUAL,
     HELD_NIGHT,
     MIRED_MAX,
@@ -104,6 +105,7 @@ def _room_target(
     mode: str,
     *,
     adaptive_payload: PushPayload,
+    day_payload: PushPayload,
     night_payload: PushPayload,
 ) -> PushPayload | None:
     """Return a room's payload, or None to leave it untouched (manually frozen).
@@ -115,13 +117,16 @@ def _room_target(
         return None
     if mode == HELD_NIGHT:
         return night_payload
-    return adaptive_payload  # adaptive or HELD_DAY both ride the live day value
+    if mode == HELD_DAY:
+        return day_payload  # a distinct forced day look, not the live value
+    return adaptive_payload
 
 
 def plan_publishes(
     source: SourceConfig,
     *,
     adaptive_payload: PushPayload,
+    day_payload: PushPayload,
     night_payload: PushPayload,
     modes: dict[str, str],
 ) -> list[tuple[str, PushPayload]]:
@@ -129,9 +134,9 @@ def plan_publishes(
 
     Use the **consolidated** flood when every room wants the live adaptive value
     (the cheap, uniform case — including off rooms, which stage color-while-off).
-    Otherwise address **per-room**: held rooms get their own target and
-    manually-frozen rooms are skipped. Sources with no rooms (hallway) always
-    push their single consolidated group.
+    Otherwise address **per-room**: held rooms get their own target (day/night
+    look) and manually-frozen rooms are skipped. Sources with no rooms (hallway)
+    always push their single consolidated group.
     """
     rooms = source.get("rooms", {})
     if not rooms:
@@ -140,6 +145,7 @@ def plan_publishes(
         room: _room_target(
             modes.get(room, MODE_ADAPTIVE),
             adaptive_payload=adaptive_payload,
+            day_payload=day_payload,
             night_payload=night_payload,
         )
         for room in rooms

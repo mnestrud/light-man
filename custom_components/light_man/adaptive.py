@@ -240,6 +240,24 @@ def compute_target(
     return apply_sleep(base, profile, sleep_s)
 
 
+# Forced-look elevations for config-tap holds: day = peak sun (saturated bright,
+# max color), night = sun fully down (the night floor → sleep target). Both
+# ignore the clock (no day_window) so a manual hold is an absolute look.
+_NIGHT_LOOK_ELEVATION = -90.0
+
+
+def day_look(profile: SourceProfile) -> EngineTarget:
+    """Return the forced full-day look for a `config_double` hold (peak sun)."""
+    return compute_target(REF_ELEVATION_DEG, REF_ELEVATION_DEG, profile, sleep_s=0.0)
+
+
+def night_look(profile: SourceProfile) -> EngineTarget:
+    """Return the forced night look for a `config_single` hold (sun down)."""
+    return compute_target(
+        _NIGHT_LOOK_ELEVATION, REF_ELEVATION_DEG, profile, sleep_s=1.0
+    )
+
+
 def sleep_ramp(
     elapsed_s: float, duration_s: float, *, start: float, target: float
 ) -> float:

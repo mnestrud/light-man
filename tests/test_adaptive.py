@@ -15,7 +15,9 @@ import pytest
 from custom_components.light_man.adaptive import (
     base_target,
     compute_target,
+    day_look,
     mired_lerp,
+    night_look,
     perceptual_lerp,
     sleep_ramp,
 )
@@ -303,6 +305,32 @@ def test_sleep_overlay_applies_over_a_gated_floor() -> None:
     )
     assert t.brightness_pct == pytest.approx(30, abs=0.5)  # full sleep target
     assert t.color_temp_kelvin == pytest.approx(2200, abs=15)
+
+
+# --- forced config-tap looks (day_look / night_look) -----------------------
+
+
+def test_day_look_is_peak_sun() -> None:
+    d = day_look(OVERHEAD)
+    assert d.color_mode == COLOR_MODE_COLOR_TEMP
+    assert d.brightness_pct == pytest.approx(90, abs=0.5)  # saturated
+    assert d.color_temp_kelvin == pytest.approx(6500, abs=60)  # max_ct
+
+
+def test_night_look_is_sleep_target() -> None:
+    n = night_look(OVERHEAD)
+    assert n.brightness_pct == pytest.approx(30, abs=0.5)  # sleep br
+    assert n.color_temp_kelvin == pytest.approx(2200, abs=15)  # sleep ct
+
+
+def test_rgb_source_day_and_night_looks() -> None:
+    assert day_look(HALLWAY).rgb_color == (80, 160, 255)  # fixed day rgb
+    assert night_look(HALLWAY).rgb_color == (120, 40, 10)  # warm sleep night
+
+
+def test_looks_ignore_the_day_window() -> None:
+    # A forced look is absolute — the day_window gate never applies.
+    assert day_look(DAY_WINDOWED).brightness_pct == pytest.approx(90, abs=0.5)
 
 
 # --- sleep ramp helper ------------------------------------------------------

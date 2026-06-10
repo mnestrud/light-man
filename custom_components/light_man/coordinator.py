@@ -28,7 +28,7 @@ from homeassistant.helpers.sun import get_astral_event_next
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.util import dt as dt_util
 
-from .adaptive import compute_target, sleep_ramp
+from .adaptive import compute_target, day_look, night_look, sleep_ramp
 from .const import (
     ACTION_SUFFIX,
     ATTR_BRIGHTNESS_PCT,
@@ -65,7 +65,7 @@ if TYPE_CHECKING:
     from homeassistant.helpers.typing import StateType
 
     from .config_loader import ValidatedConfig
-    from .models import LightManConfig, PushPayload, SourceConfig
+    from .models import EngineTarget, LightManConfig, PushPayload, SourceConfig
     from .modes import ModeManager
 
 _LOGGER = logging.getLogger(__name__)
@@ -236,11 +236,15 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         )
         if adaptive_payload is None:
             return []
+        day_payload, night_payload = self._look_payloads(
+            source, adaptive_payload, transition
+        )
         rooms = source.get(CONF_ROOMS, {})
         plan = plan_publishes(
             source,
             adaptive_payload=adaptive_payload,
-            night_payload=build_night_payload(source, transition),
+            day_payload=day_payload,
+            night_payload=night_payload,
             modes={r: self._modes.mode_of(r) for r in rooms if self._modes.is_held(r)},
         )
         self.diagnostics["addressing"][key] = [topic for topic, _ in plan]
@@ -272,21 +276,14 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
                 sleep_s=sleep_s,
                 now_minutes=now_minutes,
             )
-            rgb = list(target.rgb_color) if target.rgb_color else None
             self.diagnostics["engine"][key] = {
                 "elevation": round(elevation, 2),
                 "brightness_pct": round(target.brightness_pct, 1),
                 "color_mode": target.color_mode,
                 "color_temp_kelvin": target.color_temp_kelvin,
-                "rgb_color": rgb,
+                "rgb_color": list(target.rgb_color) if target.rgb_color else None,
             }
-            return build_payload(
-                brightness_pct=target.brightness_pct,
-                color_temp_kelvin=target.color_temp_kelvin or 0.0,
-                rgb_color=rgb,
-                mode=target.color_mode,
-                transition=transition,
-            )
+            return _target_to_payload(target, transition)
         adaptive = self._read_adaptive(source)
         if adaptive is None:
             return None
@@ -296,6 +293,24 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
             rgb_color=adaptive["rgb_color"],
             mode=resolve_color_mode(source, sleeping=self.sleep_on),
             transition=transition,
+        )
+
+    def _look_payloads(
+        self, source: SourceConfig, adaptive_payload: PushPayload, transition: float
+    ) -> tuple[PushPayload, PushPayload]:
+        """Return the ``(day, night)`` hold payloads for a source's config taps.
+
+        Profile sources get the engine's forced day (peak-sun) and night (sun
+        down + sleep) looks — distinct from the live adaptive value, so a hold is
+        actually visible. A profile-less source falls back to the live value for
+        day and its config night target for night.
+        """
+        profile = source.get("profile")
+        if profile is None:
+            return adaptive_payload, build_night_payload(source, transition)
+        return (
+            _target_to_payload(day_look(profile), transition),
+            _target_to_payload(night_look(profile), transition),
         )
 
     async def _publish_spaced(
@@ -527,6 +542,17 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         return CoordinatorData(
             held=held, held_count=len(held), push_enabled=self.push_enabled
         )
+
+
+def _target_to_payload(target: EngineTarget, transition: float) -> PushPayload:
+    """Convert an engine target to a stateless Z2M ``/set`` payload."""
+    return build_payload(
+        brightness_pct=target.brightness_pct,
+        color_temp_kelvin=target.color_temp_kelvin or 0.0,
+        rgb_color=list(target.rgb_color) if target.rgb_color else None,
+        mode=target.color_mode,
+        transition=transition,
+    )
 
 
 def _parse_json(payload: str) -> dict[str, Any] | None:

@@ -34,6 +34,8 @@ DAY = build_payload(
     transition=1.0,
 )
 NIGHT = build_night_payload(OVERHEAD, 1.0)
+# A distinct forced day-look payload (config_double hold), not the live value.
+DAY_HOLD = {"brightness": 254, "transition": 1.0, "color_temp": 153}
 
 
 def test_pct_to_brightness_scales_and_clamps() -> None:
@@ -113,7 +115,11 @@ def test_build_night_payload_defaults() -> None:
 
 def _plan(modes: dict[str, str]) -> list[tuple[str, Any]]:
     return plan_publishes(
-        OVERHEAD, adaptive_payload=DAY, night_payload=NIGHT, modes=modes
+        OVERHEAD,
+        adaptive_payload=DAY,
+        day_payload=DAY_HOLD,
+        night_payload=NIGHT,
+        modes=modes,
     )
 
 
@@ -125,6 +131,14 @@ def test_plan_consolidated_when_no_holds() -> None:
 def test_plan_per_room_with_a_night_hold() -> None:
     plan = dict(_plan({"living_room": "night"}))
     assert plan["zigbee2mqtt/zgb_living_room/set"] == NIGHT
+    assert plan["zigbee2mqtt/zgb_kitchen/set"] == DAY
+    assert "zigbee2mqtt/zgb_overhead_all/set" not in plan
+
+
+def test_plan_per_room_with_a_day_hold() -> None:
+    # A day hold is a distinct look, so it forces per-room (not the flood).
+    plan = dict(_plan({"living_room": "day"}))
+    assert plan["zigbee2mqtt/zgb_living_room/set"] == DAY_HOLD
     assert plan["zigbee2mqtt/zgb_kitchen/set"] == DAY
     assert "zigbee2mqtt/zgb_overhead_all/set" not in plan
 
@@ -141,5 +155,9 @@ def test_plan_all_manual_publishes_nothing() -> None:
 def test_plan_no_rooms_is_consolidated() -> None:
     source = {"consolidated_topic": "zigbee2mqtt/zgb_hallway_up/set", "rooms": {}}
     assert plan_publishes(
-        source, adaptive_payload=DAY, night_payload=NIGHT, modes={}
+        source,
+        adaptive_payload=DAY,
+        day_payload=DAY_HOLD,
+        night_payload=NIGHT,
+        modes={},
     ) == [("zigbee2mqtt/zgb_hallway_up/set", DAY)]
