@@ -12,9 +12,9 @@ is blended on top by the global sleep toggle's ramp. Color interpolates in
 **mired**, brightness in **perceptual** (gamma) space — both fixes for AL's
 perceptually-uneven Kelvin/raw-% interpolation.
 
-Not yet here (follow-up commits in the engine work): the optional forced
-day-window gate (off by default) and the coordinator wiring/cutover. This module
-is the pure math; shadow validation drives it before it replaces the AL read.
+An optional forced day-window can gate the edges (off by default) without
+remapping midday. Not yet here: the coordinator wiring/cutover — this module is
+the pure math; shadow validation drives it before it replaces the AL read.
 """
 
 from __future__ import annotations
@@ -24,7 +24,9 @@ from typing import TYPE_CHECKING
 from .const import (
     COLOR_MODE_COLOR_TEMP,
     COLOR_MODE_RGB,
+    DEFAULT_EDGE_TRANSITION_S,
     DEFAULT_SAT,
+    DEFAULT_WIND_DOWN_S,
     PERCEPTUAL_GAMMA,
     REF_ELEVATION_DEG,
     TWILIGHT_BAND_DEG,
@@ -33,7 +35,7 @@ from .models import EngineTarget
 from .push import kelvin_to_mired, mired_to_kelvin, valid_rgb
 
 if TYPE_CHECKING:
-    from .models import SourceProfile
+    from .models import DayWindow, SourceProfile
 
 
 def _clamp(value: float, lo: float = 0.0, hi: float = 1.0) -> float:
@@ -112,68 +114,130 @@ def base_target(e: float, profile: SourceProfile, noon: float) -> EngineTarget:
     return EngineTarget(brightness, COLOR_MODE_COLOR_TEMP, mired_to_kelvin(mired), None)
 
 
+def _blend_targets(a: EngineTarget, b: EngineTarget, t: float) -> EngineTarget:
+    """Blend two targets by ``t`` in [0, 1] — ``a`` at 0, ``b`` at 1.
+
+    Brightness blends perceptually; color blends within a matching mode (mired
+    for ct, per-channel for rgb). Mismatched modes (uncommon — real sources are
+    ct+ct or rgb+rgb) hard-switch at the midpoint. Shared by the sleep overlay
+    and the day-window gate.
+    """
+    t = _clamp(t)
+    brightness = perceptual_lerp(a.brightness_pct, b.brightness_pct, t)
+    if a.color_mode == COLOR_MODE_RGB and b.color_mode == COLOR_MODE_RGB:
+        ca = a.rgb_color or (0, 0, 0)
+        cb = b.rgb_color or (0, 0, 0)
+        mix = tuple(round(x + (y - x) * t) for x, y in zip(ca, cb, strict=True))
+        return EngineTarget(brightness, COLOR_MODE_RGB, None, (mix[0], mix[1], mix[2]))
+    if a.color_mode == COLOR_MODE_COLOR_TEMP and b.color_mode == COLOR_MODE_COLOR_TEMP:
+        ma = kelvin_to_mired(a.color_temp_kelvin or 0)
+        mb = kelvin_to_mired(b.color_temp_kelvin or 0)
+        mired = ma + (mb - ma) * t
+        return EngineTarget(
+            brightness, COLOR_MODE_COLOR_TEMP, mired_to_kelvin(mired), None
+        )
+    src = a if t < 0.5 else b
+    return EngineTarget(
+        brightness, src.color_mode, src.color_temp_kelvin, src.rgb_color
+    )
+
+
+def _sleep_target(profile: SourceProfile, base: EngineTarget) -> EngineTarget:
+    """Build the source's full-sleep (s == 1) target from its profile."""
+    sleep = profile.get("sleep", {})
+    brightness = sleep.get("br", base.brightness_pct)
+    sleep_rgb = sleep.get("rgb")
+    if sleep.get("color_mode") == COLOR_MODE_RGB and valid_rgb(sleep_rgb):
+        rgb = (int(sleep_rgb[0]), int(sleep_rgb[1]), int(sleep_rgb[2]))  # type: ignore[index]
+        return EngineTarget(brightness, COLOR_MODE_RGB, None, rgb)
+    return EngineTarget(
+        brightness, COLOR_MODE_COLOR_TEMP, sleep.get("ct", base.color_temp_kelvin), None
+    )
+
+
+def _night_floor_target(profile: SourceProfile) -> EngineTarget:
+    """Return the deep-night floor target (regime 3) — the gate's off value."""
+    brightness = profile["night_floor_br"]
+    base_rgb = profile.get("base_rgb")
+    if profile.get("base_color_mode") == COLOR_MODE_RGB and valid_rgb(base_rgb):
+        rgb = (int(base_rgb[0]), int(base_rgb[1]), int(base_rgb[2]))  # type: ignore[index]
+        return EngineTarget(brightness, COLOR_MODE_RGB, None, rgb)
+    mired = kelvin_to_mired(profile["dusk_floor_ct"])
+    return EngineTarget(brightness, COLOR_MODE_COLOR_TEMP, mired_to_kelvin(mired), None)
+
+
 def apply_sleep(base: EngineTarget, profile: SourceProfile, s: float) -> EngineTarget:
     """Blend the sleep overlay onto ``base`` by ramp value ``s`` in [0, 1].
 
     ``s == 0`` returns ``base`` unchanged; ``s == 1`` is the full sleep target.
-    Brightness blends perceptually. Color blends within a matching mode (mired
-    for ct, per-channel for rgb); a mismatched base/sleep mode (uncommon — real
-    sources are ct+ct or rgb+rgb) hard-switches at the midpoint.
     """
     s = _clamp(s)
     if s <= 0:
         return base
-    sleep = profile.get("sleep", {})
-    brightness = perceptual_lerp(
-        base.brightness_pct, sleep.get("br", base.brightness_pct), s
-    )
-    sleep_mode = sleep.get("color_mode", COLOR_MODE_COLOR_TEMP)
-    sleep_rgb = sleep.get("rgb")
+    return _blend_targets(base, _sleep_target(profile, base), s)
 
-    if (
-        base.color_mode == COLOR_MODE_RGB
-        and sleep_mode == COLOR_MODE_RGB
-        and valid_rgb(sleep_rgb)
-    ):
-        src = base.rgb_color or (0, 0, 0)
-        blended = tuple(
-            round(c + (sleep_rgb[i] - c) * s)
-            for i, c in enumerate(src)  # type: ignore[index]
-        )
-        return EngineTarget(
-            brightness, COLOR_MODE_RGB, None, (blended[0], blended[1], blended[2])
-        )
 
-    if base.color_mode == COLOR_MODE_COLOR_TEMP and sleep_mode == COLOR_MODE_COLOR_TEMP:
-        base_m = kelvin_to_mired(base.color_temp_kelvin or 0)
-        sleep_m = kelvin_to_mired(sleep.get("ct", base.color_temp_kelvin or 0))
-        mired = base_m + (sleep_m - base_m) * s
-        return EngineTarget(
-            brightness, COLOR_MODE_COLOR_TEMP, mired_to_kelvin(mired), None
-        )
+def _hhmm_to_minutes(hhmm: str) -> float:
+    """Parse a ``"HH:MM"`` local clock string to minutes since midnight."""
+    hours, _, minutes = hhmm.partition(":")
+    return int(hours) * 60 + int(minutes)
 
-    # Mismatched modes: keep base color until the midpoint, then the sleep color.
-    if s < 0.5:
-        return EngineTarget(
-            brightness, base.color_mode, base.color_temp_kelvin, base.rgb_color
+
+def apply_day_window(
+    base: EngineTarget,
+    night_floor: EngineTarget,
+    day_window: DayWindow,
+    now_minutes: float,
+) -> EngineTarget:
+    """Gate the live curve to a forced clock window (caller checks ``enabled``).
+
+    The real elevation curve is never remapped — the window only chooses which
+    target applies: the night floor outside it, an edge ramp in at ``start``,
+    the untouched live daytime curve in the core, and a timed wind-down to the
+    floor after ``end``. This is the "set my sunrise/sunset without distorting
+    midday circadian" option.
+    """
+    start = _hhmm_to_minutes(day_window["start"])
+    end = _hhmm_to_minutes(day_window["end"])
+    edge = day_window.get("edge_transition_s", DEFAULT_EDGE_TRANSITION_S) / 60
+    wind = day_window.get("wind_down_s", DEFAULT_WIND_DOWN_S) / 60
+    if now_minutes < start:
+        return night_floor
+    if now_minutes < start + edge:
+        return _blend_targets(
+            night_floor, base, (now_minutes - start) / edge if edge else 1.0
         )
-    if sleep_mode == COLOR_MODE_RGB and valid_rgb(sleep_rgb):
-        rgb = (int(sleep_rgb[0]), int(sleep_rgb[1]), int(sleep_rgb[2]))  # type: ignore[index]
-        return EngineTarget(brightness, COLOR_MODE_RGB, None, rgb)
-    sleep_ct = sleep.get("ct")
-    return EngineTarget(brightness, COLOR_MODE_COLOR_TEMP, sleep_ct, None)
+    if now_minutes < end:
+        return base
+    if now_minutes < end + wind:
+        return _blend_targets(
+            base, night_floor, (now_minutes - end) / wind if wind else 1.0
+        )
+    return night_floor
 
 
 def compute_target(
-    e: float, noon: float, profile: SourceProfile, *, sleep_s: float = 0.0
+    e: float,
+    noon: float,
+    profile: SourceProfile,
+    *,
+    sleep_s: float = 0.0,
+    now_minutes: float | None = None,
 ) -> EngineTarget:
-    """Full per-cycle target: elevation regime + sleep overlay.
+    """Full per-cycle target: elevation regime, optional day-window, sleep overlay.
 
-    ``e`` is the current solar elevation (deg), ``noon`` today's solar-noon
-    elevation (deg, for brightness normalization), ``sleep_s`` the sleep-ramp
-    value in [0, 1] (0 = awake). Pure — the only state is its arguments.
+    ``e`` is current solar elevation (deg); ``noon`` today's solar-noon elevation
+    (deg, for brightness normalization); ``sleep_s`` the sleep-ramp value in
+    [0, 1] (0 = awake); ``now_minutes`` local minutes-since-midnight, needed only
+    when the profile's ``day_window`` is enabled. Pure — state is its arguments.
     """
-    return apply_sleep(base_target(e, profile, noon), profile, sleep_s)
+    base = base_target(e, profile, noon)
+    day_window = profile.get("day_window")
+    if day_window and day_window.get("enabled") and now_minutes is not None:
+        base = apply_day_window(
+            base, _night_floor_target(profile), day_window, now_minutes
+        )
+    return apply_sleep(base, profile, sleep_s)
 
 
 def sleep_ramp(

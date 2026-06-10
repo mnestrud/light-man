@@ -72,6 +72,10 @@ PERCEPTUAL_GAMMA: Final = 2.2
 # Brightness saturates at this fraction of today's noon elevation (full bright by
 # mid-morning every season — no dim winter middays). Per-source override allowed.
 DEFAULT_SAT: Final = 0.5
+# Optional forced day-window edge ramps (seconds), used only when a source's
+# day_window is enabled — the window gates the edges without remapping midday.
+DEFAULT_EDGE_TRANSITION_S: Final = 1800.0  # 30 min ramp into the live curve
+DEFAULT_WIND_DOWN_S: Final = 5400.0  # 90 min wind-down to the night floor
 
 # --- AL dummy-switch attributes (read from HA state, not Zigbee) ------------
 ATTR_BRIGHTNESS_PCT: Final = "brightness_pct"

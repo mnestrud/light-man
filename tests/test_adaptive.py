@@ -227,6 +227,84 @@ def test_mixed_rgb_base_keeps_rgb_then_switches_to_sleep_ct() -> None:
     assert late.color_temp_kelvin == 2200
 
 
+# --- optional forced day-window gate ---------------------------------------
+
+DAY_WINDOWED: SourceProfile = {
+    **OVERHEAD,  # type: ignore[misc]
+    "day_window": {
+        "enabled": True,
+        "start": "08:00",  # 480 min
+        "end": "16:00",  # 960 min
+        "edge_transition_s": 1800,  # 30 min ramp -> core at 510
+        "wind_down_s": 5400,  # 90 min wind-down -> floor at 1050
+    },
+}
+# A bright midday elevation: base is saturated + cool, distinct from the floor.
+MIDDAY_E = 60.0
+
+
+def test_day_window_disabled_is_passthrough() -> None:
+    # OVERHEAD has no day_window; now_minutes is ignored.
+    gated = compute_target(MIDDAY_E, SUMMER_NOON, OVERHEAD, now_minutes=600)
+    assert gated == base_target(MIDDAY_E, OVERHEAD, SUMMER_NOON)
+
+
+def test_day_window_enabled_but_no_now_minutes_skips_gate() -> None:
+    ungated = compute_target(MIDDAY_E, SUMMER_NOON, DAY_WINDOWED)
+    assert ungated == base_target(MIDDAY_E, DAY_WINDOWED, SUMMER_NOON)
+
+
+def test_day_window_before_start_is_night_floor() -> None:
+    t = compute_target(MIDDAY_E, SUMMER_NOON, DAY_WINDOWED, now_minutes=400)  # 06:40
+    assert t.brightness_pct == pytest.approx(10, abs=0.5)  # night_floor_br
+    assert t.color_temp_kelvin == pytest.approx(2200, abs=15)
+
+
+def test_day_window_edge_ramps_in() -> None:
+    t = compute_target(MIDDAY_E, SUMMER_NOON, DAY_WINDOWED, now_minutes=495)  # mid-ramp
+    assert 10 < t.brightness_pct < 90  # between floor and the live curve
+    assert t.color_temp_kelvin > 2200
+
+
+def test_day_window_core_is_untouched_live_curve() -> None:
+    t = compute_target(MIDDAY_E, SUMMER_NOON, DAY_WINDOWED, now_minutes=600)  # 10:00
+    assert t == base_target(MIDDAY_E, DAY_WINDOWED, SUMMER_NOON)
+
+
+def test_day_window_winds_down_after_end() -> None:
+    t = compute_target(
+        MIDDAY_E, SUMMER_NOON, DAY_WINDOWED, now_minutes=1005
+    )  # mid wind
+    assert 10 < t.brightness_pct < 90
+
+
+def test_day_window_after_wind_down_is_floor() -> None:
+    t = compute_target(MIDDAY_E, SUMMER_NOON, DAY_WINDOWED, now_minutes=1100)  # 18:20
+    assert t.brightness_pct == pytest.approx(10, abs=0.5)
+
+
+def test_day_window_floor_keeps_rgb_base_color() -> None:
+    # rgb-base source: the night floor holds the fixed day color, dimmed.
+    hallway_windowed: SourceProfile = {
+        **HALLWAY,  # type: ignore[misc]
+        "day_window": {"enabled": True, "start": "08:00", "end": "16:00"},
+    }
+    t = compute_target(MIDDAY_E, SUMMER_NOON, hallway_windowed, now_minutes=400)
+    assert t.color_mode == COLOR_MODE_RGB
+    assert t.rgb_color == (80, 160, 255)
+    assert t.brightness_pct == pytest.approx(15, abs=0.5)  # night_floor_br
+
+
+def test_sleep_overlay_applies_over_a_gated_floor() -> None:
+    # Before the window the gate yields the night floor; the sleep overlay still
+    # blends on top (sleep applies throughout the gated regions).
+    t = compute_target(
+        MIDDAY_E, SUMMER_NOON, DAY_WINDOWED, now_minutes=400, sleep_s=1.0
+    )
+    assert t.brightness_pct == pytest.approx(30, abs=0.5)  # full sleep target
+    assert t.color_temp_kelvin == pytest.approx(2200, abs=15)
+
+
 # --- sleep ramp helper ------------------------------------------------------
 
 
