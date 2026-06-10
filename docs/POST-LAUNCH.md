@@ -13,6 +13,23 @@ status boxes as items are picked up. Last reviewed: **2026-06-10**.
   via `force_push` MQTT trace: `defaultLevelLocal/Remote` per-source (overhead 229 / accent 76), LED-bar
   `brightness` published only for the paddle-on switch. PASS.*
 
+## Planned next (added 2026-06-10)
+
+- [ ] **Pull out the master-switch machinery (code).** The legacy tick automation
+  (`automation.ataraxia_lighting_master_tick_automation`) and all 20 `script.al_*` push scripts are now
+  **registry-disabled directly on live** (Spook `homeassistant.disable_entity`, 2026-06-10) — they no
+  longer depend on the `push_enable` toggle. So the integration's `_reconcile_legacy` machinery (driving
+  the tick + legacy enable booleans on/off, and re-enabling them on unload) is now dead weight. Remove it:
+  drop `_reconcile_legacy`, `_reconcile_legacy_on_start`, `async_restore_legacy`, `TICK_AUTOMATION`, the
+  `legacy_enable` reads, and simplify `async_set_push_enabled` to just own the push (no legacy reconcile).
+  Keep `push_enable` as the inert-vs-owning toggle. Update tests accordingly. *(Live legacy entities stay
+  disabled regardless; the integration just stops trying to manage them.)*
+- [ ] **Web-based control dashboard.** A tabbed Lovelace dashboard with smart, live settings to configure
+  Light Man — replacing the static `light_man_config.json` seed and avoiding a config/options flow as much
+  as possible. Two parts: (A) integration exposes tunables as Number/Select/Switch/Button **config
+  entities** backed by the Store; (B) a tabbed dashboard surfaces them. Full plan:
+  [`docs/DASHBOARD-PLAN.md`](DASHBOARD-PLAN.md).
+
 ## Deferred to the user, by their call
 
 - [ ] **East mmwave detection-region tuning.** The East sensor doesn't detect descent, so no
