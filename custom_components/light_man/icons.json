@@ -8,6 +8,9 @@
     "switch": {
       "push_enable": {
         "default": "mdi:lightbulb-auto"
+      },
+      "sleep_enable": {
+        "default": "mdi:power-sleep"
       }
     }
   },

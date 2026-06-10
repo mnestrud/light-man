@@ -30,7 +30,6 @@ from .conftest import (
     LR_SWITCH,
     OVERHEAD_ALL,
     SEED,
-    SLEEP_SWITCH,
     TICK_CALLS_KEY,
     FakeStore,
     published,
@@ -109,17 +108,35 @@ async def test_unload_restore_calls_tick_on(
     assert ("turn_on", {"entity_id": TICK_AUTOMATION}) in calls
 
 
-async def test_sleep_switches_hallway_to_rgb(
+async def test_sleep_snap_applies_engine_sleep_target(
     hass: HomeAssistant, coordinator: Coord, mqtt_mock: Any
 ) -> None:
-    """With its sleep switch on, the hallway emits the engine's sleep rgb."""
-    hass.states.async_set(SLEEP_SWITCH, "on", {})
-    await hass.async_block_till_done()
-    mqtt_mock.async_publish.reset_mock()
+    """Snapping sleep on drives every source to its profile's sleep target."""
     await coordinator.async_set_push_enabled(enabled=True)
     await hass.async_block_till_done()
-    # Engine sleep target for hallway_up's profile (sleep_s=1): rgb [255,126,30].
-    assert published(mqtt_mock)[HALL_UP]["color"] == {"r": 255, "g": 126, "b": 30}
+    mqtt_mock.async_publish.reset_mock()
+    await coordinator.async_set_sleep(enabled=True, ramp=False)
+    await hass.async_block_till_done()
+    pubs = published(mqtt_mock)
+    assert pubs[HALL_UP]["color"] == {"r": 255, "g": 126, "b": 30}  # hallway sleep rgb
+    # overhead sleep target: 30% -> 76, 2700K -> 370 mired.
+    assert pubs[OVERHEAD_ALL] == {
+        "brightness": 76,
+        "transition": 1.0,
+        "color_temp": 370,
+    }
+    assert coordinator.diagnostics["sleep"] == {"on": True, "s": 1.0}
+
+
+async def test_sleep_ramp_interpolates(hass: HomeAssistant, coordinator: Coord) -> None:
+    """The sleep ramp eases between awake and asleep over its duration."""
+    now = dt_util.utcnow()
+    coordinator.sleep_on = True
+    coordinator._sleep_start = 0.0
+    coordinator._sleep_changed_at = now - timedelta(seconds=2700)  # half of 5400s in
+    assert abs(coordinator._compute_sleep_s(now) - 0.5) < 0.01
+    coordinator._sleep_changed_at = None  # snapped -> straight to target
+    assert coordinator._compute_sleep_s(now) == 1.0
 
 
 async def test_config_single_holds_night_per_room(

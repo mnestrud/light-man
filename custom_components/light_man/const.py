@@ -125,6 +125,13 @@ ATTR_ROOM: Final = "room"
 # --- Entity unique_id kinds ({entry_id}_{kind}) -----------------------------
 UID_ACTIVE_HOLDS: Final = "active_holds"
 UID_PUSH_ENABLE: Final = "push_enable"
+UID_SLEEP_ENABLE: Final = "sleep_enable"
+
+# --- Sleep overlay (Light-Man-owned global toggle + ramp) -------------------
+# The user owns the schedule (automate switch.light_man_sleep); Light Man owns
+# the ramp. Global durations — a per-source override can come later if needed.
+DEFAULT_SLEEP_RAMP_IN_S: Final = 5400.0  # 90 min ease into the sleep target
+DEFAULT_SLEEP_RAMP_OUT_S: Final = 1800.0  # 30 min ease back out on wake
 
 # --- Solar event for hold TTL (astral "midnight" = solar midnight/nadir) -----
 SOLAR_MIDNIGHT_EVENT: Final = "midnight"

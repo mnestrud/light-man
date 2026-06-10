@@ -21,7 +21,6 @@ from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any, TypedDict
 
 from homeassistant.components import mqtt
-from homeassistant.const import STATE_ON as HA_STATE_ON
 from homeassistant.const import STATE_UNAVAILABLE, STATE_UNKNOWN
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.start import async_at_started
@@ -29,7 +28,7 @@ from homeassistant.helpers.sun import get_astral_event_next
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.util import dt as dt_util
 
-from .adaptive import compute_target
+from .adaptive import compute_target, sleep_ramp
 from .const import (
     ACTION_SUFFIX,
     ATTR_BRIGHTNESS_PCT,
@@ -39,9 +38,10 @@ from .const import (
     CONF_LEGACY_ENABLE,
     CONF_PUSH_INTERVAL,
     CONF_ROOMS,
-    CONF_SLEEP_SWITCH,
     CONF_SOURCES,
     CONF_TRANSITION,
+    DEFAULT_SLEEP_RAMP_IN_S,
+    DEFAULT_SLEEP_RAMP_OUT_S,
     DEFAULT_TRANSITION_S,
     INTER_PUBLISH_DELAY_S,
     MODE_ADAPTIVE,
@@ -114,12 +114,18 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         self._unsubs: list[Any] = []
         self.push_enabled = False
         self.mqtt_available = True
+        # Global sleep overlay: target on/off, the ramp value held at the last
+        # toggle (ramp start), and when it flipped. None changed_at = snapped.
+        self.sleep_on = False
+        self._sleep_start = 0.0
+        self._sleep_changed_at: datetime | None = None
         self.diagnostics: dict[str, Any] = {
             "issues": validated.issues,
             "dedup_skips": 0,
             "addressing": {},
             "last_publish": {},
             "engine": {},
+            "sleep": {"on": False, "s": 0.0},
         }
 
     # --- lifecycle ----------------------------------------------------------
@@ -203,11 +209,15 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
             return
         local = dt_util.as_local(now)
         now_minutes = local.hour * 60 + local.minute + local.second / 60
+        sleep_s = self._compute_sleep_s(now)
+        self.diagnostics["sleep"] = {"on": self.sleep_on, "s": round(sleep_s, 3)}
         plan: list[tuple[str, str, PushPayload]] = []
         for key, source in self._config[CONF_SOURCES].items():
             if only_source is not None and key != only_source:
                 continue
-            plan.extend(self._plan_source(key, source, elevation, noon, now_minutes))
+            plan.extend(
+                self._plan_source(key, source, elevation, noon, now_minutes, sleep_s)
+            )
         await self._publish_spaced(plan, force=force)
 
     def _plan_source(
@@ -217,11 +227,12 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         elevation: float,
         noon: float,
         now_minutes: float,
+        sleep_s: float,
     ) -> list[tuple[str, str, PushPayload]]:
         """Plan one source's ``(source_key, topic, payload)`` publishes."""
         transition = float(source.get(CONF_TRANSITION, DEFAULT_TRANSITION_S))
         adaptive_payload = self._adaptive_payload(
-            key, source, elevation, noon, now_minutes, transition
+            key, source, elevation, noon, now_minutes, sleep_s, transition
         )
         if adaptive_payload is None:
             return []
@@ -242,13 +253,15 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         elevation: float,
         noon: float,
         now_minutes: float,
+        sleep_s: float,
         transition: float,
     ) -> PushPayload | None:
         """Return the live adaptive payload for a source.
 
         Phase 2: the real-elevation engine computes it from the source's profile
-        (the value is recorded in diagnostics for inspection). A source with no
-        profile falls back to its AL dummy switch so a partial config still runs.
+        and the global ``sleep_s`` ramp (recorded in diagnostics). A source with
+        no profile falls back to its AL dummy switch so a partial config still
+        runs (its color mode then follows the global sleep flag).
         """
         profile = source.get("profile")
         if profile is not None:
@@ -256,7 +269,7 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
                 elevation,
                 noon,
                 profile,
-                sleep_s=1.0 if self._is_sleeping(source) else 0.0,
+                sleep_s=sleep_s,
                 now_minutes=now_minutes,
             )
             rgb = list(target.rgb_color) if target.rgb_color else None
@@ -281,7 +294,7 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
             brightness_pct=adaptive["brightness_pct"],
             color_temp_kelvin=adaptive["color_temp_kelvin"],
             rgb_color=adaptive["rgb_color"],
-            mode=resolve_color_mode(source, sleeping=self._is_sleeping(source)),
+            mode=resolve_color_mode(source, sleeping=self.sleep_on),
             transition=transition,
         )
 
@@ -352,13 +365,30 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
             rgb_color=state.attributes.get(ATTR_RGB_COLOR),
         )
 
-    def _is_sleeping(self, source: SourceConfig) -> bool:
-        """Return True when the source's sleep switch is on."""
-        sleep_switch = source.get(CONF_SLEEP_SWITCH)
-        if not sleep_switch:
-            return False
-        state = self.hass.states.get(sleep_switch)
-        return state is not None and state.state == HA_STATE_ON
+    # --- sleep overlay (Light-Man-owned global toggle + ramp) ---------------
+
+    def _compute_sleep_s(self, now: datetime) -> float:
+        """Return the global sleep-ramp value in [0, 1] (0 awake, 1 asleep)."""
+        target = 1.0 if self.sleep_on else 0.0
+        if self._sleep_changed_at is None:
+            return target
+        duration = (
+            DEFAULT_SLEEP_RAMP_IN_S if self.sleep_on else DEFAULT_SLEEP_RAMP_OUT_S
+        )
+        elapsed = (now - self._sleep_changed_at).total_seconds()
+        return sleep_ramp(elapsed, duration, start=self._sleep_start, target=target)
+
+    async def async_set_sleep(self, *, enabled: bool, ramp: bool = True) -> None:
+        """Engage/release the sleep overlay — ramped, or snapped on restore."""
+        now = dt_util.utcnow()
+        if ramp:
+            self._sleep_start = self._compute_sleep_s(now)
+            self._sleep_changed_at = now
+        else:
+            self._sleep_changed_at = None  # snap straight to the target
+        self.sleep_on = enabled
+        await self._run_push(force=True)
+        self.async_set_updated_data(self._snapshot())
 
     # --- modes --------------------------------------------------------------
 

@@ -19,6 +19,9 @@
     "switch": {
       "push_enable": {
         "name": "Adaptive push"
+      },
+      "sleep_enable": {
+        "name": "Sleep"
       }
     }
   },

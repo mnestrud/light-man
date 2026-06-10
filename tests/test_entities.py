@@ -4,12 +4,15 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from homeassistant.core import State
 from homeassistant.helpers import entity_registry as er
+from pytest_homeassistant_custom_component.common import mock_restore_cache
 
 from custom_components.light_man.const import (
     DOMAIN,
     UID_ACTIVE_HOLDS,
     UID_PUSH_ENABLE,
+    UID_SLEEP_ENABLE,
 )
 
 from .conftest import setup_lightman
@@ -63,3 +66,31 @@ async def test_push_enable_switch_toggles_stack(
     )
     assert coordinator.push_enabled is False
     assert hass.states.get(switch_id).state == "off"
+
+
+async def test_sleep_switch_toggles(hass: HomeAssistant, mqtt_mock: Any) -> None:
+    """Toggling the sleep switch drives the coordinator's sleep state."""
+    entry = await setup_lightman(hass)
+    coordinator = entry.runtime_data.coordinator
+    switch_id = _entity_id(hass, "switch", entry.entry_id, UID_SLEEP_ENABLE)
+
+    assert hass.states.get(switch_id).state == "off"
+    assert coordinator.sleep_on is False
+
+    await hass.services.async_call(
+        "switch", "turn_on", {"entity_id": switch_id}, blocking=True
+    )
+    assert coordinator.sleep_on is True
+    assert hass.states.get(switch_id).state == "on"
+
+    await hass.services.async_call(
+        "switch", "turn_off", {"entity_id": switch_id}, blocking=True
+    )
+    assert coordinator.sleep_on is False
+
+
+async def test_sleep_switch_restores_on(hass: HomeAssistant, mqtt_mock: Any) -> None:
+    """A restored 'on' sleep state is re-applied (snapped) on startup."""
+    mock_restore_cache(hass, (State("switch.light_man_sleep", "on"),))
+    entry = await setup_lightman(hass)
+    assert entry.runtime_data.coordinator.sleep_on is True
