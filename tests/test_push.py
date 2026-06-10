@@ -8,6 +8,7 @@ from custom_components.light_man.push import (
     build_night_payload,
     build_payload,
     kelvin_to_mired,
+    mired_to_kelvin,
     pct_to_brightness,
     plan_publishes,
     resolve_color_mode,
@@ -47,6 +48,13 @@ def test_kelvin_to_mired_clamps() -> None:
     assert kelvin_to_mired(10000) == 153
     assert kelvin_to_mired(1000) == 500
     assert kelvin_to_mired(0) == 500
+
+
+def test_mired_to_kelvin_inverts_and_guards_zero() -> None:
+    assert mired_to_kelvin(250) == 4000
+    assert mired_to_kelvin(370) == 2703  # round-trips kelvin_to_mired(2700)
+    assert mired_to_kelvin(0) == 0  # guard
+    assert mired_to_kelvin(-5) == 0
 
 
 def test_resolve_color_mode_by_sleep_state() -> None:

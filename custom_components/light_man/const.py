@@ -58,6 +58,21 @@ BRIGHTNESS_MAX: Final = 254
 MIRED_MIN: Final = 153  # ~6500 K
 MIRED_MAX: Final = 500  # 2000 K
 
+# --- Adaptive engine (Phase 2) ----------------------------------------------
+# Real-solar-elevation target engine that replaces the AL dummy switches. These
+# are *engine* constants (not per-source); the per-source profile lives in the
+# seed config / OptionsFlow. Design: docs/reference/adaptive-algorithm.md.
+# Fixed color reference = summer solar-noon elevation at the house lat/long, so
+# winter daylight stays honestly warmer (the curve is not renormalized per day).
+REF_ELEVATION_DEG: Final = 71.5
+# Astronomical-twilight depth: the dusk/dawn band over which lights wind down.
+TWILIGHT_BAND_DEG: Final = 18.0
+# Brightness interpolates in perceptual (gamma) space, not raw %. ~display gamma.
+PERCEPTUAL_GAMMA: Final = 2.2
+# Brightness saturates at this fraction of today's noon elevation (full bright by
+# mid-morning every season — no dim winter middays). Per-source override allowed.
+DEFAULT_SAT: Final = 0.5
+
 # --- AL dummy-switch attributes (read from HA state, not Zigbee) ------------
 ATTR_BRIGHTNESS_PCT: Final = "brightness_pct"
 ATTR_COLOR_TEMP_KELVIN: Final = "color_temp_kelvin"

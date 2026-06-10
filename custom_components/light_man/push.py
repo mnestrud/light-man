@@ -38,6 +38,13 @@ def kelvin_to_mired(kelvin: float) -> int:
     return max(MIRED_MIN, min(MIRED_MAX, round(1_000_000 / kelvin)))
 
 
+def mired_to_kelvin(mired: float) -> int:
+    """Convert mireds back to Kelvin (inverse of :func:`kelvin_to_mired`)."""
+    if mired <= 0:
+        return 0
+    return round(1_000_000 / mired)
+
+
 def resolve_color_mode(source: SourceConfig, *, sleeping: bool) -> str:
     """Pick the active color mode for a source given the sleep state."""
     if sleeping:

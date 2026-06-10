@@ -75,6 +75,65 @@ class AdaptiveValues(TypedDict):
     rgb_color: list[int] | None
 
 
+# --- Phase 2: adaptive-target engine ---------------------------------------
+
+
+class SleepProfile(TypedDict, total=False):
+    """Per-source sleep-overlay target (blended in by the sleep toggle ramp)."""
+
+    br: float
+    color_mode: str  # color_temp | rgb
+    ct: float
+    rgb: list[int] | None
+    ramp_in_s: float
+    ramp_out_s: float
+
+
+class DayWindow(TypedDict, total=False):
+    """Optional forced sunrise/sunset that gates the edges without remapping noon."""
+
+    enabled: bool
+    start: str  # "HH:MM" local
+    end: str
+    edge_transition_s: float
+    wind_down_s: float
+
+
+class SourceProfile(TypedDict, total=False):
+    """Per-source adaptive profile (Phase 2 OptionsFlow; replaces the AL switch).
+
+    Endpoints carry over from the current AL config; ``base_color_mode``/``base_rgb``
+    add an explicit daytime single-color option (e.g. hallway sky-blue) that AL
+    cannot express. See docs/reference/adaptive-algorithm.md.
+    """
+
+    min_br: float
+    max_br: float
+    min_ct: float  # Kelvin — warm endpoint (low elevation)
+    max_ct: float  # Kelvin — cool endpoint (high elevation)
+    sat: float
+    base_color_mode: str  # color_temp | rgb
+    base_rgb: list[int] | None
+    dusk_floor_ct: float
+    night_floor_br: float
+    sleep: SleepProfile
+    day_window: DayWindow
+
+
+@dataclass(slots=True)
+class EngineTarget:
+    """The engine's computed target for one source this cycle.
+
+    Carries its own color mode so the push emits ``color_temp`` or ``color``
+    from the engine's decision rather than a static per-source flag.
+    """
+
+    brightness_pct: float
+    color_mode: str  # const.COLOR_MODE_COLOR_TEMP | COLOR_MODE_RGB
+    color_temp_kelvin: float | None
+    rgb_color: tuple[int, int, int] | None
+
+
 @dataclass(slots=True)
 class HeldRecord:
     """A room held at a look: which kind, when set, and when it auto-expires."""
