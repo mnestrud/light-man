@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import json
 from datetime import timedelta
@@ -22,6 +23,8 @@ from custom_components.light_man.modes import ModeManager
 
 from .conftest import (
     AL_OVERHEAD,
+    HALL_CENTER_SET,
+    HALL_OFF,
     HALL_UP,
     KIT_SET,
     LEG_HALL,
@@ -539,54 +542,95 @@ async def test_solar_unavailable_skips_push(
     assert published(mqtt_mock) == {}
 
 
-# --- occupancy (mmwave presence -> zone lights) ----------------------------
+# --- occupancy (mmwave presence -> directional sweep) ----------------------
+
+# Engine value for hallway_up (rgb sky-blue, 90% -> 229) + occupancy state/transition.
+SWEEP_ON = {
+    "brightness": 229,
+    "transition": 1.5,
+    "color": {"r": 135, "g": 206, "b": 235},
+    "state": "ON",
+}
 
 
-async def test_occupancy_on_publishes_engine_value(
+async def _instant(*_a: Any, **_k: Any) -> None:
+    """Replace asyncio.sleep so sweep stage delays don't slow the tests."""
+
+
+async def _walk(
+    hass: HomeAssistant, coordinator: Coord, topic: str, *, occupied: bool
+) -> None:
+    """Fire an mmwave message, running sweep delays instantly + draining tasks."""
+    with patch("custom_components.light_man.coordinator.asyncio.sleep", _instant):
+        _fire(hass, topic, {"occupancy": occupied})
+        await hass.async_block_till_done()
+        pending = [t for t in coordinator._sweep_tasks.values() if not t.done()]
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+        await hass.async_block_till_done()
+
+
+async def test_occupancy_sweep_lights_each_stage(
     hass: HomeAssistant, coordinator: Coord, mqtt_mock: Any
 ) -> None:
-    """Presence turns the zone lights on at the live engine value + state ON."""
+    """The east sensor sweeps each stage on at the engine value + state ON."""
     await coordinator.async_set_push_enabled(enabled=True)
     await hass.async_block_till_done()
     mqtt_mock.async_publish.reset_mock()
-
-    _fire(hass, MMWAVE_EAST, {"occupancy": True})
-    await hass.async_block_till_done()
-
-    payload = published(mqtt_mock)[HALL_UP]
-    assert payload["state"] == "ON"
-    assert payload["color"] == {"r": 135, "g": 206, "b": 235}  # hallway_up engine rgb
-    assert payload["transition"] == 1.5
+    await _walk(hass, coordinator, MMWAVE_EAST, occupied=True)
+    pubs = published(mqtt_mock)
+    assert pubs[HALL_UP] == SWEEP_ON  # stage 1
+    assert pubs[HALL_CENTER_SET] == SWEEP_ON  # stage 2 (after the delay)
     assert coordinator.diagnostics["occupancy"]["hallway"] is True
 
 
 async def test_occupancy_clears_when_all_sensors_off(
     hass: HomeAssistant, coordinator: Coord, mqtt_mock: Any
 ) -> None:
-    """When the last sensor clears, the zone lights turn off."""
+    """When the last sensor clears, the zone's off_lights turn off."""
     await coordinator.async_set_push_enabled(enabled=True)
-    _fire(hass, MMWAVE_EAST, {"occupancy": True})
-    await hass.async_block_till_done()
+    await _walk(hass, coordinator, MMWAVE_EAST, occupied=True)
     mqtt_mock.async_publish.reset_mock()
-
-    _fire(hass, MMWAVE_EAST, {"occupancy": False})
-    await hass.async_block_till_done()
-    assert published(mqtt_mock)[HALL_UP] == {"state": "OFF", "transition": 1.5}
+    await _walk(hass, coordinator, MMWAVE_EAST, occupied=False)
+    assert published(mqtt_mock)[HALL_OFF] == {"state": "OFF", "transition": 1.5}
+    assert coordinator.diagnostics["occupancy"]["hallway"] is False
 
 
 async def test_occupancy_stays_on_until_all_clear(
     hass: HomeAssistant, coordinator: Coord, mqtt_mock: Any
 ) -> None:
-    """One sensor clearing while another is occupied is not an edge."""
+    """One sensor clearing while another is occupied does not turn the zone off."""
     await coordinator.async_set_push_enabled(enabled=True)
-    _fire(hass, MMWAVE_EAST, {"occupancy": True})
-    _fire(hass, MMWAVE_WEST, {"occupancy": True})
-    await hass.async_block_till_done()
+    await _walk(hass, coordinator, MMWAVE_EAST, occupied=True)
+    await _walk(hass, coordinator, MMWAVE_WEST, occupied=True)
     mqtt_mock.async_publish.reset_mock()
+    await _walk(hass, coordinator, MMWAVE_EAST, occupied=False)  # west still occupied
+    assert HALL_OFF not in published(mqtt_mock)
 
-    _fire(hass, MMWAVE_EAST, {"occupancy": False})  # west still occupied
-    await hass.async_block_till_done()
-    assert HALL_UP not in published(mqtt_mock)
+
+async def test_occupancy_sweep_restarts_on_retrigger(
+    hass: HomeAssistant, coordinator: Coord, mqtt_mock: Any
+) -> None:
+    """A new occupied edge cancels the in-flight sweep before starting a fresh one."""
+    await coordinator.async_set_push_enabled(enabled=True)
+    task_key = ("hallway", MMWAVE_EAST)
+    stuck = hass.async_create_task(asyncio.Event().wait())
+    coordinator._sweep_tasks[task_key] = stuck
+    coordinator._sensor_occupied[MMWAVE_EAST] = False
+    await _walk(hass, coordinator, MMWAVE_EAST, occupied=True)
+    assert stuck.cancelled()
+    assert coordinator._sweep_tasks[task_key] is not stuck
+
+
+async def test_occupancy_repeat_message_is_no_edge(
+    hass: HomeAssistant, coordinator: Coord, mqtt_mock: Any
+) -> None:
+    """A repeated occupancy value (no transition) does not re-run the sweep."""
+    await coordinator.async_set_push_enabled(enabled=True)
+    await _walk(hass, coordinator, MMWAVE_EAST, occupied=True)
+    mqtt_mock.async_publish.reset_mock()
+    await _walk(hass, coordinator, MMWAVE_EAST, occupied=True)  # same value
+    assert published(mqtt_mock) == {}
 
 
 async def test_occupancy_inert_when_push_disabled(
@@ -594,8 +638,7 @@ async def test_occupancy_inert_when_push_disabled(
 ) -> None:
     """In legacy mode mmwave presence is ignored."""
     mqtt_mock.async_publish.reset_mock()
-    _fire(hass, MMWAVE_EAST, {"occupancy": True})
-    await hass.async_block_till_done()
+    await _walk(hass, coordinator, MMWAVE_EAST, occupied=True)
     assert published(mqtt_mock) == {}
 
 
@@ -623,10 +666,10 @@ async def test_occupancy_malformed_payload_ignored(
     assert published(mqtt_mock) == {}
 
 
-async def test_occupancy_skips_when_solar_unavailable(
+async def test_occupancy_sweep_skips_when_solar_unavailable(
     hass: HomeAssistant, coordinator: Coord, mqtt_mock: Any
 ) -> None:
-    """If solar is unavailable, the turn-on has no engine value and is skipped."""
+    """If solar is unavailable, the sweep has no engine value and publishes nothing."""
     await coordinator.async_set_push_enabled(enabled=True)
     await hass.async_block_till_done()
     mqtt_mock.async_publish.reset_mock()
@@ -634,8 +677,7 @@ async def test_occupancy_skips_when_solar_unavailable(
         "custom_components.light_man.coordinator.solar_inputs",
         side_effect=ValueError("polar night"),
     ):
-        _fire(hass, MMWAVE_EAST, {"occupancy": True})
-        await hass.async_block_till_done()
+        await _walk(hass, coordinator, MMWAVE_EAST, occupied=True)
     assert HALL_UP not in published(mqtt_mock)
 
 

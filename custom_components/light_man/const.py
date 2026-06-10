@@ -16,7 +16,7 @@ CONFIG_STORE_VERSION: Final = 1
 # Content version of the bundled seed. Bump when the shipped light_man_config.json
 # gains new structure (e.g. Phase 2 per-source profiles) so installs whose Store
 # predates it re-seed from the bundle instead of running a stale config.
-BUNDLED_SEED_VERSION: Final = 3
+BUNDLED_SEED_VERSION: Final = 4
 # Per-room mode intent; must survive restarts so a held look is not dropped.
 MODES_STORE_KEY: Final = "light_man_modes"
 MODES_STORE_VERSION: Final = 1
@@ -114,12 +114,16 @@ ACTION_MODE: Final = {
 STATE_ON: Final = "ON"
 STATE_OFF: Final = "OFF"
 
-# --- Occupancy (mmwave presence -> zone lights, MQTT-driven) -----------------
+# --- Occupancy (mmwave presence -> directional sweep, MQTT-driven) -----------
 CONF_OCCUPANCY: Final = "occupancy"
-CONF_MMWAVE_TOPICS: Final = "mmwave_topics"
 CONF_OCCUPANCY_KEY: Final = "occupancy_key"
+CONF_SENSORS: Final = "sensors"
+CONF_SWEEP: Final = "sweep"
+CONF_STAGE_DELAY: Final = "delay_s"
 CONF_LIGHTS: Final = "lights"
 CONF_SOURCE: Final = "source"
+CONF_OFF_LIGHTS: Final = "off_lights"
+CONF_OFF_TRANSITION: Final = "off_transition_s"
 # Default JSON field in an Inovelli mmwave payload that reports overall presence.
 DEFAULT_OCCUPANCY_KEY: Final = "occupancy"
 DEFAULT_OCCUPANCY_TRANSITION_S: Final = 1.5

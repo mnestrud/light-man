@@ -17,17 +17,20 @@ from .const import (
     CONF_CONSOLIDATED_TOPIC,
     CONF_DAY_COLOR_MODE,
     CONF_LIGHTS,
-    CONF_MMWAVE_TOPICS,
     CONF_NIGHT_COLOR_MODE,
     CONF_OCCUPANCY,
     CONF_OCCUPANCY_KEY,
+    CONF_OFF_LIGHTS,
+    CONF_OFF_TRANSITION,
     CONF_PUSH_INTERVAL,
     CONF_ROOMS,
+    CONF_SENSORS,
     CONF_SET_TOPIC,
     CONF_SOURCE,
     CONF_SOURCES,
+    CONF_STAGE_DELAY,
+    CONF_SWEEP,
     CONF_SWITCHES,
-    CONF_TRANSITION,
     DEFAULT_COLOR_MODE,
     DEFAULT_OCCUPANCY_KEY,
     DEFAULT_OCCUPANCY_TRANSITION_S,
@@ -36,6 +39,8 @@ from .const import (
 from .models import (
     LightManConfig,
     OccupancyLight,
+    OccupancySensor,
+    OccupancyStage,
     OccupancyZone,
     RoomConfig,
     SourceConfig,
@@ -164,6 +169,49 @@ def _validate_source(
     return source
 
 
+def _validate_light(
+    zone_key: str, raw: object, source_keys: set[str], issues: list[str]
+) -> OccupancyLight | None:
+    """Validate one sweep light ``{set_topic, source}``; None if invalid."""
+    if not isinstance(raw, dict):
+        return None
+    set_topic = raw.get(CONF_SET_TOPIC)
+    source = raw.get(CONF_SOURCE)
+    if not isinstance(set_topic, str) or not set_topic:
+        issues.append(f"occupancy.{zone_key}: light missing set_topic")
+        return None
+    if not isinstance(source, str) or source not in source_keys:
+        issues.append(f"occupancy.{zone_key}: light source {source!r} unknown")
+        return None
+    return OccupancyLight(set_topic=set_topic, source=source)
+
+
+def _validate_sweep(
+    zone_key: str, raw_sweep: object, source_keys: set[str], issues: list[str]
+) -> list[OccupancyStage]:
+    """Validate a sensor's ordered sweep stages (each a delay + its lights)."""
+    if not isinstance(raw_sweep, list):
+        return []
+    stages: list[OccupancyStage] = []
+    for raw_stage in raw_sweep:
+        if not isinstance(raw_stage, dict):
+            continue
+        raw_lights = raw_stage.get(CONF_LIGHTS, [])
+        lights: list[OccupancyLight] = []
+        for raw_light in raw_lights if isinstance(raw_lights, list) else []:
+            light = _validate_light(zone_key, raw_light, source_keys, issues)
+            if light is not None:
+                lights.append(light)
+        if not lights:
+            continue
+        stage: OccupancyStage = {CONF_LIGHTS: lights}
+        delay = raw_stage.get(CONF_STAGE_DELAY)
+        if isinstance(delay, (int, float)) and not isinstance(delay, bool):
+            stage[CONF_STAGE_DELAY] = float(delay)
+        stages.append(stage)
+    return stages
+
+
 def _validate_occupancy(
     raw: dict[str, object], source_keys: set[str], issues: list[str]
 ) -> dict[str, OccupancyZone]:
@@ -177,37 +225,36 @@ def _validate_occupancy(
         if not isinstance(zone_raw, dict):
             issues.append(f"occupancy.{zone_key}: zone must be a mapping")
             continue
-        raw_topics = zone_raw.get(CONF_MMWAVE_TOPICS, [])
-        topics = (
-            [t for t in raw_topics if isinstance(t, str)]
-            if isinstance(raw_topics, list)
+        sensors: dict[str, OccupancySensor] = {}
+        raw_sensors = zone_raw.get(CONF_SENSORS, {})
+        if isinstance(raw_sensors, dict):
+            for topic, sensor_raw in raw_sensors.items():
+                if not isinstance(sensor_raw, dict):
+                    continue
+                sweep = _validate_sweep(
+                    zone_key, sensor_raw.get(CONF_SWEEP, []), source_keys, issues
+                )
+                if sweep:
+                    sensors[topic] = OccupancySensor(sweep=sweep)
+        if not sensors:
+            issues.append(f"occupancy.{zone_key}: no valid sensors/sweeps")
+            continue
+        raw_off = zone_raw.get(CONF_OFF_LIGHTS, [])
+        off_lights = (
+            [t for t in raw_off if isinstance(t, str)]
+            if isinstance(raw_off, list)
             else []
         )
-        lights: list[OccupancyLight] = []
-        for light_raw in zone_raw.get(CONF_LIGHTS, []) or []:
-            if not isinstance(light_raw, dict):
-                continue
-            set_topic = light_raw.get(CONF_SET_TOPIC)
-            source = light_raw.get(CONF_SOURCE)
-            if not isinstance(set_topic, str) or not set_topic:
-                issues.append(f"occupancy.{zone_key}: light missing set_topic")
-            elif not isinstance(source, str) or source not in source_keys:
-                issues.append(f"occupancy.{zone_key}: light source {source!r} unknown")
-            else:
-                lights.append(OccupancyLight(set_topic=set_topic, source=source))
-        if not topics or not lights:
-            issues.append(f"occupancy.{zone_key}: needs mmwave_topics and lights")
-            continue
         key = zone_raw.get(CONF_OCCUPANCY_KEY, DEFAULT_OCCUPANCY_KEY)
-        transition = zone_raw.get(CONF_TRANSITION, DEFAULT_OCCUPANCY_TRANSITION_S)
+        off_trans = zone_raw.get(CONF_OFF_TRANSITION, DEFAULT_OCCUPANCY_TRANSITION_S)
         zones[zone_key] = OccupancyZone(
-            mmwave_topics=topics,
             occupancy_key=key
             if isinstance(key, str) and key
             else DEFAULT_OCCUPANCY_KEY,
-            lights=lights,
-            transition_s=float(transition)
-            if isinstance(transition, (int, float)) and not isinstance(transition, bool)
+            sensors=sensors,
+            off_lights=off_lights,
+            off_transition_s=float(off_trans)
+            if isinstance(off_trans, (int, float)) and not isinstance(off_trans, bool)
             else DEFAULT_OCCUPANCY_TRANSITION_S,
         )
     return zones

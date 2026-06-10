@@ -9,7 +9,7 @@ import pytest
 
 from custom_components.light_man.config_loader import validate_config
 
-from .conftest import MMWAVE_EAST, MMWAVE_WEST, SEED
+from .conftest import HALL_OFF, MMWAVE_EAST, SEED
 
 
 def test_valid_config_builds_switch_map() -> None:
@@ -37,10 +37,11 @@ def test_profile_passes_through_untouched() -> None:
 def test_occupancy_passes_through() -> None:
     result = validate_config(copy.deepcopy(SEED))
     zone = result.config["occupancy"]["hallway"]
-    assert zone["mmwave_topics"] == [MMWAVE_EAST, MMWAVE_WEST]
-    assert zone["lights"][0]["source"] == "hallway_up"
     assert zone["occupancy_key"] == "occupancy"
-    assert zone["transition_s"] == 1.5
+    assert zone["off_lights"] == [HALL_OFF]
+    east = zone["sensors"][MMWAVE_EAST]["sweep"]
+    assert east[0]["lights"][0]["source"] == "hallway_up"
+    assert east[1]["delay_s"] == 1.0  # the staggered stage's lead-in delay
 
 
 def test_occupancy_non_dict_is_soft_issue() -> None:
@@ -55,30 +56,37 @@ def test_occupancy_bad_zones_dropped_with_issues() -> None:
     cfg = copy.deepcopy(SEED)
     cfg["occupancy"] = {
         "z1": "not-a-mapping",
-        "z2": {"mmwave_topics": [], "lights": []},
-        "z3": {"mmwave_topics": ["t"], "lights": [{"set_topic": "", "source": "x"}]},
+        "z2": {"sensors": {}},
+        "z3": {"sensors": {"t": {"sweep": [{"lights": [{"set_topic": "", "s": 1}]}]}}},
         "z4": {
-            "mmwave_topics": ["t"],
-            "lights": [{"set_topic": "x", "source": "ghost"}],
+            "sensors": {
+                "t": {"sweep": [{"lights": [{"set_topic": "x", "source": "ghost"}]}]}
+            }
         },
-        "z5": {"mmwave_topics": "not-a-list", "lights": ["not-a-dict"]},
+        "z5": {"sensors": "not-a-dict"},
+        "z6": {"sensors": {"t": {"sweep": "not-a-list"}}},
+        "z7": {"sensors": {"t": {"sweep": ["bad-stage", {"lights": 5}]}}},
+        "z8": {"sensors": {"t": "not-a-mapping"}},
+        "z9": {"sensors": {"t": {"sweep": [{"lights": ["not-a-dict"]}]}}},
     }
     result = validate_config(cfg)
     assert result.config["occupancy"] == {}  # every zone invalid
-    assert len([i for i in result.issues if "occupancy" in i]) >= 4
+    assert len([i for i in result.issues if "occupancy" in i]) >= 3
 
 
 def test_occupancy_defaults_applied() -> None:
     cfg = copy.deepcopy(SEED)
     cfg["occupancy"] = {
         "z": {
-            "mmwave_topics": ["t"],
-            "lights": [{"set_topic": "x", "source": "overhead"}],
+            "sensors": {
+                "t": {"sweep": [{"lights": [{"set_topic": "x", "source": "overhead"}]}]}
+            }
         }
     }
     zone = validate_config(cfg).config["occupancy"]["z"]
     assert zone["occupancy_key"] == "occupancy"  # default key
-    assert zone["transition_s"] == 1.5  # default transition
+    assert zone["off_transition_s"] == 1.5  # default off transition
+    assert zone["off_lights"] == []  # none configured
 
 
 def test_non_dict_raises() -> None:

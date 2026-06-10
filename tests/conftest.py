@@ -41,9 +41,11 @@ LR_SWITCH = "zigbee2mqtt/Living Room Switch"
 KIT_SWITCH = "zigbee2mqtt/Kitchen Switch"
 MMWAVE_EAST = "zigbee2mqtt/Hall East mmwave"
 MMWAVE_WEST = "zigbee2mqtt/Hall West mmwave"
+HALL_CENTER_SET = "zigbee2mqtt/Hall Center/set"
+HALL_OFF = "zigbee2mqtt/zgb_hallwayf/set"
 
 SEED: dict[str, Any] = {
-    "seed_version": 3,
+    "seed_version": 4,
     "push_interval_s": 30,
     "sources": {
         "overhead": {
@@ -97,10 +99,30 @@ SEED: dict[str, Any] = {
     },
     "occupancy": {
         "hallway": {
-            "mmwave_topics": [MMWAVE_EAST, MMWAVE_WEST],
             "occupancy_key": "occupancy",
-            "lights": [{"set_topic": HALL_UP, "source": "hallway_up"}],
-            "transition_s": 1.5,
+            "off_lights": [HALL_OFF],
+            "sensors": {
+                MMWAVE_EAST: {
+                    "sweep": [
+                        {"lights": [{"set_topic": HALL_UP, "source": "hallway_up"}]},
+                        {
+                            "delay_s": 1.0,
+                            "lights": [
+                                {"set_topic": HALL_CENTER_SET, "source": "hallway_up"}
+                            ],
+                        },
+                    ]
+                },
+                MMWAVE_WEST: {
+                    "sweep": [
+                        {
+                            "lights": [
+                                {"set_topic": HALL_CENTER_SET, "source": "hallway_up"}
+                            ]
+                        }
+                    ]
+                },
+            },
         },
     },
 }

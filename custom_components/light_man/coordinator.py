@@ -36,10 +36,19 @@ from .const import (
     ATTR_RGB_COLOR,
     CONF_AL_SWITCH,
     CONF_LEGACY_ENABLE,
+    CONF_LIGHTS,
     CONF_OCCUPANCY,
+    CONF_OCCUPANCY_KEY,
+    CONF_OFF_LIGHTS,
+    CONF_OFF_TRANSITION,
     CONF_PUSH_INTERVAL,
     CONF_ROOMS,
+    CONF_SENSORS,
+    CONF_SET_TOPIC,
+    CONF_SOURCE,
     CONF_SOURCES,
+    CONF_STAGE_DELAY,
+    CONF_SWEEP,
     CONF_TRANSITION,
     DEFAULT_OCCUPANCY_KEY,
     DEFAULT_OCCUPANCY_TRANSITION_S,
@@ -74,7 +83,7 @@ if TYPE_CHECKING:
     from .models import (
         EngineTarget,
         LightManConfig,
-        OccupancyZone,
+        OccupancyStage,
         PushPayload,
         SourceConfig,
     )
@@ -113,6 +122,7 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
             always_update=False,
         )
         self.entry_id = entry.entry_id
+        self._entry = entry
         self._config = config
         self._modes = modes
         self._switch_map = validated.switch_map
@@ -132,14 +142,15 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         self.sleep_on = False
         self._sleep_start = 0.0
         self._sleep_changed_at: datetime | None = None
-        # Occupancy: zone defs + a topic->zones index + per-sensor / per-zone state.
+        # Occupancy: zone defs + a sensor-topic->zones index + per-sensor state +
+        # in-flight sweep tasks (keyed per zone+sensor for restart-on-retrigger).
         self._occupancy = config[CONF_OCCUPANCY]
         self._mmwave_zones: dict[str, list[str]] = {}
         for zone_key, zone in self._occupancy.items():
-            for topic in zone.get("mmwave_topics", []):
+            for topic in zone.get(CONF_SENSORS, {}):
                 self._mmwave_zones.setdefault(topic, []).append(zone_key)
         self._sensor_occupied: dict[str, bool] = {}
-        self._zone_occupied: dict[str, bool] = {}
+        self._sweep_tasks: dict[tuple[str, str], asyncio.Task[None]] = {}
         self.diagnostics: dict[str, Any] = {
             "issues": validated.issues,
             "dedup_skips": 0,
@@ -509,53 +520,68 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         await self._run_push(force=True)
         self.async_set_updated_data(self._snapshot())
 
-    # --- occupancy (mmwave presence -> zone lights, MQTT-driven) ------------
+    # --- occupancy (mmwave presence -> directional sweep, MQTT-driven) ------
 
     async def _handle_occupancy(self, msg: mqtt.ReceiveMessage) -> None:
-        """Update a zone's presence from an mmwave message and drive its lights."""
+        """Run a sensor's sweep on its occupied edge; clear the zone on all-off."""
         zones = self._mmwave_zones.get(msg.topic)
         if not zones or not self.push_enabled:
             return
         data = _parse_json(str(msg.payload))
         if data is None:
             return
-        key = self._occupancy[zones[0]].get("occupancy_key", DEFAULT_OCCUPANCY_KEY)
+        key = self._occupancy[zones[0]].get(CONF_OCCUPANCY_KEY, DEFAULT_OCCUPANCY_KEY)
         value = data.get(key)
         if value is None:
             return  # a non-occupancy update on the same topic (state/action)
-        self._sensor_occupied[msg.topic] = _truthy(value)
+        occupied = _truthy(value)
+        if occupied == self._sensor_occupied.get(msg.topic):
+            return  # no edge
+        self._sensor_occupied[msg.topic] = occupied
         for zone_key in zones:
-            await self._evaluate_zone(zone_key)
+            if occupied:
+                self._start_sweep(zone_key, msg.topic)
+            else:
+                await self._maybe_clear_zone(zone_key)
 
-    async def _evaluate_zone(self, zone_key: str) -> None:
-        """Turn a zone's lights on/off on the occupied/cleared edge only."""
-        zone = self._occupancy[zone_key]
-        occupied = any(
-            self._sensor_occupied.get(topic) for topic in zone.get("mmwave_topics", [])
+    def _start_sweep(self, zone_key: str, topic: str) -> None:
+        """Launch a sensor's sweep as a task, restarting any in-flight run."""
+        sweep = self._occupancy[zone_key][CONF_SENSORS][topic][CONF_SWEEP]
+        task_key = (zone_key, topic)
+        running = self._sweep_tasks.get(task_key)
+        if running is not None and not running.done():
+            running.cancel()
+        self.diagnostics["occupancy"][zone_key] = True
+        self._sweep_tasks[task_key] = self._entry.async_create_background_task(
+            self.hass, self._run_sweep(sweep), name=f"lm_sweep_{zone_key}_{topic}"
         )
-        if occupied == self._zone_occupied.get(zone_key):
+
+    async def _run_sweep(self, sweep: list[OccupancyStage]) -> None:
+        """Light a sensor's stages in order, pausing ``delay_s`` before each."""
+        for stage in sweep:
+            delay = stage.get(CONF_STAGE_DELAY, 0.0)
+            if delay:
+                await asyncio.sleep(delay)
+            for light in stage.get(CONF_LIGHTS, []):
+                payload = self._engine_payload_for(
+                    light[CONF_SOURCE], DEFAULT_OCCUPANCY_TRANSITION_S
+                )
+                if payload is None:
+                    continue
+                await self._raw_publish(
+                    light[CONF_SET_TOPIC], {**payload, "state": STATE_ON}
+                )
+
+    async def _maybe_clear_zone(self, zone_key: str) -> None:
+        """Turn the zone's off_lights off once all its sensors report no presence."""
+        zone = self._occupancy[zone_key]
+        if any(self._sensor_occupied.get(t) for t in zone.get(CONF_SENSORS, {})):
             return
-        self._zone_occupied[zone_key] = occupied
-        self.diagnostics["occupancy"][zone_key] = occupied
-        transition = zone.get("transition_s", DEFAULT_OCCUPANCY_TRANSITION_S)
-        if occupied:
-            await self._zone_on(zone, transition)
-        else:
-            await self._zone_off(zone, transition)
-
-    async def _zone_on(self, zone: OccupancyZone, transition: float) -> None:
-        """Turn a zone's lights on at each light's live engine value."""
-        for light in zone.get("lights", []):
-            payload = self._engine_payload_for(light["source"], transition)
-            if payload is None:
-                continue
-            await self._raw_publish(light["set_topic"], {**payload, "state": STATE_ON})
-
-    async def _zone_off(self, zone: OccupancyZone, transition: float) -> None:
-        """Turn a zone's lights off (color/brightness stay staged for next on)."""
+        self.diagnostics["occupancy"][zone_key] = False
+        transition = zone.get(CONF_OFF_TRANSITION, DEFAULT_OCCUPANCY_TRANSITION_S)
         off = {"state": STATE_OFF, "transition": transition}
-        for light in zone.get("lights", []):
-            await self._raw_publish(light["set_topic"], off)
+        for topic in zone.get(CONF_OFF_LIGHTS, []):
+            await self._raw_publish(topic, off)
 
     def _engine_payload_for(
         self, source_key: str, transition: float

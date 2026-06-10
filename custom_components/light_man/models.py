@@ -47,24 +47,37 @@ class SourceConfig(TypedDict, total=False):
 
 
 class OccupancyLight(TypedDict):
-    """One light a zone turns on (at ``source``'s engine value) on presence."""
+    """One light a sweep stage turns on (at ``source``'s engine value)."""
 
     set_topic: str
     source: str
 
 
-class OccupancyZone(TypedDict, total=False):
-    """A presence zone: mmwave sensors that gate a set of lights.
+class OccupancyStage(TypedDict, total=False):
+    """One step of a directional sweep: an optional lead-in delay + its lights."""
 
-    Occupied when **any** ``mmwave_topics`` reports presence; cleared when all
-    do not. On the occupied edge the lights turn on at their source's live
-    engine value; on the cleared edge they turn off.
+    delay_s: float  # seconds to wait before turning this stage's lights on
+    lights: list[OccupancyLight]
+
+
+class OccupancySensor(TypedDict):
+    """A sensor's directional sweep — the ordered stages it lights on presence."""
+
+    sweep: list[OccupancyStage]
+
+
+class OccupancyZone(TypedDict, total=False):
+    """A presence zone: its mmwave sensors, their sweeps, and the off targets.
+
+    Each sensor runs its own ``sweep`` on its occupied edge (so the lights come
+    on staggered in the direction of approach). The zone is cleared when **all**
+    its sensors report no presence, at which point ``off_lights`` turn off.
     """
 
-    mmwave_topics: list[str]
     occupancy_key: str  # JSON field in the mmwave payload (default "occupancy")
-    lights: list[OccupancyLight]
-    transition_s: float
+    sensors: dict[str, OccupancySensor]  # mmwave topic -> its sweep
+    off_lights: list[str]  # /set topics turned off on all-clear
+    off_transition_s: float
 
 
 class LightManConfig(TypedDict):

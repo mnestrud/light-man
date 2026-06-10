@@ -1,5 +1,5 @@
 {
-  "seed_version": 3,
+  "seed_version": 4,
   "push_interval_s": 30,
   "sources": {
     "overhead": {
@@ -145,24 +145,58 @@
   },
   "occupancy": {
     "hallway": {
-      "mmwave_topics": [
-        "zigbee2mqtt/Hallway Light Switch East New New mmwave",
-        "zigbee2mqtt/Hall Smart Switch West New mmwave"
-      ],
       "occupancy_key": "occupancy",
-      "lights": [
-        {"set_topic": "zigbee2mqtt/zgb_hallway_up/set", "source": "hallway_up"},
-        {"set_topic": "zigbee2mqtt/zgb_hallway_down/set", "source": "hallway_down"}
-      ],
-      "transition_s": 1.5
+      "off_lights": ["zigbee2mqtt/zgb_hallwayf/set"],
+      "sensors": {
+        "zigbee2mqtt/Hallway Light Switch East New New mmwave": {
+          "sweep": [
+            {"lights": [
+              {"set_topic": "zigbee2mqtt/Hallway Light East Uplight/set", "source": "hallway_up"},
+              {"set_topic": "zigbee2mqtt/Hallway Light East Downlight/set", "source": "hallway_down"}
+            ]},
+            {"delay_s": 1.0, "lights": [
+              {"set_topic": "zigbee2mqtt/Hallway Light Center Uplight/set", "source": "hallway_up"},
+              {"set_topic": "zigbee2mqtt/Hallway Light Center Downlight/set", "source": "hallway_down"}
+            ]},
+            {"delay_s": 1.0, "lights": [
+              {"set_topic": "zigbee2mqtt/Hallway Light West Uplight/set", "source": "hallway_up"},
+              {"set_topic": "zigbee2mqtt/Hallway Light West Downlight/set", "source": "hallway_down"}
+            ]}
+          ]
+        },
+        "zigbee2mqtt/Hall Smart Switch West New mmwave": {
+          "sweep": [
+            {"lights": [
+              {"set_topic": "zigbee2mqtt/Hallway Light West Uplight/set", "source": "hallway_up"},
+              {"set_topic": "zigbee2mqtt/Hallway Light West Downlight/set", "source": "hallway_down"}
+            ]},
+            {"delay_s": 1.0, "lights": [
+              {"set_topic": "zigbee2mqtt/Hallway Light Center Uplight/set", "source": "hallway_up"},
+              {"set_topic": "zigbee2mqtt/Hallway Light Center Downlight/set", "source": "hallway_down"}
+            ]},
+            {"delay_s": 1.0, "lights": [
+              {"set_topic": "zigbee2mqtt/Hallway Light East Uplight/set", "source": "hallway_up"},
+              {"set_topic": "zigbee2mqtt/Hallway Light East Downlight/set", "source": "hallway_down"}
+            ]}
+          ]
+        }
+      }
     },
     "stairwell": {
-      "mmwave_topics": ["zigbee2mqtt/Stairwell Top Smart Switch mmwave"],
       "occupancy_key": "occupancy",
-      "lights": [
-        {"set_topic": "zigbee2mqtt/zgb_stairwell/set", "source": "overhead"}
-      ],
-      "transition_s": 1.5
+      "off_lights": ["zigbee2mqtt/zgb_stairwell/set"],
+      "sensors": {
+        "zigbee2mqtt/Stairwell Top Smart Switch mmwave": {
+          "sweep": [
+            {"lights": [{"set_topic": "zigbee2mqtt/zgb_stairwell/set", "source": "overhead"}]}
+          ]
+        },
+        "zigbee2mqtt/Hall Smart Switch West New mmwave": {
+          "sweep": [
+            {"lights": [{"set_topic": "zigbee2mqtt/zgb_stairwell/set", "source": "overhead"}]}
+          ]
+        }
+      }
     }
   }
 }
