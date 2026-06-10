@@ -11,7 +11,7 @@ Run ALL of these before responding to any user message.
 
 **Output before anything else:**
 ```
-STARTUP OK | branch: <name> | version: <x.y.z> | quality: pre-bronze | audit: <YYYY-MM-DD>
+STARTUP OK | branch: <name> | version: <x.y.z> | quality: silver-code-complete (docs+tag pending) | audit: <YYYY-MM-DD>
 ```
 This checklist is not optional. "Resume directly" does not skip it.
 
@@ -171,7 +171,10 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 ## Quality Scale
 
-**Current tier: pre-bronze**
+**Current tier: Silver code-complete** — every Bronze + Silver *code* rule is ✅ or justified N/A in
+`memory/light_man_audit.md`. The remaining gap is **documentation** (4 Bronze + 2 Silver docs items:
+README / install / removal / config-params / etc.) plus tagging `manifest.json` with
+`"quality_scale": "silver"` once those docs land. Not yet formally claimed in the manifest.
 
 Full audit checklist (56 rules, 4 tiers): read `memory/light_man_audit.md`
 Quality scale rules: https://developers.home-assistant.io/docs/core/integration-quality-scale/rules
