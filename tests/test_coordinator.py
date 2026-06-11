@@ -20,7 +20,6 @@ from custom_components.light_man.const import DOMAIN
 from custom_components.light_man.coordinator import (
     LightManCoordinator,
     _curve_inflections,
-    _hhmm,
     _interp_at,
     _truthy,
 )
@@ -657,43 +656,38 @@ def test_interp_at_clamps_and_interpolates() -> None:
     assert _interp_at(times, vals, 30) == 20.0  # halfway up the first segment
 
 
-def test_hhmm_parses_clock_minutes() -> None:
-    assert _hhmm("08:30") == 510
-    assert _hhmm("00:00") == 0
-    assert _hhmm("17:00") == 1020
+def test_curve_inflections_spans_from_series() -> None:
+    # A trapezoid day shape: floor 30% -> rise -> plateau 90% -> fall -> floor.
+    samples = [(m, 0.0) for m in range(0, 1440, 30)]
 
+    def br_at(m: int) -> float:
+        if m <= 480 or m >= 1080:
+            return 30.0
+        if m < 600:
+            return 30.0 + 60.0 * (m - 480) / 120  # ramp up 8:00 -> 10:00
+        if m <= 900:
+            return 90.0  # plateau
+        return 90.0 - 60.0 * (m - 900) / 180  # ramp down 15:00 -> 18:00
 
-def test_curve_inflections_uses_day_window_exactly() -> None:
-    # A day-window curve's corners are its start / solar noon / end / end+wind-down.
-    samples = [(m, 0.0) for m in range(0, 1440, 60)]
-    br = [90.0 if 480 <= m <= 1020 else 30.0 for m, _ in samples]
-    curve = {
-        "day_window": {
-            "enabled": True,
-            "start": "08:00",
-            "end": "17:00",
-            "wind_down_s": 5400,
-        }
-    }
-    inf = _curve_inflections(curve, samples, br, 780)  # noon at 13:00
+    br = [br_at(m) for m, _ in samples]
+    inf = _curve_inflections({}, samples, br, 750)  # solar noon 12:30
     assert inf is not None
-    assert inf["ramp_up"]["t"] == 480
-    assert inf["peak"]["t"] == 780
-    assert inf["ramp_down"]["t"] == 1020
-    assert inf["minimum"]["t"] == 1110  # 17:00 + 90 min
+    assert inf["ramp_up"]["start"] == {"t": 480, "br": 30.0}  # leaves the floor
+    assert inf["ramp_up"]["end"] == {"t": 600, "br": 90.0}  # reaches the peak
+    assert inf["ramp_down"]["start"]["t"] == 900  # leaves the peak
+    assert inf["ramp_down"]["end"] == {"t": 1080, "br": 30.0}  # back to the minimum
+    assert inf["solar_noon"] == {"t": 750, "br": 90.0}
 
 
-def test_curve_inflections_from_series_without_day_window() -> None:
+def test_curve_inflections_smooth_peak_without_noon() -> None:
+    # A single-peak curve + no solar-noon time -> solar_noon falls back to the peak.
     samples = [(m, 0.0) for m in range(0, 1440, 60)]
-    br = [10.0 + max(0.0, 70.0 - abs(720 - m) / 6) for m, _ in samples]  # peak at noon
+    br = [10.0 + max(0.0, 70.0 - abs(720 - m) / 6) for m, _ in samples]
     inf = _curve_inflections({}, samples, br, None)
     assert inf is not None
-    assert inf["peak"]["t"] == 720
-    assert inf["ramp_up"]["t"] < inf["peak"]["t"]
-    assert (
-        inf["peak"]["t"] == inf["ramp_down"]["t"]
-    )  # smooth peak → down starts at peak
-    assert inf["minimum"]["t"] > inf["peak"]["t"]
+    assert inf["solar_noon"]["t"] == 720  # brightness peak
+    assert inf["ramp_up"]["start"]["t"] < inf["ramp_up"]["end"]["t"]
+    assert inf["ramp_down"]["start"]["t"] < inf["ramp_down"]["end"]["t"]
 
 
 def test_curve_inflections_flat_curve_is_none() -> None:
@@ -787,8 +781,9 @@ async def test_curve_previews_shape(hass: HomeAssistant, coordinator: Coord) -> 
     assert len(standard["ct"]) == len(preview["times"])
     assert standard["sleep_br"] == 30
     inf = standard["inflections"]
-    assert set(inf) == {"ramp_up", "peak", "ramp_down", "minimum"}
-    assert inf["ramp_up"]["t"] <= inf["peak"]["t"] <= inf["minimum"]["t"]
+    assert set(inf) == {"ramp_up", "ramp_down", "solar_noon"}
+    assert inf["ramp_up"]["start"]["t"] <= inf["ramp_up"]["end"]["t"]
+    assert inf["ramp_down"]["start"]["t"] <= inf["ramp_down"]["end"]["t"]
     sky = preview["curves"]["sky"]  # an rgb curve
     assert sky["mode"] == "rgb"
     assert sky["rgb"] == [135, 206, 235]

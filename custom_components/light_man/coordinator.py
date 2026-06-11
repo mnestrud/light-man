@@ -53,7 +53,6 @@ from .const import (
     DEFAULT_SLEEP_RAMP_IN_S,
     DEFAULT_SLEEP_RAMP_OUT_S,
     DEFAULT_TRANSITION_S,
-    DEFAULT_WIND_DOWN_S,
     INTER_PUBLISH_DELAY_S,
     MODE_ADAPTIVE,
     SET_SUFFIX,
@@ -818,78 +817,51 @@ def _interp_at(times: list[int], values: list[float], minute: float) -> float:
     return values[i] + (values[i + 1] - values[i]) * frac
 
 
-def _hhmm(text: str) -> int:
-    """Parse ``"HH:MM"`` to clock minutes since midnight."""
-    hours, _, minutes = text.partition(":")
-    return int(hours) * 60 + int(minutes)
-
-
 def _curve_inflections(
     curve: SourceProfile,
     samples: list[tuple[int, float]],
     brightness: list[float],
     noon_minute: int | None,
-) -> dict[str, dict[str, float]] | None:
-    """Locate a curve's day-shape corners for the viz, as ``{name: {t, br}}``.
+) -> dict[str, Any] | None:
+    """Locate a curve's day-shape for the viz, read from the sampled brightness.
 
-    The four points the eye looks for: when brightness **starts to ramp up** off
-    the night floor, when it **hits peak**, when it **starts to ramp down**, and
-    when it **reaches minimum** again. With a ``day_window`` these are exact (its
-    start, solar noon, its end, and end + wind-down); without one they're read
-    from the sampled curve (floor crossings + the peak). ``None`` for a flat curve.
+    Returns the **ramp-up span** (when brightness leaves the night floor → when it
+    reaches its daytime peak), the **ramp-down span** (when it leaves the peak →
+    when it returns to the floor — i.e. its end is the minimum), and **solar
+    noon**. Each point is ``{t, br}``. ``None`` for a flat curve. The ``curve`` arg
+    is unused (kept for signature symmetry); the series already encodes the
+    day-window shape.
     """
     times = [minute for minute, _e in samples]
     floor = min(brightness)
     peak = max(brightness)
     if peak - floor < 1.0:
         return None  # a flat curve has no inflections worth marking
-    window = curve.get("day_window")
-    if (
-        isinstance(window, dict)
-        and window.get("enabled")
-        and window.get("start")
-        and window.get("end")
-    ):
-        start = float(_hhmm(window["start"]))
-        end = float(_hhmm(window["end"]))
-        wind = float(window.get("wind_down_s", DEFAULT_WIND_DOWN_S)) / 60
-        noon = (
-            float(noon_minute)
-            if noon_minute is not None
-            else float(times[brightness.index(peak)])
-        )
-        points = {
-            "ramp_up": start,
-            "peak": min(max(noon, start), end),
-            "ramp_down": end,
-            "minimum": min(end + wind, 1439.0),
+    near_floor = floor + 0.02 * (peak - floor)
+    near_peak = peak - 0.02 * (peak - floor)
+    count = len(brightness)
+    up_end = next(i for i in range(count) if brightness[i] >= near_peak)
+    up_start = max((i for i in range(up_end) if brightness[i] <= near_floor), default=0)
+    down_start = max(i for i in range(count) if brightness[i] >= near_peak)
+    down_end = next(
+        (i for i in range(down_start + 1, count) if brightness[i] <= near_floor),
+        count - 1,
+    )
+
+    def point(index: int) -> dict[str, float]:
+        return {"t": times[index], "br": round(brightness[index], 1)}
+
+    if noon_minute is not None:
+        noon = {
+            "t": round(noon_minute),
+            "br": round(_interp_at(times, brightness, noon_minute), 1),
         }
     else:
-        peak_idx = brightness.index(peak)
-        threshold = floor + 0.02 * (peak - floor)
-        up = next(
-            (times[i] for i, v in enumerate(brightness) if v > threshold), times[0]
-        )
-        down = next(
-            (
-                times[i]
-                for i in range(peak_idx, len(brightness))
-                if brightness[i] <= threshold
-            ),
-            times[-1],
-        )
-        points = {
-            "ramp_up": float(up),
-            "peak": float(times[peak_idx]),
-            "ramp_down": float(times[peak_idx]),
-            "minimum": float(down),
-        }
+        noon = point(brightness.index(peak))
     return {
-        name: {
-            "t": round(minute),
-            "br": round(_interp_at(times, brightness, minute), 1),
-        }
-        for name, minute in points.items()
+        "ramp_up": {"start": point(up_start), "end": point(up_end)},
+        "ramp_down": {"start": point(down_start), "end": point(down_end)},
+        "solar_noon": noon,
     }
 
 

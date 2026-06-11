@@ -516,12 +516,16 @@ function timeCurveSvg(series, times, events) {
       <text x="${xx.toFixed(1)}" y="${axisY + 24}" text-anchor="middle" class="lbl">${fmtTime(m)}</text>`;
   }
 
-  // Inflection markers on the curve: ramp-up / peak / ramp-down / minimum.
+  // Inflection markers on the curve: ramp-up span ends, solar noon, ramp-down
+  // span ends (its end point is the daily minimum).
   let dots = "";
   const inf = series.inflections;
   if (inf) {
-    for (const k of ["ramp_up", "peak", "ramp_down", "minimum"]) {
-      const p = inf[k];
+    const marks = [];
+    if (inf.ramp_up) marks.push(inf.ramp_up.start, inf.ramp_up.end);
+    if (inf.ramp_down) marks.push(inf.ramp_down.start, inf.ramp_down.end);
+    if (inf.solar_noon) marks.push(inf.solar_noon);
+    for (const p of marks) {
       if (!p || p.t < x0 || p.t > x1) continue;
       dots += `<circle cx="${x(p.t).toFixed(1)}" cy="${y(p.br).toFixed(1)}" r="3.2" class="inflpt" />`;
     }
@@ -551,20 +555,20 @@ function timeCurveSvg(series, times, events) {
   </svg>`;
 }
 
-// One-line legend mapping the inflection dots to their times + brightness.
+// One-line legend: ramp-up / ramp-down as time spans with their brightness
+// range, plus solar noon. The ramp-down end time is the daily minimum.
 function inflectionLegend(series) {
   const inf = series && series.inflections;
   if (!inf) return "";
-  const items = [
-    ["↑ ramp up", inf.ramp_up],
-    ["◆ peak", inf.peak],
-    ["↓ wind-down", inf.ramp_down],
-    ["▁ min", inf.minimum],
-  ].filter(([, p]) => p);
-  if (!items.length) return "";
-  return `<div class="muted inflegend">${items
-    .map(([label, p]) => `${label} ${fmtTime(p.t)} · ${Math.round(p.br)}%`)
-    .join("&nbsp;&nbsp;·&nbsp;&nbsp;")}</div>`;
+  const span = (s) =>
+    `${fmtTime(s.start.t)}–${fmtTime(s.end.t)} · ${Math.round(s.start.br)}%→${Math.round(s.end.br)}%`;
+  const parts = [];
+  if (inf.ramp_up) parts.push(`↑ ramp up ${span(inf.ramp_up)}`);
+  if (inf.solar_noon)
+    parts.push(`☀ solar noon ${fmtTime(inf.solar_noon.t)} · ${Math.round(inf.solar_noon.br)}%`);
+  if (inf.ramp_down) parts.push(`↓ ramp down ${span(inf.ramp_down)}`);
+  if (!parts.length) return "";
+  return `<div class="muted inflegend">${parts.join("&nbsp;&nbsp;·&nbsp;&nbsp;")}</div>`;
 }
 
 const STYLES = `
