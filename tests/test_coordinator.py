@@ -674,3 +674,54 @@ async def test_inovelli_dedup_skips_unchanged(
     await coordinator.async_refresh()
     await hass.async_block_till_done()
     assert LR_SET_TOPIC not in published(mqtt_mock)
+
+
+# --- curve previews (panel time-of-day visualization) ----------------------
+
+
+async def test_curve_previews_shape(hass: HomeAssistant, coordinator: Coord) -> None:
+    """Each curve gets a day-sampled brightness/color series + sleep target."""
+    preview = coordinator.curve_previews()
+    assert preview is not None
+    assert len(preview["times"]) > 10
+    standard = preview["curves"]["standard"]
+    assert standard["mode"] == "color_temp"
+    assert len(standard["br"]) == len(preview["times"])
+    assert len(standard["ct"]) == len(preview["times"])
+    assert standard["sleep_br"] == 30
+    sky = preview["curves"]["sky"]  # an rgb curve
+    assert sky["mode"] == "rgb"
+    assert sky["rgb"] == [135, 206, 235]
+    assert sky["sleep_rgb"] == [255, 126, 30]
+
+
+async def test_panel_config_includes_preview(
+    hass: HomeAssistant, coordinator: Coord
+) -> None:
+    """panel_config bundles the stored topology, switch map, and curve previews."""
+    cfg = coordinator.panel_config()
+    assert set(cfg["config"]["curves"]) == {"standard", "sky"}
+    assert cfg["switch_map"][LR_SWITCH] == ("overhead", "living_room.overhead")
+    assert cfg["preview"]["curves"]["standard"]["mode"] == "color_temp"
+
+
+async def test_curve_previews_none_when_sun_unavailable(
+    hass: HomeAssistant, coordinator: Coord
+) -> None:
+    """A polar-edge ValueError from the sun path yields no preview (not a crash)."""
+    with patch(
+        "custom_components.light_man.coordinator.day_profile",
+        side_effect=ValueError("polar night"),
+    ):
+        assert coordinator.curve_previews() is None
+
+
+async def test_curve_previews_skip_malformed_curve(
+    hass: HomeAssistant, coordinator: Coord
+) -> None:
+    """A structurally broken curve is skipped, not fatal to the preview."""
+    coordinator.stored["curves"]["broken"] = {}  # missing min_br etc.
+    preview = coordinator.curve_previews()
+    assert preview is not None
+    assert "broken" not in preview["curves"]
+    assert "standard" in preview["curves"]

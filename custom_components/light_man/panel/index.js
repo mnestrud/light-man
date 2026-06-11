@@ -301,12 +301,23 @@ class LightManPanel extends HTMLElement {
     const usedBy = Object.entries(sources)
       .filter(([, s]) => s.curve_ref === this._curve)
       .map(([k]) => k);
+    const preview = (this._config && this._config.preview) || null;
+    const series = preview && preview.curves ? preview.curves[this._curve] : null;
+    // Time-of-day arc when today's sun path is available; else the elevation curve.
+    const viz = series
+      ? timeCurveSvg(series, preview.times, preview.events)
+      : curveSvg(curve);
+    const sleep = cfg.sleep || {};
+    const ramp = `<div class="muted">Sleep ramp (global): in ${Math.round(
+      (sleep.ramp_in_s || 0) / 60,
+    )}m · out ${Math.round((sleep.ramp_out_s || 0) / 60)}m</div>`;
     return `<div class="split">
       <div class="lib">${list}</div>
       <div class="editor">
         <h3>${esc(this._curve)}</h3>
         <div class="muted">Used by: ${usedBy.length ? usedBy.map(esc).join(", ") : "— (unassigned)"}</div>
-        ${curveSvg(curve)}
+        ${viz}
+        ${ramp}
         ${curveFields(curve)}
       </div>
     </div>`;
@@ -446,6 +457,78 @@ function curveSvg(curve) {
   </svg>`;
 }
 
+const fmtTime = (m) =>
+  `${Math.floor(m / 60)}:${String(Math.round(m) % 60).padStart(2, "0")}`;
+
+// Brightness over the *whole day* (server-computed from today's sun path via the
+// real engine): rise -> peak -> sunset wind-down, with time-of-day labels and the
+// sleep target as a reference line. `series` = { br[], mode, ct[]?|rgb?, sleep_* }.
+function timeCurveSvg(series, times, events) {
+  const W = 460;
+  const H = 184;
+  const padL = 30;
+  const padR = 14;
+  const padT = 12;
+  const padB = 34;
+  events = events || {};
+  // Focus the axis on dawn-ish → dusk + evening (where the design actually moves).
+  const x0 = Math.max(0, (events.dawn ?? 300) - 30);
+  const x1 = Math.min(1440, (events.dusk ?? 1290) + 90);
+  const span = x1 - x0 || 1;
+  const x = (m) => padL + clamp((m - x0) / span) * (W - padL - padR);
+  const y = (br) => H - padB - clamp(br / 100) * (H - padT - padB);
+
+  const pts = [];
+  for (let i = 0; i < times.length; i++) {
+    if (times[i] < x0 || times[i] > x1) continue;
+    pts.push(`${x(times[i]).toFixed(1)},${y(series.br[i]).toFixed(1)}`);
+  }
+
+  let strip = "";
+  if (series.mode === "rgb" && series.rgb) {
+    strip = `<rect x="${padL}" y="${H - padB + 4}" width="${W - padL - padR}" height="8" fill="rgb(${series.rgb.join(",")})" />`;
+  } else if (series.ct) {
+    for (let i = 0; i < times.length - 1; i++) {
+      if (times[i + 1] < x0 || times[i] > x1) continue;
+      const xa = x(times[i]);
+      const xb = x(times[i + 1]);
+      strip += `<rect x="${xa.toFixed(1)}" y="${H - padB + 4}" width="${(xb - xa + 0.6).toFixed(1)}" height="8" fill="${kelvinToCss(series.ct[i])}" />`;
+    }
+  }
+
+  let ticks = "";
+  for (const k of ["dawn", "sunrise", "noon", "sunset", "dusk"]) {
+    const m = events[k];
+    if (m == null || m < x0 || m > x1) continue;
+    const xx = x(m).toFixed(1);
+    ticks += `<line x1="${xx}" y1="${padT}" x2="${xx}" y2="${H - padB}" class="axis dash" />
+      <text x="${xx}" y="${H - padB + 15}" text-anchor="middle" class="lbl">${k}</text>
+      <text x="${xx}" y="${H - padB + 26}" text-anchor="middle" class="lbl">${fmtTime(m)}</text>`;
+  }
+
+  let sleepLine = "";
+  if (series.sleep_br != null) {
+    const ys = y(series.sleep_br).toFixed(1);
+    const sw =
+      series.sleep_mode === "rgb" && series.sleep_rgb
+        ? `rgb(${series.sleep_rgb.join(",")})`
+        : kelvinToCss(series.sleep_ct || 2700);
+    sleepLine = `<line x1="${padL}" y1="${ys}" x2="${W - padR}" y2="${ys}" class="sleepline" />
+      <rect x="${W - padR - 56}" y="${ys - 13}" width="9" height="9" fill="${sw}" />
+      <text x="${W - padR - 44}" y="${ys - 5}" class="lbl">sleep ${Math.round(series.sleep_br)}%</text>`;
+  }
+
+  return `<svg viewBox="0 0 ${W} ${H}" class="viz">
+    <line x1="${padL}" y1="${H - padB}" x2="${W - padR}" y2="${H - padB}" class="axis" />
+    <text x="${padL - 4}" y="${(y(100) + 3).toFixed(1)}" text-anchor="end" class="lbl">100</text>
+    <text x="${padL - 4}" y="${(y(0) + 3).toFixed(1)}" text-anchor="end" class="lbl">0</text>
+    ${ticks}
+    ${strip}
+    <polyline points="${pts.join(" ")}" class="curve" />
+    ${sleepLine}
+  </svg>`;
+}
+
 const STYLES = `
 :host { display:block; --bg:var(--primary-background-color,#111); --card:var(--card-background-color,#1c1c1c);
   --fg:var(--primary-text-color,#e8e8e8); --mut:var(--secondary-text-color,#9aa0a6);
@@ -495,6 +578,7 @@ tr.held td { background:rgba(255,179,0,.08); }
 .viz { width:100%; max-width:440px; margin:10px 0; }
 .viz .axis { stroke:var(--line); stroke-width:1; } .viz .dash { stroke-dasharray:3 3; }
 .viz .curve { fill:none; stroke:var(--acc); stroke-width:2; }
+.viz .sleepline { stroke:var(--mut); stroke-width:1; stroke-dasharray:4 3; }
 .viz .lbl { fill:var(--mut); font-size:9px; }
 .fields td { border:none; padding:4px 8px; } .fields td:first-child { width:110px; }
 .sensor { margin:14px 0; } .sensor-h { font-weight:600; margin-bottom:6px; }

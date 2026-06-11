@@ -73,15 +73,24 @@ editor — see data-model.md S3):
    **bound** to in Z2M. **Sensors** the room owns, cross-room edges flagged ("also feeds the Stairwell
    zone"). Inline linter chips on anything broken.
 3. **Curves (library + editor)** — named, reusable curves with a **"Used by"** backref (which source groups →
-   blast radius). Per curve: the **elevation→target visualization** — brightness line across the solar arc, a
-   color strip (CT gradient or flat RGB swatch **per regime**), a **summer/equinox/winter** selector (the
-   seasonal swing is real — `REF=71.5°` is fixed), a **sleep-ramp preview**. **Day color** and **Sleep
-   color** are each a mode toggle (CT ramp ↔ fixed RGB) — what separates `hallway_up` (fixed sky-blue→orange)
-   from `hallway_down` (CT day→fixed purple); the **per-curve sleep target lives here** (S3). Create /
-   duplicate-and-tweak / delete; editable fields = the full curve
-   (`min_br/max_br/sat/night_floor_br/min_ct/max_ct/dusk_floor_ct`, base color mode + `base_rgb`, sleep
-   target, optional `day_window`). Math reused from `custom_components/light_man/adaptive.py` /
-   `reference/adaptive-algorithm.md` (port to JS or compute server-side).
+   blast radius). **Viz (shipped v0.7.0, read-only):** a **time-of-day** brightness arc — rise → peak →
+   **sunset wind-down** — computed *server-side by the real engine* (`coordinator.curve_previews()` samples
+   today's sun path and runs `compute_target`, so the picture matches what gets published, day-window and all),
+   with x-axis labels at **dawn/sunrise/noon/sunset/dusk** (today's actual times), a color strip following the
+   day, and the **sleep target as a reference line**. **Day color** and **Sleep color** are each a mode toggle
+   (CT ramp ↔ fixed RGB) — what separates `hallway_up` (fixed sky-blue→orange) from `hallway_down` (CT
+   day→fixed purple); the **per-curve sleep target lives here** (S3).
+   **Phase 3 — what the editor will make configurable (per curve):**
+   - **Brightness:** `min_br`, `max_br`, `sat` (how early in the morning it saturates to full), `night_floor_br`.
+   - **Day color:** mode (CT ramp ↔ fixed RGB); CT → `min_ct`/`max_ct`/`dusk_floor_ct`; RGB → `base_rgb` swatch.
+   - **Sleep target:** `sleep.br` + mode (`sleep.ct` or `sleep.rgb`).
+   - **Sunset wind-down / sunrise ramp rate** (the curve's own "ramp down at sunset"): the optional `day_window`
+     — `enabled`, `start`/`end`, and its **`edge_transition_s`** (ramp-*up* rate into the curve at the window
+     start) and **`wind_down_s`** (ramp-*down* rate to the night floor after the window end). These are the
+     per-curve "ramp up / ramp down" rates the viz already draws.
+   Plus create / duplicate-and-tweak / delete. (The **global sleep ramp** — `ramp_in_s`/`ramp_out_s`, the
+   ease into/out of the *sleep overlay* — is edited on **Overview**, not per curve; see below.) Math reused
+   from `custom_components/light_man/adaptive.py` / `reference/adaptive-algorithm.md`.
 4. **Occupancy (zones + sweep builder)** — per zone: its sensors (room-owned; cross-room ones flagged),
    off-targets + all-clear rule. Per (zone, sensor): a **timeline sweep builder** — ordered stages, per-stage
    delay, drag room **fixtures/switches** into stages — with a live replay. Sweeps reference room fixtures by
@@ -278,10 +287,15 @@ because the UI + data model are signed off in Phase 0.
    availability so a minimal install (or the test harness) loads the engine without it. Signatures were
    verified against current HA via the `ha-dev` agent. 163 tests, 100% cov, mypy-strict + ruff clean. **Zero
    write risk** (no write API). Confirmed live (clean boot, panel in sidebar).
-3. **Editing + persistence.** Add the **write** API (config `POST` → Store) and the editors (curve editor,
-   per-group curve assignment, sweep builder); implement **Save & Export / Save As / Load config / Reset**;
-   **flip the loader to migrate-the-Store-in-place** (M1) and add **`/XF light_man_config.json`** to the
-   deploy mirror — both now load-bearing because the panel edits the Store; wire the **live linter**.
+3. **Editing + persistence.** Add the **write** API (config `POST` → Store) and the editors: the **curve
+   editor** (all brightness/color fields + the per-curve **sunset wind-down / sunrise ramp rates**
+   `edge_transition_s`/`wind_down_s` — see the Curves tab list above), **per-group curve assignment** (Rooms),
+   the **sweep builder** (Occupancy), and the **Overview global settings** — `push_interval_s` and the **sleep
+   ramp** (`ramp_in_s` ease-into-sleep / `ramp_out_s` ease-out-on-wake). Implement **Save & Export / Save As /
+   Load config / Reset**; **flip the loader to migrate-the-Store-in-place** (M1) and add **`/XF
+   light_man_config.json`** to the deploy mirror — both now load-bearing because the panel edits the Store;
+   wire the **live linter**. Validation reuses the engine's own clamps (br 1–100, ct within bulb range, sat
+   0–1, delays ≥0).
 4. **Polish.** Curve/sweep visualization refinement, sweep **mirror/duplicate**, mobile layout,
    `require_admin` hardening.
 

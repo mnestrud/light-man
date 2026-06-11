@@ -13,10 +13,12 @@ real astral with a patched location.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from datetime import timedelta
+from typing import TYPE_CHECKING, TypedDict
 
 from astral.sun import elevation as solar_elevation
 from astral.sun import noon as solar_noon
+from astral.sun import sun as solar_sun
 from homeassistant.helpers.sun import get_astral_location
 from homeassistant.util import dt as dt_util
 
@@ -24,6 +26,17 @@ if TYPE_CHECKING:
     from datetime import datetime
 
     from homeassistant.core import HomeAssistant
+
+# Events labelled on the curve viz's time axis (clock minutes since midnight).
+_SUN_EVENTS = ("dawn", "sunrise", "noon", "sunset", "dusk")
+
+
+class DayProfile(TypedDict):
+    """Today's sun path, for the panel's time-of-day curve visualization."""
+
+    samples: list[tuple[int, float]]  # (clock minutes since midnight, elevation deg)
+    events: dict[str, int]  # event name -> clock minutes (omitted if it doesn't occur)
+    noon_elevation: float
 
 
 def solar_inputs(hass: HomeAssistant, now: datetime) -> tuple[float, float]:
@@ -39,3 +52,42 @@ def solar_inputs(hass: HomeAssistant, now: datetime) -> tuple[float, float]:
     noon_when = solar_noon(observer, dt_util.as_local(now).date())
     noon_elevation = solar_elevation(observer, noon_when)
     return current, noon_elevation
+
+
+def day_profile(
+    hass: HomeAssistant, when: datetime, *, step_minutes: int = 20
+) -> DayProfile:
+    """Sample today's solar elevation across the clock + the day's sun events.
+
+    Returns the elevation at ``step_minutes`` intervals from local midnight plus
+    the clock time of dawn/sunrise/noon/sunset/dusk, so the panel can draw a
+    curve's brightness over the *whole* day (rise → peak → sunset wind-down) with
+    real time-of-day labels. Pure read of HA's bundled ``astral``.
+    """
+    location, _observer_elevation = get_astral_location(hass)
+    observer = location.observer
+    local = dt_util.as_local(when)
+    date = local.date()
+    midnight = local.replace(hour=0, minute=0, second=0, microsecond=0)
+    samples: list[tuple[int, float]] = []
+    minute = 0
+    while minute < 24 * 60:
+        elevation = solar_elevation(observer, midnight + timedelta(minutes=minute))
+        samples.append((minute, round(elevation, 2)))
+        minute += step_minutes
+    events: dict[str, int] = {}
+    try:
+        sun_events = solar_sun(observer, date, tzinfo=local.tzinfo)
+    except ValueError:
+        sun_events = {}  # polar day/night — no events, samples still drawable
+    for name in _SUN_EVENTS:
+        moment = sun_events.get(name)
+        if moment is not None:
+            at = dt_util.as_local(moment)
+            events[name] = at.hour * 60 + at.minute
+    noon_when = solar_noon(observer, date)
+    return DayProfile(
+        samples=samples,
+        events=events,
+        noon_elevation=round(solar_elevation(observer, noon_when), 2),
+    )

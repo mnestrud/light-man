@@ -29,7 +29,10 @@ from homeassistant.util import dt as dt_util
 from .adaptive import compute_target, day_look, night_look, sleep_ramp
 from .const import (
     ACTION_SUFFIX,
+    COLOR_MODE_COLOR_TEMP,
+    COLOR_MODE_RGB,
     CONF_CONSOLIDATED_TOPIC,
+    CONF_CURVES,
     CONF_LIGHTS,
     CONF_OCCUPANCY,
     CONF_OCCUPANCY_KEY,
@@ -59,7 +62,7 @@ from .const import (
 )
 from .modes import action_to_mode
 from .push import _room_target, build_payload, plan_publishes
-from .solar import solar_inputs
+from .solar import day_profile, solar_inputs
 
 if TYPE_CHECKING:
     from homeassistant.config_entries import ConfigEntry
@@ -72,6 +75,7 @@ if TYPE_CHECKING:
         OccupancyStage,
         PushPayload,
         SourceConfig,
+        SourceProfile,
     )
     from .modes import ModeManager
 
@@ -230,8 +234,71 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         }
 
     def panel_config(self) -> dict[str, Any]:
-        """Return the stored topology (data model) the read-only panel renders."""
-        return {"config": self.stored, "switch_map": dict(self._switch_map)}
+        """Return the stored topology + today's curve previews for the panel."""
+        return {
+            "config": self.stored,
+            "switch_map": dict(self._switch_map),
+            "preview": self.curve_previews(),
+        }
+
+    def curve_previews(self) -> dict[str, Any] | None:
+        """Per-curve brightness/color across *today*, for the panel's time viz.
+
+        Reuses the engine (``compute_target``) over today's sampled sun path so
+        the visualization matches what the engine actually publishes — including
+        the day-window wind-down at "sunset". Returns ``None`` if the sun path is
+        unavailable (a polar edge), and skips any structurally broken curve.
+        """
+        try:
+            profile = day_profile(self.hass, dt_util.utcnow())
+        except ValueError:
+            return None
+        samples = profile["samples"]
+        noon = profile["noon_elevation"]
+        curves = self.stored.get(CONF_CURVES, {})
+        preview: dict[str, Any] = {}
+        for name, curve in curves.items():
+            try:
+                preview[name] = self._curve_series(curve, samples, noon)
+            except (KeyError, TypeError, ValueError):
+                continue  # a malformed curve is skipped, not fatal to the panel
+        return {
+            "times": [minutes for minutes, _e in samples],
+            "events": profile["events"],
+            "noon_elevation": noon,
+            "curves": preview,
+        }
+
+    @staticmethod
+    def _curve_series(
+        curve: SourceProfile, samples: list[tuple[int, float]], noon: float
+    ) -> dict[str, Any]:
+        """Build one curve's day series: awake brightness/color + the sleep target."""
+        brightness: list[float] = []
+        kelvin: list[int] = []
+        for minutes, elevation in samples:
+            target = compute_target(
+                elevation, noon, curve, sleep_s=0.0, now_minutes=float(minutes)
+            )
+            brightness.append(round(target.brightness_pct, 1))
+            kelvin.append(round(target.color_temp_kelvin or 0))
+        mode = curve.get("base_color_mode", COLOR_MODE_COLOR_TEMP)
+        sleep = curve.get("sleep", {})
+        series: dict[str, Any] = {
+            "br": brightness,
+            "mode": mode,
+            "sleep_br": sleep.get("br"),
+            "sleep_mode": sleep.get("color_mode", COLOR_MODE_COLOR_TEMP),
+        }
+        if mode == COLOR_MODE_RGB:
+            series["rgb"] = curve.get("base_rgb")
+        else:
+            series["ct"] = kelvin
+        if sleep.get("color_mode") == COLOR_MODE_RGB:
+            series["sleep_rgb"] = sleep.get("rgb")
+        else:
+            series["sleep_ct"] = sleep.get("ct")
+        return series
 
     def panel_state(self) -> dict[str, Any]:
         """Live, JSON-able read model for the panel's subscription stream.
