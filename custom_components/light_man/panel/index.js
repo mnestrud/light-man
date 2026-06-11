@@ -317,6 +317,7 @@ class LightManPanel extends HTMLElement {
         <h3>${esc(this._curve)}</h3>
         <div class="muted">Used by: ${usedBy.length ? usedBy.map(esc).join(", ") : "— (unassigned)"}</div>
         ${viz}
+        ${series ? inflectionLegend(series) : ""}
         ${ramp}
         ${curveFields(curve)}
       </div>
@@ -465,18 +466,19 @@ const fmtTime = (m) =>
 // sleep target as a reference line. `series` = { br[], mode, ct[]?|rgb?, sleep_* }.
 function timeCurveSvg(series, times, events) {
   const W = 460;
-  const H = 184;
+  const H = 188;
   const padL = 30;
   const padR = 14;
   const padT = 12;
-  const padB = 34;
+  const padB = 36;
   events = events || {};
+  const axisY = H - padB;
   // Focus the axis on dawn-ish → dusk + evening (where the design actually moves).
   const x0 = Math.max(0, (events.dawn ?? 300) - 30);
   const x1 = Math.min(1440, (events.dusk ?? 1290) + 90);
   const span = x1 - x0 || 1;
   const x = (m) => padL + clamp((m - x0) / span) * (W - padL - padR);
-  const y = (br) => H - padB - clamp(br / 100) * (H - padT - padB);
+  const y = (br) => axisY - clamp(br / 100) * (axisY - padT);
 
   const pts = [];
   for (let i = 0; i < times.length; i++) {
@@ -484,26 +486,45 @@ function timeCurveSvg(series, times, events) {
     pts.push(`${x(times[i]).toFixed(1)},${y(series.br[i]).toFixed(1)}`);
   }
 
+  // The color strip sits just ABOVE the axis line (in the empty band below the
+  // curve's night floor) so it never overwrites the time labels below the axis.
+  const stripY = axisY - 9;
   let strip = "";
   if (series.mode === "rgb" && series.rgb) {
-    strip = `<rect x="${padL}" y="${H - padB + 4}" width="${W - padL - padR}" height="8" fill="rgb(${series.rgb.join(",")})" />`;
+    strip = `<rect x="${padL}" y="${stripY}" width="${W - padL - padR}" height="7" fill="rgb(${series.rgb.join(",")})" />`;
   } else if (series.ct) {
     for (let i = 0; i < times.length - 1; i++) {
       if (times[i + 1] < x0 || times[i] > x1) continue;
       const xa = x(times[i]);
       const xb = x(times[i + 1]);
-      strip += `<rect x="${xa.toFixed(1)}" y="${H - padB + 4}" width="${(xb - xa + 0.6).toFixed(1)}" height="8" fill="${kelvinToCss(series.ct[i])}" />`;
+      strip += `<rect x="${xa.toFixed(1)}" y="${stripY}" width="${(xb - xa + 0.6).toFixed(1)}" height="7" fill="${kelvinToCss(series.ct[i])}" />`;
     }
   }
 
+  // Sun events: a guide line at each; the time label only when it won't collide
+  // with the previous one (dusk/sunset can sit close together).
   let ticks = "";
+  let lastLabelX = -999;
   for (const k of ["dawn", "sunrise", "noon", "sunset", "dusk"]) {
     const m = events[k];
     if (m == null || m < x0 || m > x1) continue;
-    const xx = x(m).toFixed(1);
-    ticks += `<line x1="${xx}" y1="${padT}" x2="${xx}" y2="${H - padB}" class="axis dash" />
-      <text x="${xx}" y="${H - padB + 15}" text-anchor="middle" class="lbl">${k}</text>
-      <text x="${xx}" y="${H - padB + 26}" text-anchor="middle" class="lbl">${fmtTime(m)}</text>`;
+    const xx = x(m);
+    ticks += `<line x1="${xx.toFixed(1)}" y1="${padT}" x2="${xx.toFixed(1)}" y2="${axisY}" class="axis dash" />`;
+    if (xx - lastLabelX < 34) continue;
+    lastLabelX = xx;
+    ticks += `<text x="${xx.toFixed(1)}" y="${axisY + 13}" text-anchor="middle" class="lbl">${k}</text>
+      <text x="${xx.toFixed(1)}" y="${axisY + 24}" text-anchor="middle" class="lbl">${fmtTime(m)}</text>`;
+  }
+
+  // Inflection markers on the curve: ramp-up / peak / ramp-down / minimum.
+  let dots = "";
+  const inf = series.inflections;
+  if (inf) {
+    for (const k of ["ramp_up", "peak", "ramp_down", "minimum"]) {
+      const p = inf[k];
+      if (!p || p.t < x0 || p.t > x1) continue;
+      dots += `<circle cx="${x(p.t).toFixed(1)}" cy="${y(p.br).toFixed(1)}" r="3.2" class="inflpt" />`;
+    }
   }
 
   let sleepLine = "";
@@ -519,14 +540,31 @@ function timeCurveSvg(series, times, events) {
   }
 
   return `<svg viewBox="0 0 ${W} ${H}" class="viz">
-    <line x1="${padL}" y1="${H - padB}" x2="${W - padR}" y2="${H - padB}" class="axis" />
+    <line x1="${padL}" y1="${axisY}" x2="${W - padR}" y2="${axisY}" class="axis" />
     <text x="${padL - 4}" y="${(y(100) + 3).toFixed(1)}" text-anchor="end" class="lbl">100</text>
     <text x="${padL - 4}" y="${(y(0) + 3).toFixed(1)}" text-anchor="end" class="lbl">0</text>
     ${ticks}
     ${strip}
     <polyline points="${pts.join(" ")}" class="curve" />
+    ${dots}
     ${sleepLine}
   </svg>`;
+}
+
+// One-line legend mapping the inflection dots to their times + brightness.
+function inflectionLegend(series) {
+  const inf = series && series.inflections;
+  if (!inf) return "";
+  const items = [
+    ["↑ ramp up", inf.ramp_up],
+    ["◆ peak", inf.peak],
+    ["↓ wind-down", inf.ramp_down],
+    ["▁ min", inf.minimum],
+  ].filter(([, p]) => p);
+  if (!items.length) return "";
+  return `<div class="muted inflegend">${items
+    .map(([label, p]) => `${label} ${fmtTime(p.t)} · ${Math.round(p.br)}%`)
+    .join("&nbsp;&nbsp;·&nbsp;&nbsp;")}</div>`;
 }
 
 const STYLES = `
@@ -579,7 +617,9 @@ tr.held td { background:rgba(255,179,0,.08); }
 .viz .axis { stroke:var(--line); stroke-width:1; } .viz .dash { stroke-dasharray:3 3; }
 .viz .curve { fill:none; stroke:var(--acc); stroke-width:2; }
 .viz .sleepline { stroke:var(--mut); stroke-width:1; stroke-dasharray:4 3; }
+.viz .inflpt { fill:var(--acc); stroke:var(--card); stroke-width:1.5; }
 .viz .lbl { fill:var(--mut); font-size:9px; }
+.inflegend { margin:6px 0 2px; font-size:12px; }
 .fields td { border:none; padding:4px 8px; } .fields td:first-child { width:110px; }
 .sensor { margin:14px 0; } .sensor-h { font-weight:600; margin-bottom:6px; }
 .sweep { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }

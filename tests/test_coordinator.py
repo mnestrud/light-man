@@ -11,10 +11,20 @@ from unittest.mock import patch
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.util import dt as dt_util
 from pytest_homeassistant_custom_component.common import (
+    MockConfigEntry,
     async_fire_mqtt_message,
 )
 
-from custom_components.light_man.coordinator import _truthy
+from custom_components.light_man.config_loader import validate_config
+from custom_components.light_man.const import DOMAIN
+from custom_components.light_man.coordinator import (
+    LightManCoordinator,
+    _curve_inflections,
+    _hhmm,
+    _interp_at,
+    _truthy,
+)
+from custom_components.light_man.modes import ModeManager
 
 from .conftest import (
     HALL_CENTER_SET,
@@ -30,6 +40,8 @@ from .conftest import (
     PORCH_A1_SET,
     PORCH_A2_SET,
     PORCH_OFF,
+    SEED,
+    FakeStore,
     published,
 )
 
@@ -195,6 +207,39 @@ async def test_paddle_off_still_staged(
     await hass.async_block_till_done()
     # All rooms still adaptive -> consolidated flood includes the off room.
     assert OVERHEAD_ALL in published(mqtt_mock)
+
+
+async def test_setup_prunes_orphaned_holds(hass: HomeAssistant, mqtt_mock: Any) -> None:
+    """Setup drops holds whose key no longer maps to any light (post-migration)."""
+    entry = MockConfigEntry(domain=DOMAIN, title="Light Man")
+    entry.add_to_hass(hass)
+    modes = ModeManager(FakeStore(None))
+    await modes.async_load()
+    now = dt_util.utcnow()
+    later = now + timedelta(hours=8)
+    await modes.set_held("overhead_bath", kind="night", armed_at=now, expires_at=later)
+    await modes.set_held(
+        "living_room.overhead", kind="night", armed_at=now, expires_at=later
+    )
+    coord = LightManCoordinator(hass, entry, validate_config(SEED), modes)
+    await coord._async_setup()
+    assert "overhead_bath" not in modes.held_rooms()  # orphaned key pruned
+    assert "living_room.overhead" in modes.held_rooms()  # valid key kept
+    coord.shutdown_subscriptions()
+
+
+async def test_paddle_off_releases_hold(
+    hass: HomeAssistant, coordinator: Coord, mqtt_mock: Any
+) -> None:
+    """Switching a held light off resumes adaptive (the hold does not linger)."""
+    await coordinator.async_set_push_enabled(enabled=True)
+    _fire(hass, LR_SWITCH, {"action": "config_single"})
+    await hass.async_block_till_done()
+    assert coordinator.data["held_count"] == 1
+
+    _fire(hass, LR_SWITCH, {"state": "OFF"})
+    await hass.async_block_till_done()
+    assert coordinator.data["held_count"] == 0  # off cleared the hold
 
 
 async def test_paddle_on_repushes_room(
@@ -604,6 +649,58 @@ async def test_occupancy_sweep_skips_when_solar_unavailable(
     assert HALL_UP not in published(mqtt_mock)
 
 
+def test_interp_at_clamps_and_interpolates() -> None:
+    times = [0, 60, 120]
+    vals = [10.0, 30.0, 10.0]
+    assert _interp_at(times, vals, -5) == 10.0  # before the first sample
+    assert _interp_at(times, vals, 200) == 10.0  # after the last sample
+    assert _interp_at(times, vals, 30) == 20.0  # halfway up the first segment
+
+
+def test_hhmm_parses_clock_minutes() -> None:
+    assert _hhmm("08:30") == 510
+    assert _hhmm("00:00") == 0
+    assert _hhmm("17:00") == 1020
+
+
+def test_curve_inflections_uses_day_window_exactly() -> None:
+    # A day-window curve's corners are its start / solar noon / end / end+wind-down.
+    samples = [(m, 0.0) for m in range(0, 1440, 60)]
+    br = [90.0 if 480 <= m <= 1020 else 30.0 for m, _ in samples]
+    curve = {
+        "day_window": {
+            "enabled": True,
+            "start": "08:00",
+            "end": "17:00",
+            "wind_down_s": 5400,
+        }
+    }
+    inf = _curve_inflections(curve, samples, br, 780)  # noon at 13:00
+    assert inf is not None
+    assert inf["ramp_up"]["t"] == 480
+    assert inf["peak"]["t"] == 780
+    assert inf["ramp_down"]["t"] == 1020
+    assert inf["minimum"]["t"] == 1110  # 17:00 + 90 min
+
+
+def test_curve_inflections_from_series_without_day_window() -> None:
+    samples = [(m, 0.0) for m in range(0, 1440, 60)]
+    br = [10.0 + max(0.0, 70.0 - abs(720 - m) / 6) for m, _ in samples]  # peak at noon
+    inf = _curve_inflections({}, samples, br, None)
+    assert inf is not None
+    assert inf["peak"]["t"] == 720
+    assert inf["ramp_up"]["t"] < inf["peak"]["t"]
+    assert (
+        inf["peak"]["t"] == inf["ramp_down"]["t"]
+    )  # smooth peak → down starts at peak
+    assert inf["minimum"]["t"] > inf["peak"]["t"]
+
+
+def test_curve_inflections_flat_curve_is_none() -> None:
+    samples = [(m, 0.0) for m in range(0, 1440, 60)]
+    assert _curve_inflections({}, samples, [50.0] * len(samples), None) is None
+
+
 def test_truthy_coercions() -> None:
     """Occupancy fields parse from bool / string / number forms."""
     assert _truthy(True) is True
@@ -689,6 +786,9 @@ async def test_curve_previews_shape(hass: HomeAssistant, coordinator: Coord) -> 
     assert len(standard["br"]) == len(preview["times"])
     assert len(standard["ct"]) == len(preview["times"])
     assert standard["sleep_br"] == 30
+    inf = standard["inflections"]
+    assert set(inf) == {"ramp_up", "peak", "ramp_down", "minimum"}
+    assert inf["ramp_up"]["t"] <= inf["peak"]["t"] <= inf["minimum"]["t"]
     sky = preview["curves"]["sky"]  # an rgb curve
     assert sky["mode"] == "rgb"
     assert sky["rgb"] == [135, 206, 235]

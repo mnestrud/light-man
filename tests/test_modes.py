@@ -107,3 +107,20 @@ async def test_load_ignores_non_dict() -> None:
     modes = ModeManager(FakeStore("garbage"))
     await modes.async_load()
     assert modes.held_rooms() == set()
+
+
+async def test_prune_drops_orphaned_keys() -> None:
+    modes = ModeManager(FakeStore(None))
+    await modes.async_load()
+    now = dt_util.utcnow()
+    later = now + timedelta(hours=8)
+    await modes.set_held(
+        "kitchen.overhead", kind="night", armed_at=now, expires_at=later
+    )
+    await modes.set_held("overhead_bath", kind="night", armed_at=now, expires_at=later)
+
+    # Only keys that are still valid hold targets survive a prune.
+    assert await modes.prune({"kitchen.overhead"}) == ["overhead_bath"]
+    assert modes.held_rooms() == {"kitchen.overhead"}
+    # Idempotent: nothing left to prune.
+    assert await modes.prune({"kitchen.overhead"}) == []

@@ -53,6 +53,7 @@ from .const import (
     DEFAULT_SLEEP_RAMP_IN_S,
     DEFAULT_SLEEP_RAMP_OUT_S,
     DEFAULT_TRANSITION_S,
+    DEFAULT_WIND_DOWN_S,
     INTER_PUBLISH_DELAY_S,
     MODE_ADAPTIVE,
     SET_SUFFIX,
@@ -188,7 +189,11 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
     # --- lifecycle ----------------------------------------------------------
 
     async def _async_setup(self) -> None:
-        """Subscribe to switch topics; reconcile the legacy stack once HA is up."""
+        """Prune stale holds, subscribe to switch topics, push once HA is up."""
+        # Drop holds orphaned by a topology change (keys no longer addressable).
+        pruned = await self._modes.prune(set(self._room_source))
+        if pruned:
+            _LOGGER.info("pruned orphaned holds: %s", ", ".join(sorted(pruned)))
         for base in self._switch_map:
             self._unsubs.append(
                 await mqtt.async_subscribe(self.hass, base, self._handle_message)
@@ -257,9 +262,10 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         noon = profile["noon_elevation"]
         curves = self.stored.get(CONF_CURVES, {})
         preview: dict[str, Any] = {}
+        noon_minute = profile["events"].get("noon")
         for name, curve in curves.items():
             try:
-                preview[name] = self._curve_series(curve, samples, noon)
+                preview[name] = self._curve_series(curve, samples, noon, noon_minute)
             except (KeyError, TypeError, ValueError):
                 continue  # a malformed curve is skipped, not fatal to the panel
         return {
@@ -271,7 +277,10 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
 
     @staticmethod
     def _curve_series(
-        curve: SourceProfile, samples: list[tuple[int, float]], noon: float
+        curve: SourceProfile,
+        samples: list[tuple[int, float]],
+        noon: float,
+        noon_minute: int | None,
     ) -> dict[str, Any]:
         """Build one curve's day series: awake brightness/color + the sleep target."""
         brightness: list[float] = []
@@ -289,6 +298,7 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
             "mode": mode,
             "sleep_br": sleep.get("br"),
             "sleep_mode": sleep.get("color_mode", COLOR_MODE_COLOR_TEMP),
+            "inflections": _curve_inflections(curve, samples, brightness, noon_minute),
         }
         if mode == COLOR_MODE_RGB:
             series["rgb"] = curve.get("base_rgb")
@@ -766,7 +776,7 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
             await self.async_hold(room, mode)
 
     async def _on_state(self, base: str, state: str) -> None:
-        """Track the paddle on/off and re-push the source on a change."""
+        """Track the paddle on/off; turning a held light off ends its hold."""
         mapping = self._switch_map.get(base)
         if mapping is None:
             return
@@ -776,7 +786,11 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         self._paddle_on[base] = on
         if not self.push_enabled:
             return
-        source_key, _ = mapping
+        source_key, light_ref = mapping
+        # Switching a held light off resumes adaptive (the night/day look should
+        # not linger and reappear when the light is turned back on).
+        if not on and await self._modes.release(light_ref):
+            _LOGGER.info("hold released by switch-off for %s", light_ref)
         self._invalidate_source(source_key)
         await self._run_push(force=True, only_source=source_key)
         self.async_set_updated_data(self._snapshot())
@@ -789,6 +803,94 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         return CoordinatorData(
             held=held, held_count=len(held), push_enabled=self.push_enabled
         )
+
+
+def _interp_at(times: list[int], values: list[float], minute: float) -> float:
+    """Linear-interpolate a uniformly-sampled day series at an arbitrary minute."""
+    if minute <= times[0]:
+        return values[0]
+    if minute >= times[-1]:
+        return values[-1]
+    # minute now lies strictly inside the range, so a segment always matches.
+    i = next(i for i in range(len(times) - 1) if times[i] <= minute <= times[i + 1])
+    span = times[i + 1] - times[i] or 1
+    frac = (minute - times[i]) / span
+    return values[i] + (values[i + 1] - values[i]) * frac
+
+
+def _hhmm(text: str) -> int:
+    """Parse ``"HH:MM"`` to clock minutes since midnight."""
+    hours, _, minutes = text.partition(":")
+    return int(hours) * 60 + int(minutes)
+
+
+def _curve_inflections(
+    curve: SourceProfile,
+    samples: list[tuple[int, float]],
+    brightness: list[float],
+    noon_minute: int | None,
+) -> dict[str, dict[str, float]] | None:
+    """Locate a curve's day-shape corners for the viz, as ``{name: {t, br}}``.
+
+    The four points the eye looks for: when brightness **starts to ramp up** off
+    the night floor, when it **hits peak**, when it **starts to ramp down**, and
+    when it **reaches minimum** again. With a ``day_window`` these are exact (its
+    start, solar noon, its end, and end + wind-down); without one they're read
+    from the sampled curve (floor crossings + the peak). ``None`` for a flat curve.
+    """
+    times = [minute for minute, _e in samples]
+    floor = min(brightness)
+    peak = max(brightness)
+    if peak - floor < 1.0:
+        return None  # a flat curve has no inflections worth marking
+    window = curve.get("day_window")
+    if (
+        isinstance(window, dict)
+        and window.get("enabled")
+        and window.get("start")
+        and window.get("end")
+    ):
+        start = float(_hhmm(window["start"]))
+        end = float(_hhmm(window["end"]))
+        wind = float(window.get("wind_down_s", DEFAULT_WIND_DOWN_S)) / 60
+        noon = (
+            float(noon_minute)
+            if noon_minute is not None
+            else float(times[brightness.index(peak)])
+        )
+        points = {
+            "ramp_up": start,
+            "peak": min(max(noon, start), end),
+            "ramp_down": end,
+            "minimum": min(end + wind, 1439.0),
+        }
+    else:
+        peak_idx = brightness.index(peak)
+        threshold = floor + 0.02 * (peak - floor)
+        up = next(
+            (times[i] for i, v in enumerate(brightness) if v > threshold), times[0]
+        )
+        down = next(
+            (
+                times[i]
+                for i in range(peak_idx, len(brightness))
+                if brightness[i] <= threshold
+            ),
+            times[-1],
+        )
+        points = {
+            "ramp_up": float(up),
+            "peak": float(times[peak_idx]),
+            "ramp_down": float(times[peak_idx]),
+            "minimum": float(down),
+        }
+    return {
+        name: {
+            "t": round(minute),
+            "br": round(_interp_at(times, brightness, minute), 1),
+        }
+        for name, minute in points.items()
+    }
 
 
 def _truthy(value: object) -> bool:

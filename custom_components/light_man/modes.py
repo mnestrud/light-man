@@ -108,6 +108,20 @@ class ModeManager:
             await self._save()
         return cleared
 
+    async def prune(self, valid: set[str]) -> list[str]:
+        """Drop holds whose key is no longer a valid target. Returns the dropped.
+
+        Run after a topology change (e.g. the v8 light-ref rename): a hold stored
+        under a stale key would otherwise linger un-releasable — no switch maps to
+        it — until its TTL or a manual clear.
+        """
+        stale = [room for room in self._held if room not in valid]
+        if stale:
+            for room in stale:
+                del self._held[room]
+            await self._save()
+        return stale
+
     async def sweep_expired(self, now: datetime) -> list[str]:
         """Release holds whose ``expires_at`` has passed. Returns those rooms."""
         expired = [r for r, rec in self._held.items() if rec.expires_at <= now]
