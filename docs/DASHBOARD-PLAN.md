@@ -245,32 +245,36 @@ not a commitment to specific endpoints; treat its API bullets as candidates to b
 
 ## Implementation phases
 
-1. **Design the panel (UX + configuration approach).** No code. **Largely done** — the configuration model
-   (what's editable, at what granularity, how it maps onto the Store) is decided and specified in
-   [`reference/data-model.md`](reference/data-model.md); the IA + editable/read-only surfaces are the
-   "App layout" section above. Remaining: per-tab wireframes/mockups, validation/limits, apply semantics
-   (live vs. save), and reset-to-seed. **Gate: confirm the design approach (this doc + data-model.md) before
-   proceeding.** Nothing past this phase starts until sign-off.
-1b. **Schema + migration (foundational).** Land the reconciled model in `models.py` (`curves{}` library,
-   source groups keep `curve_ref`, first-class merged `Room` with `lights[]`/`switches[]`/`sensors{}`, switch
-   `governs` ref, `OccupancyZone.sensors` as references, sweep `lights` as room-fixture ids, top-level
-   `sleep`), with a **behaviour-preserving** old→new migration in `config_loader.py` — a **`seed_version` bump
-   + in-place old-Store migration** (M1) and the `switch_map` value-shape change (M2) — and the rewritten
-   `light_man_config.json`. **Runtime addressing is untouched** (S1: curves at the source-group level keep
-   `push.plan_publishes` as-is). A test runs the migration on the **old** seed and asserts the push plan —
-   **incl. hold addressing** — equals the new seed's (4 consolidated floods, byte-identical). Independent of
-   the panel; can ship as a normal release ahead of it.
-2. **Design the API (only after sign-off).** Derive the minimal HTTP views + websocket commands from the
-   confirmed UI: config read/write endpoints, action endpoints, and the live streams the design requires —
-   shaped to the screens, not invented up front. (Confirm current `panel_custom` / static-path /
-   WS-command API signatures with the `ha-dev` agent here.)
-3. **Build the backend.** Implement the designed API (`http.py` views + websocket command module) wired to
-   the coordinator + Store. Tests, 100% cov.
-4. **Panel registration + static serving.** Register the sidebar panel; serve a placeholder bundle; confirm
-   it loads with the `hass` socket available.
-5. **Build the frontend.** The SPA + tabs against the API — read-only surfaces first, then the editors
-   (room relationships, curve library, sweep builder) with write-back + reset-to-seed.
-6. **Polish.** Curve/visualizer, the live linter, auth/admin gating (`require_admin`), mobile layout.
+Canonical phasing (this is the single source — `data-model.md`'s "Staged work" points here). Five phases,
+each an independently shippable increment; the dependency order is schema → read → write → polish. **No API
+endpoint is designed until the screen that needs it is being built** — the design-first rule is satisfied
+because the UI + data model are signed off in Phase 0.
+
+0. **Design — DONE ✓.** The reconciled data model, the room-centric IA, the panel architecture, the 5-tab
+   wireframes, and the config-persistence model are all specified ([`reference/data-model.md`](reference/data-model.md)
+   + the App-layout / Architecture sections above). This phase is the **sign-off gate**; nothing past it
+   starts until the design is confirmed.
+1. **Schema migration (foundational; normal release, no panel).** Land the reconciled model in `models.py`
+   (`curves{}` library, source groups carry `curve_ref`, first-class merged `Room` with
+   `lights[]`/`switches[]`/`sensors{}`, switch `governs` ref, `OccupancyZone.sensors` as references, sweep
+   `lights` as room-fixture ids, top-level `sleep`) + the `switch_map` value-shape change (M2); rewrite
+   `light_man_config.json` to the new shape and **bump `seed_version`**. On upgrade the Store **re-seeds from
+   the new bundle (overwrite is fine — the git seed is still the authority, no panel edits exist yet)**; an
+   **equivalence test** asserts the new seed's push plan — **incl. hold addressing** — equals the old seed's
+   (4 consolidated floods, byte-identical). **Runtime addressing is untouched** (S1). No runtime Store
+   migrator yet — that lands in Phase 3 with editing. Ships ahead of the panel.
+2. **Panel + read-only (a usable read-only dashboard).** Register the `panel_custom` panel + serve the Lit
+   bundle + mount the SPA shell; wire the **read** API — `websocket_api` live streams (engine snapshot /
+   diagnostics / occupancy / publish-log) + config `GET` — and build the **read-only tabs** (Overview live
+   tiles, Rooms view, Curves visualizer, Occupancy view, Activity log). Endpoints are designed per-screen.
+   Proves the whole stack (panel + auth + WS + Lit + viz) end-to-end with **zero write risk**. (Confirm
+   current `panel_custom` / static-path / `websocket_api` signatures with the `ha-dev` agent here.)
+3. **Editing + persistence.** Add the **write** API (config `POST` → Store) and the editors (curve editor,
+   per-group curve assignment, sweep builder); implement **Save & Export / Save As / Load config / Reset**;
+   **flip the loader to migrate-the-Store-in-place** (M1) and add **`/XF light_man_config.json`** to the
+   deploy mirror — both now load-bearing because the panel edits the Store; wire the **live linter**.
+4. **Polish.** Curve/sweep visualization refinement, sweep **mirror/duplicate**, mobile layout,
+   `require_admin` hardening.
 
 ## Architecture decisions (2026-06-11)
 

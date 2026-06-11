@@ -300,13 +300,17 @@ device and needs **no git commit** to work:
 
 ## Staged work (after sign-off)
 
-1. **Schema + migration** — `models.py` (`curves{}`, source groups keep `curve_ref`, first-class `Room` with
-   `lights[]`/`switches[]`/`sensors{}`, `OccupancyZone.sensors` → references, sweep `lights` → fixture ids,
-   top-level `sleep`); `config_loader.py` old→new + **`seed_version` bump + old-Store migration (M1)**;
-   `switch_map` value shape (M2); `light_man_config.json`. **Addressing untouched** (S1). Tests vs. the
-   existing seed incl. the byte-identical hold-addressing assertion.
-2. **Backend API → panel registration/static serving → frontend SPA → polish** — per `DASHBOARD-PLAN.md`
-   phases 2–6 (read-only surfaces first, then editors + linter; sweep mirror/duplicate in Polish).
+Phasing is **canonical in [`DASHBOARD-PLAN.md`](../DASHBOARD-PLAN.md#implementation-phases)** (Phases 0–4).
+Where this doc's pieces land:
+
+- **Phase 1 (schema migration):** the new schema here — `models.py` (`curves{}`, source groups carry
+  `curve_ref`, first-class `Room`, `OccupancyZone.sensors` → references, sweep `lights` → fixture ids,
+  top-level `sleep`) + the **M2** `switch_map` shape + rewritten `light_man_config.json` with a bumped
+  `seed_version`. On upgrade the Store **re-seeds from the new bundle** (overwrite is fine — no panel edits
+  exist yet); a **byte-identical equivalence test** covers the push plan incl. hold addressing. **Addressing
+  untouched** (S1). **No runtime Store migrator yet.**
+- **Phase 3 (editing + persistence):** the **in-place migration (M1)** flip and the `/XF` deploy exclusion —
+  both only load-bearing once the panel writes the Store. See "Config persistence & files" above.
 
 ## See also
 - `docs/DASHBOARD-PLAN.md` — the panel (delivery, IA, build pipeline, phases).
