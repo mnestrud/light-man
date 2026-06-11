@@ -647,7 +647,7 @@ async def test_occupancy_areas_on_one_switch_are_independent(
             await hass.async_block_till_done()
 
     # area1 alone -> only area1's light; the zone is not cleared.
-    await _fire_payload({"area1occupancy": True})
+    await _fire_payload({"mmwave_area1_occupancy": True})
     pubs = published(mqtt_mock)
     assert PORCH_A1_SET in pubs
     assert PORCH_A2_SET not in pubs
@@ -655,17 +655,17 @@ async def test_occupancy_areas_on_one_switch_are_independent(
 
     # area2 turns on -> its own light fires independently.
     mqtt_mock.async_publish.reset_mock()
-    await _fire_payload({"area2occupancy": True})
+    await _fire_payload({"mmwave_area2_occupancy": True})
     assert PORCH_A2_SET in published(mqtt_mock)
 
     # area1 clears but area2 still occupied -> zone stays on.
     mqtt_mock.async_publish.reset_mock()
-    await _fire_payload({"area1occupancy": False})
+    await _fire_payload({"mmwave_area1_occupancy": False})
     assert PORCH_OFF not in published(mqtt_mock)
 
     # area2 clears too -> now every binding is clear, so the zone turns off.
     mqtt_mock.async_publish.reset_mock()
-    await _fire_payload({"area2occupancy": False})
+    await _fire_payload({"mmwave_area2_occupancy": False})
     assert published(mqtt_mock)[PORCH_OFF] == {"state": "OFF", "transition": 1.5}
 
 

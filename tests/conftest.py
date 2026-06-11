@@ -50,7 +50,7 @@ PORCH_A2_SET = "zigbee2mqtt/zgb_porch_a2/set"
 PORCH_OFF = "zigbee2mqtt/zgb_porch/set"
 
 SEED: dict[str, Any] = {
-    "seed_version": 5,
+    "seed_version": 6,
     "push_interval_s": 30,
     "sources": {
         "overhead": {
@@ -136,14 +136,14 @@ SEED: dict[str, Any] = {
             "sensors": {
                 "porch_a1": {
                     "topic": MMWAVE_PORCH,
-                    "occupancy_key": "area1occupancy",
+                    "occupancy_key": "mmwave_area1_occupancy",
                     "sweep": [
                         {"lights": [{"set_topic": PORCH_A1_SET, "source": "overhead"}]}
                     ],
                 },
                 "porch_a2": {
                     "topic": MMWAVE_PORCH,
-                    "occupancy_key": "area2occupancy",
+                    "occupancy_key": "mmwave_area2_occupancy",
                     "sweep": [
                         {"lights": [{"set_topic": PORCH_A2_SET, "source": "overhead"}]}
                     ],

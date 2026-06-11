@@ -561,8 +561,8 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
     async def _handle_occupancy(self, msg: mqtt.ReceiveMessage) -> None:
         """Run each binding's sweep on its occupied edge; clear the zone on all-off.
 
-        A topic may carry several bindings (e.g. ``area1occupancy`` and
-        ``area2occupancy`` on one switch); each reads its own field, tracks its
+        A topic may carry several bindings (e.g. ``mmwave_area1_occupancy`` and
+        ``mmwave_area2_occupancy`` on one switch); each reads its own field, tracks its
         own edge, and drives its own sweep independently.
         """
         bindings = self._bindings_by_topic.get(msg.topic)

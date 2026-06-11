@@ -65,7 +65,7 @@ class OccupancySensor(TypedDict, total=False):
 
     ``topic`` is the Z2M device topic; ``occupancy_key`` is the JSON field
     watched (default ``"occupancy"`` — the device's aggregate; set to e.g.
-    ``"area1occupancy"`` to watch a single mmwave detection area). Each sensor
+    ``"mmwave_area1_occupancy"`` to watch a single mmwave detection area). Each sensor
     runs its own ``sweep`` on its occupied edge. Two named sensors may share a
     ``topic`` with different ``occupancy_key``s to monitor several areas of one
     switch as independent triggers (no code change — just another sensor entry).

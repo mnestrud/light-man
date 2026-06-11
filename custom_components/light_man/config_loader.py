@@ -223,7 +223,8 @@ def _validate_sensor(
     """Validate one named sensor ``{topic, occupancy_key?, sweep}``; None if invalid.
 
     ``occupancy_key`` is per-sensor so two sensors can share a ``topic`` while
-    watching different mmwave areas (e.g. ``area1occupancy`` / ``area2occupancy``)
+    watching different mmwave areas (e.g. ``mmwave_area1_occupancy`` /
+    ``mmwave_area2_occupancy``)
     as independent triggers.
     """
     if not isinstance(raw, dict):

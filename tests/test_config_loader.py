@@ -50,8 +50,8 @@ def test_occupancy_per_sensor_area_keys() -> None:
     sensors = validate_config(copy.deepcopy(SEED)).config["occupancy"]["porch"][
         "sensors"
     ]
-    assert sensors["porch_a1"]["occupancy_key"] == "area1occupancy"
-    assert sensors["porch_a2"]["occupancy_key"] == "area2occupancy"
+    assert sensors["porch_a1"]["occupancy_key"] == "mmwave_area1_occupancy"
+    assert sensors["porch_a2"]["occupancy_key"] == "mmwave_area2_occupancy"
     assert sensors["porch_a1"]["topic"] == sensors["porch_a2"]["topic"]
 
 
