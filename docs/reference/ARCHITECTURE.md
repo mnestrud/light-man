@@ -204,6 +204,16 @@ stale bulb NVRAM groups; the **runtime** integration just never uses it. See §8
 > this is `state:**OFF**` (and only on the paddle-off edge, mirroring the occupancy all-clear which already
 > sends `state:OFF`). Tap **up** / turn-**on** floods as before.
 
+> **Never send `brightness` to an SBM switch (v0.7.5, 2026-06-11).** `_inovelli_plan` used to write the LED-bar
+> `brightness` to a switch while its paddle read on. But on a Smart-Bulb-Mode VZM31 `brightness` is a **live
+> dimmer-level command the local Zigbee bind relays to the bound bulb, turning it on** — and the switch's relay
+> reads `state:ON` in SBM even while the bulb is off, so the periodic flood re-on'd lights every cycle and made
+> them impossible to turn off. Fix: `_inovelli_plan` sends **only `defaultLevelLocal`/`defaultLevelRemote`**
+> (the tap-on prestage — a passive config that takes effect on the *next* tap, never driving the bulb). The
+> companion device-side cause: 15 Hue bulbs were missing the **`manuSpecificPhilips2 → Coordinator`** bind, so
+> they never natively staged the consolidated flood (it turned them on); re-binding them to the Coordinator
+> (the state every healthy bulb has) restores stage-while-off.
+
 ### 5.4 Write-on-change dedup
 Keep last-published per (source, target) in memory only; skip unchanged. Replaces
 `input_text.al_last_published`; `always_update=False` on the coordinator. Fold the color-mode

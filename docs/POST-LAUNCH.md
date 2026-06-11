@@ -39,6 +39,13 @@ status boxes as items are picked up. Last reviewed: **2026-06-11**.
   hold (`_on_state`); orphaned holds (keys left un-mapped by a topology change, e.g. the v8 light-ref rename)
   are **pruned at setup** (`ModeManager.prune`). See `ARCHITECTURE.md` §5.3. *(If holds should instead survive
   an off, revert the `_on_state` release.)*
+- [x] **No `brightness` to SBM switches + native-staging binds.** *(Done 2026-06-11, v0.7.5.)*
+  `_inovelli_plan` no longer writes `brightness` to the switch (only the passive `defaultLevel` prestage) — on
+  an SBM VZM31 a `brightness` write is a live dimmer level the local bind relays to the bulb, turning it on
+  (the switch's relay reads ON in SBM while the bulb is off), so the flood re-on'd lights every cycle.
+  Companion device fix: 15 Hue bulbs were missing the `manuSpecificPhilips2 → Coordinator` bind (so they never
+  natively staged the flood); re-bound to the Coordinator. `zgb_hallwayf` set to `hue_native_control` (needs a
+  Z2M restart to apply). See `ARCHITECTURE.md` §5.3.
 - [x] **Paddle-off `state:OFF` staging.** *(Done 2026-06-11, v0.7.4.)* On a switch-off, the room is staged
   with an explicit `{state:"OFF", <adaptive>}` (`coordinator._stage_off`) instead of the state-less
   consolidated flood — the flood's MQTT round-trip beat the local Zigbee binding's OFF and re-brightened the

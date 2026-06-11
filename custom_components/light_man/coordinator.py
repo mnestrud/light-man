@@ -420,8 +420,15 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         """Plan per-room Inovelli switch writes (absorbs the tick's a1-a15).
 
         Each room's switch gets the room's target brightness as ``defaultLevel``
-        (tap-on prestage) plus the LED-bar ``brightness`` while its paddle is on.
-        A manually-frozen room is skipped (its switch is left as-is).
+        (the tap-on prestage — a passive config that only takes effect on the next
+        local/remote tap, never driving the bulb). A manually-frozen room is
+        skipped (its switch is left as-is).
+
+        It must **never** send ``brightness`` to the switch: on a Smart-Bulb-Mode
+        VZM31 ``brightness`` is a live dimmer-level command the local Zigbee bind
+        relays to the bound bulb, turning it **on** even when off (the switch's
+        relay reads ON in SBM while the bulb is off). That re-on'd lights every
+        cycle and made them impossible to turn off — see ARCHITECTURE.md §5.
         """
         plan: list[tuple[str, dict[str, Any]]] = []
         for room, room_cfg in source.get(CONF_ROOMS, {}).items():
@@ -435,13 +442,12 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
                 continue
             bri = target["brightness"]  # build_payload always sets it
             for base in room_cfg.get("switches", []):
-                payload: dict[str, Any] = {
-                    "defaultLevelLocal": bri,
-                    "defaultLevelRemote": bri,
-                }
-                if self._paddle_on.get(base):
-                    payload["brightness"] = bri  # LED bar, only while the paddle is on
-                plan.append((base + SET_SUFFIX, payload))
+                plan.append(
+                    (
+                        base + SET_SUFFIX,
+                        {"defaultLevelLocal": bri, "defaultLevelRemote": bri},
+                    )
+                )
         return plan
 
     def _source_payload(
