@@ -244,16 +244,21 @@ class LightManPanel extends HTMLElement {
         const lights = (room.lights || [])
           .map((l) => {
             const ref = `${roomId}.${l.id}`;
-            const curve = (sources[l.source] || {}).curve_ref || "—";
+            const src = sources[l.source] || {};
+            const curve = src.curve_ref || "—";
+            const flood = src.consolidated_topic;
             const isHeld = held[ref];
-            return `<tr>
+            return `<tr${isHeld ? ' class="held"' : ""}>
               <td>${esc(l.id)}${isHeld ? ` <span class="pill">${esc(isHeld.mode)}</span>` : ""}</td>
-              <td class="mono">${short(l.set_topic)}</td>
-              <td>${esc(l.source)}</td>
+              <td class="mono" title="${esc(l.set_topic)}">${short(l.set_topic)}</td>
+              <td>${esc(l.source)} <span class="muted mono" title="${esc(flood)}">${short(flood)}</span></td>
               <td><span class="curve-chip">${esc(curve)}</span></td>
             </tr>`;
           })
           .join("");
+        const lightHead =
+          "<thead><tr><th>Light</th><th>Hold group (Zigbee)</th>" +
+          "<th>Source · flood group</th><th>Curve</th></tr></thead>";
         const switches = (room.switches || [])
           .map(
             (s) =>
@@ -268,8 +273,8 @@ class LightManPanel extends HTMLElement {
           .join("");
         return `<section class="card">
           <h3>${esc(room.name || roomId)} <span class="muted">${roomId}</span></h3>
-          <div class="sect">Lights</div>
-          <table><tbody>${lights || rowEmpty(4)}</tbody></table>
+          <div class="sect">Lights <span class="muted">— hold group = the Zigbee group commanded when this light is held</span></div>
+          <table>${lightHead}<tbody>${lights || rowEmpty(4)}</tbody></table>
           ${switches ? `<div class="sect">Switches</div><table><tbody>${switches}</tbody></table>` : ""}
           ${sensors ? `<div class="sect">Sensors</div><table><tbody>${sensors}</tbody></table>` : ""}
         </section>`;
@@ -472,6 +477,7 @@ h3 { margin:0 0 4px; font-size:16px; }
 table { width:100%; border-collapse:collapse; font-size:13px; }
 th { text-align:left; color:var(--mut); font-weight:500; border-bottom:1px solid var(--line); padding:6px 8px; }
 td { padding:6px 8px; border-bottom:1px solid var(--line); }
+tr.held td { background:rgba(255,179,0,.08); }
 .mono { font-family:ui-monospace,Menlo,Consolas,monospace; font-size:12px; }
 .small { color:var(--mut); }
 .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:14px 16px; margin-bottom:14px; }
