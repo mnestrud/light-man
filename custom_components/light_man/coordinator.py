@@ -683,6 +683,28 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         )
         return payload
 
+    async def _stage_off(self, source_key: str, light_ref: str) -> None:
+        """Turn a room off + stage its adaptive value in one deterministic command.
+
+        A paddle-off must NOT flood the consolidated group state-less: the MQTT
+        round-trip beats the switch's local Zigbee binding OFF, so the brightness
+        lands while the bulb is still on and re-brightens it (the multi-tap bug).
+        Instead, address the room with an explicit ``state: OFF`` carrying the
+        staged adaptive value — it goes off regardless of the race and is
+        pre-loaded for the next turn-on. The periodic state-less flood keeps it
+        staged while off afterwards (no race once it is actually off). The adaptive
+        push stays state-less by default; this paddle-off path is the lone
+        exception (mirrors the occupancy all-clear, which also sends ``state``).
+        """
+        rooms = self._config[CONF_SOURCES][source_key].get(CONF_ROOMS, {})
+        room = rooms.get(light_ref)
+        if room is None or not room.get(CONF_SET_TOPIC):
+            return
+        payload = self._engine_payload_for(source_key, DEFAULT_TRANSITION_S)
+        if payload is None:
+            return
+        await self._raw_publish(room[CONF_SET_TOPIC], {**payload, "state": STATE_OFF})
+
     # --- modes --------------------------------------------------------------
 
     def _next_solar_midnight(self, now: datetime) -> datetime:
@@ -759,39 +781,59 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
             await self._on_state(topic, state)
 
     async def _on_action(self, base: str, action: str) -> None:
-        """Apply an action's mode intent to the base switch's room."""
+        """Apply a tap: a config hold, or a release whose direction is on/off.
+
+        On a Smart-Bulb-Mode switch a single tap is also the on/off intent
+        (up = on, down = off), so a release follows the matching push path.
+        """
         if not self.push_enabled:
             return  # inert when Light Man is off — the blueprint owns taps
         mapping = self._switch_map.get(base)
         if mapping is None:
             return
-        _, room = mapping
+        source_key, light_ref = mapping
         mode = action_to_mode(action)
         if mode is None:
             return
-        if mode == MODE_ADAPTIVE:
-            await self.async_release_hold(room)
+        if mode != MODE_ADAPTIVE:
+            await self.async_hold(light_ref, mode)
+            return
+        if await self._modes.release(light_ref):
+            self._invalidate_room(light_ref)
+        off = action.startswith("down")
+        self._paddle_on[base] = not off
+        self._invalidate_source(source_key)
+        if off:
+            await self._stage_off(source_key, light_ref)
         else:
-            await self.async_hold(room, mode)
+            await self._run_push(force=True, only_source=source_key)
+        self.async_set_updated_data(self._snapshot())
 
     async def _on_state(self, base: str, state: str) -> None:
-        """Track the paddle on/off; turning a held light off ends its hold."""
+        """Track the paddle: on re-floods the source; off stages the room off.
+
+        Off **releases any hold** (a look must not linger to next turn-on) and
+        stages the room with an explicit ``state: OFF`` rather than the state-less
+        flood — the flood would race the local binding and re-brighten the bulb
+        (see :meth:`_stage_off`).
+        """
         mapping = self._switch_map.get(base)
         if mapping is None:
             return
         on = state == STATE_ON
         if self._paddle_on.get(base) == on:
-            return
+            return  # unchanged, or the matching action already handled it
         self._paddle_on[base] = on
         if not self.push_enabled:
             return
         source_key, light_ref = mapping
-        # Switching a held light off resumes adaptive (the night/day look should
-        # not linger and reappear when the light is turned back on).
-        if not on and await self._modes.release(light_ref):
-            _LOGGER.info("hold released by switch-off for %s", light_ref)
         self._invalidate_source(source_key)
-        await self._run_push(force=True, only_source=source_key)
+        if on:
+            await self._run_push(force=True, only_source=source_key)
+        else:
+            if await self._modes.release(light_ref):
+                _LOGGER.info("hold released by switch-off for %s", light_ref)
+            await self._stage_off(source_key, light_ref)
         self.async_set_updated_data(self._snapshot())
 
     # --- snapshot -----------------------------------------------------------

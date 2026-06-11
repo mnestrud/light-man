@@ -189,6 +189,21 @@ stale bulb NVRAM groups; the **runtime** integration just never uses it. See §8
 >    otherwise stay un-releasable until TTL/clear. So holds now clear on: a single tap, **switch-off**, TTL
 >    (solar midnight), `clear_holds`, or an orphaning topology change.
 
+> **Paddle-off staging — the one `state:OFF` exception (v0.7.4, 2026-06-11).** The adaptive push is
+> **state-less by default** (§ below / the LR-latch fix): brightness/color stage color-while-off and the SBM
+> binding owns on/off. That assumption broke for **switching a light off** once Light Man owned the push:
+> on a paddle-off Light Man force-floods the **consolidated** group at the live adaptive value, and the **MQTT
+> round-trip is faster than the switch's local Zigbee binding OFF** — so the brightness lands while the bulb is
+> *still on* and re-brightens it, racing the OFF (the "4–5 taps to turn off" bug; it was masked under the old,
+> slower AL stack). Fix (`coordinator._stage_off`, wired into `_on_state` off + `_on_action` `down_single`):
+> a paddle-off addresses **that room** with an explicit **`{state:"OFF", <staged adaptive>}`** to its own
+> `set_topic` instead of the state-less flood — it goes off regardless of the race **and** pre-loads the next
+> turn-on, so there is no wrong-color flash on either edge. The other rooms are untouched (no flood that
+> cycle); the periodic state-less flood resumes maintaining staging once the bulb is actually off (no race
+> then). This does **not** reintroduce the LR latch: the latch was `state:**ON**` re-asserting members *on*;
+> this is `state:**OFF**` (and only on the paddle-off edge, mirroring the occupancy all-clear which already
+> sends `state:OFF`). Tap **up** / turn-**on** floods as before.
+
 ### 5.4 Write-on-change dedup
 Keep last-published per (source, target) in memory only; skip unchanged. Replaces
 `input_text.al_last_published`; `always_update=False` on the coordinator. Fold the color-mode

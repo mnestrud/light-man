@@ -39,6 +39,12 @@ status boxes as items are picked up. Last reviewed: **2026-06-11**.
   hold (`_on_state`); orphaned holds (keys left un-mapped by a topology change, e.g. the v8 light-ref rename)
   are **pruned at setup** (`ModeManager.prune`). See `ARCHITECTURE.md` §5.3. *(If holds should instead survive
   an off, revert the `_on_state` release.)*
+- [x] **Paddle-off `state:OFF` staging.** *(Done 2026-06-11, v0.7.4.)* On a switch-off, the room is staged
+  with an explicit `{state:"OFF", <adaptive>}` (`coordinator._stage_off`) instead of the state-less
+  consolidated flood — the flood's MQTT round-trip beat the local Zigbee binding's OFF and re-brightened the
+  still-on bulb (the "4–5 taps to turn off" bug, masked under the old slower AL stack). The lone exception to
+  the state-less adaptive push; does not reinstate the LR latch (that was `state:ON`). See `ARCHITECTURE.md`
+  §5.3.
 - [ ] **Web control panel — editing + persistence (Phase 3).** The write API (config `POST` → Store),
   curve/sweep/assignment editors, Save & Export / Save As / Load config / Reset, the in-place Store
   migration (M1) + `/XF light_man_config.json` deploy exclusion, and the live linter. Replaces the static
