@@ -273,6 +273,31 @@ persisted**. Three obligations:
 `switch_map` becomes `dict[base, (room, light_group)]` (was `(source, room)`); consumers at
 `coordinator.py:202,756,770` resolve a tapped switch to its physical room + the governed light group it holds.
 
+### Config persistence & files (dashboard)
+
+Four artifacts, distinct roles. The panel makes the **Store the live authority** — config is durable on the
+device and needs **no git commit** to work:
+
+| Artifact | Role | Written by |
+|---|---|---|
+| **Store** (`.storage/light_man_config`) | the **live authority**; survives restarts | every Save |
+| **Device config file** (`light_man_config.json`) | human-readable mirror of the live config | **Save & Export** (the default Save) |
+| **Shipped factory default** (git-bundled seed) | first-run bootstrap + **Reset** baseline; immutable on the device | shipped with the integration |
+| **External snapshot** (download/upload) | a portable config to test/swap | **Save As** (export) / **Load config** (import) |
+
+- **Save = "Save & Export"** (the default action): writes the Store **and** the device config file in one go,
+  so the config is durable + inspectable **without any git commit** (git is optional history/sharing only).
+- **Save As**: export the current config to an external file (browser download) — keep multiple named snapshots.
+- **Load config**: import an external file → **validate (+ migrate if older)** → replace the Store. Lets you
+  **A/B-test and swap** whole configs. Last-writer-wins.
+- **Reset**: revert to the immutable shipped factory default (global, or per-curve/per-room).
+- **Migrate, never overwrite (M1):** on a `seed_version` bump the loader **migrates the Store in place**; it
+  must NOT overwrite a panel-edited Store from the bundle (today's `__init__.py` overwrite-on-bump becomes a
+  migration once the panel can write the Store).
+- **Deploy must not clobber device config:** once the panel owns the device config file, the code mirror
+  **excludes it** (`robocopy … /XF light_man_config.json`); until then the git seed is authoritative and
+  deploys normally.
+
 ## Staged work (after sign-off)
 
 1. **Schema + migration** — `models.py` (`curves{}`, source groups keep `curve_ref`, first-class `Room` with

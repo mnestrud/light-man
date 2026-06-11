@@ -90,6 +90,14 @@ editor — see data-model.md S3):
 5. **Activity / log** — a live tail of Light Man's MQTT `/set` publishes + dedup skips + issues (the Z2M
    "I can see what it's doing" view), straight from the coordinator.
 
+### Config menu (app-wide)
+
+A header menu present on every tab: **Save** (= Save & Export — writes the Store + the device config file),
+**Save As…** (download the current config as an external snapshot), **Load config…** (upload + validate +
+swap a snapshot into the Store — for A/B testing), and **Reset** (revert to the shipped factory default,
+global or scoped). See the four-artifact model in
+[`reference/data-model.md`](reference/data-model.md#config-persistence--files-dashboard).
+
 ### Linter (cross-cutting "smart alerts")
 
 Surfaced wherever relevant (room view, curve "Used by", zone view) and as a consolidated list (Overview
@@ -277,8 +285,15 @@ not a commitment to specific endpoints; treat its API bullets as candidates to b
 - **Live transport — HA `websocket_api` custom commands** (subscribe to engine snapshot / diagnostics /
   occupancy / publish-log). The publish-log tail comes from the **coordinator** (it already sees all `/set`
   traffic), not a browser-side MQTT sub. No SSE.
-- **Config read/write — `HomeAssistantView` HTTP GET/POST → the Store**; the bundled JSON stays as seed +
-  reset baseline. Single-user house → **last-writer-wins** (no optimistic-concurrency machinery).
+- **Config read/write — `HomeAssistantView` HTTP GET/POST → the Store** (the live authority). Single-user
+  house → **last-writer-wins**. **Save defaults to "Save & Export"** — each save writes the Store *and* a
+  human-readable device config file, so config is durable + inspectable on the device with **no git commit
+  required** (git is optional history only). **Save As** exports the current config to an external file
+  (download); **Load config** imports + validates (+ migrates) an external file into the Store, to A/B-test
+  and swap configs; **Reset** reverts to the immutable shipped factory default. Version bumps **migrate the
+  Store in place** (M1), never overwrite. Once the panel owns device config, the deploy mirror must
+  **exclude the live config file** (`robocopy … /XF light_man_config.json`) so code pushes never clobber it.
+  Full detail + the four-artifact model in [`reference/data-model.md`](reference/data-model.md#config-persistence--files-dashboard).
 - **Reset-to-seed — both** a global reset and per-curve / per-room "revert to seed."
 - **Validation — derived from the engine's own clamps** (br 1–100, ct within bulb range, sat 0–1, delays ≥0);
   no bespoke rules.

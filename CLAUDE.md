@@ -239,6 +239,11 @@ Invoke agents with the Agent tool (`subagent_type: ha-dev`). Don't answer HA API
 # Mirror integration source to live HA
 robocopy "C:\Users\micha\code\light-man\custom_components\light_man" "\\botworth\config\custom_components\light_man" /MIR /NFL /NDL
 ```
+- **Config ownership:** today the git-bundled `light_man_config.json` is the source of truth, so `/MIR`
+  deploys it normally. **Once the web panel owns device config** (writes the Store + a device config file),
+  add `/XF light_man_config.json` to this mirror so a code deploy never clobbers panel edits — and the
+  loader must then **migrate the Store in place** on a `seed_version` bump, not overwrite it. See
+  `docs/reference/data-model.md` → "Config persistence & files".
 - **Python changes** (any `.py` file): full HA restart required — use `ha_restart` MCP call; do NOT poll after, tell user to confirm when ready
 - **Non-Python changes** (strings.json, translations, icons): reload only — `ha_reload_config component=core`
 
