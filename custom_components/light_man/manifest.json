@@ -3,6 +3,7 @@
   "name": "Light Man",
   "codeowners": ["@mnestrud"],
   "config_flow": true,
+  "after_dependencies": ["http", "frontend", "websocket_api"],
   "dependencies": ["mqtt"],
   "documentation": "https://github.com/mnestrud/light-man",
   "integration_type": "hub",
@@ -11,5 +12,5 @@
   "quality_scale": "silver",
   "requirements": [],
   "single_config_entry": true,
-  "version": "0.6.0"
+  "version": "0.7.0"
 }

@@ -31,7 +31,9 @@ from .const import (
 )
 from .coordinator import LightManCoordinator
 from .modes import ModeManager
+from .panel import async_register_panel, async_unregister_panel
 from .services import async_register_services, async_unregister_services
+from .websocket import async_register_ws
 
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
@@ -89,6 +91,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: LightManConfigEntry) -> 
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     async_register_services(hass)
+    async_register_ws(hass)
+    await async_register_panel(hass)
     return True
 
 
@@ -98,6 +102,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: LightManConfigEntry) ->
     if unload_ok:
         coordinator = entry.runtime_data.coordinator
         coordinator.shutdown_subscriptions()
+        async_unregister_panel(hass)
         if not hass.config_entries.async_loaded_entries(DOMAIN):
             async_unregister_services(hass)
     return unload_ok

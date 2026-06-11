@@ -27,13 +27,15 @@ status boxes as items are picked up. Last reviewed: **2026-06-11**.
   sensors, sleep block) in `models.py` + `light_man_config.json` (seed_version 8). `config_loader.py` derives
   the unchanged runtime view, so `coordinator.py`/`push.py` are untouched and addressing is byte-identical
   (`tests/test_seed_equivalence.py`). Next: Phase 2 (panel + read-only).
-- [ ] **Web control panel (self-hosted, sidebar app).** A standalone HTML/JS app in the HA left sidebar —
-  like Zigbee2MQTT / Node-RED present their own UIs — not a Lovelace dashboard. The integration registers
-  a custom **panel** and serves the SPA + a backend **API** (HTTP views for Store config read/write +
-  actions; websocket commands for live engine/diagnostics/occupancy/publish-log streams). Full layout
-  freedom (tabs, live curves, occupancy visualizer, MQTT activity log); replaces the static
-  `light_man_config.json` for day-to-day tuning and avoids the config/options flow. Full plan:
+- [x] **Web control panel — read-only (Phase 2).** *(Done 2026-06-11, v0.7.0.)* `panel_custom` sidebar web
+  component (`panel/index.js`, dependency-free vanilla JS) + a read-only `websocket_api` (`light_man/config`,
+  `light_man/subscribe`), both admin-gated. 5 tabs: Overview / Rooms / Curves (SVG viz) / Occupancy /
+  Activity. The panel is optional (guarded on `frontend`/`websocket_api`). Plan:
   [`docs/DASHBOARD-PLAN.md`](DASHBOARD-PLAN.md).
+- [ ] **Web control panel — editing + persistence (Phase 3).** The write API (config `POST` → Store),
+  curve/sweep/assignment editors, Save & Export / Save As / Load config / Reset, the in-place Store
+  migration (M1) + `/XF light_man_config.json` deploy exclusion, and the live linter. Replaces the static
+  `light_man_config.json` for day-to-day tuning.
 
 ## Deferred to the user, by their call
 

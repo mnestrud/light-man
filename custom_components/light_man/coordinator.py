@@ -127,6 +127,7 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         self.entry_id = entry.entry_id
         self._entry = entry
         self._config = config
+        self.stored = validated.stored  # the data-model shape (read by the panel)
         self._modes = modes
         self._switch_map = validated.switch_map
         self._room_source: dict[str, str] = {
@@ -226,6 +227,32 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
                 }
                 for key, source in self._config[CONF_SOURCES].items()
             },
+        }
+
+    def panel_config(self) -> dict[str, Any]:
+        """Return the stored topology (data model) the read-only panel renders."""
+        return {"config": self.stored, "switch_map": dict(self._switch_map)}
+
+    def panel_state(self) -> dict[str, Any]:
+        """Live, JSON-able read model for the panel's subscription stream.
+
+        A flat snapshot of everything the read-only dashboard shows: master
+        on/off, sleep ramp, hold state, the engine's per-source-group targets,
+        the latest addressing/publish/occupancy diagnostics, and config issues.
+        No secrets; never mutates anything.
+        """
+        return {
+            "push_enabled": self.push_enabled,
+            "mqtt_available": self.mqtt_available,
+            "sleep": self.diagnostics.get("sleep", {}),
+            "held": self._modes.as_attributes(),
+            "engine": self.diagnostics.get("engine", {}),
+            "addressing": self.diagnostics.get("addressing", {}),
+            "last_publish": self.diagnostics.get("last_publish", {}),
+            "inovelli": self.diagnostics.get("inovelli", {}),
+            "occupancy": self.diagnostics.get("occupancy", {}),
+            "issues": self.diagnostics.get("issues", []),
+            "dedup_skips": self.diagnostics.get("dedup_skips", 0),
         }
 
     async def _async_update_data(self) -> CoordinatorData:

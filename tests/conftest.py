@@ -172,6 +172,18 @@ def auto_enable_custom_integrations(
     yield
 
 
+@pytest.fixture
+def socket_enabled() -> Iterator[None]:
+    """Satisfy ``hass_ws_client``'s ``socket_enabled`` dependency.
+
+    ``pyproject.toml`` disables pytest-socket (``-p no:socket``) so missed MQTT
+    mocks surface — but that also drops the ``socket_enabled`` fixture the HA
+    websocket test client requires. Sockets aren't blocked (the plugin is off),
+    so a no-op shim is all the client needs.
+    """
+    yield
+
+
 @pytest.fixture(scope="session")
 def event_loop_policy() -> asyncio.AbstractEventLoopPolicy:
     """Use the selector loop on Windows (ProactorEventLoop breaks PHCC)."""

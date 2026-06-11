@@ -150,3 +150,18 @@ DEFAULT_SLEEP_RAMP_OUT_S: Final = 1800.0  # 30 min ease back out on wake
 
 # --- Solar event for hold TTL (astral "midnight" = solar midnight/nadir) -----
 SOLAR_MIDNIGHT_EVENT: Final = "midnight"
+
+# --- Web control panel (sidebar SPA) ----------------------------------------
+# A self-hosted read-only dashboard (Phase 2): a custom panel mounts the SPA,
+# served from the package `panel/` dir; the frontend reads live state over the
+# websocket_api commands below (no write API yet).
+PANEL_URL_PATH: Final = "light-man"  # sidebar route (/light-man)
+PANEL_TITLE: Final = "Light Man"
+PANEL_ICON: Final = "mdi:white-balance-sunny"
+PANEL_WEBCOMPONENT: Final = "light-man-panel"
+PANEL_STATIC_URL: Final = "/light_man_panel"  # served bundle root
+PANEL_DIR: Final = "panel"  # package subdir holding index.js
+PANEL_JS: Final = "index.js"
+# websocket_api command types (read-only).
+WS_CONFIG: Final = "light_man/config"  # request/response: stored topology
+WS_SUBSCRIBE: Final = "light_man/subscribe"  # subscription: live panel state

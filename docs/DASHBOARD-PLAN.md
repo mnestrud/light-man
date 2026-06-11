@@ -216,10 +216,11 @@ grey out; Day color toggle sits on "fixed RGB" with a color picker.
 
 ## Build pipeline
 
-- A small frontend in `frontend/` (Lit or Preact or vanilla + Vite). `npm run build` emits a hashed
-  bundle into `custom_components/light_man/panel/`, which ships in the integration (and via robocopy to
-  live). Keep the bundle dependency-light so HACS install stays a copy-paste.
-- Add the build step to CI (lint/build the panel) without making it block the Python gate.
+- **v0.7.0: no build step.** `custom_components/light_man/panel/index.js` is hand-authored vanilla JS that
+  ships as-is (robocopy mirrors it to live; HACS copies it). This keeps install a pure copy-paste.
+- **Deferred (Polish, with the Lit migration):** a small frontend in `frontend/` (Lit + Vite); `npm run build`
+  emits a hashed bundle into `custom_components/light_man/panel/`. Add the build step to CI (lint/build the
+  panel) without making it block the Python gate.
 
 ## Trade-offs vs. the Lovelace + config-entities approach (the one this replaces)
 
@@ -265,12 +266,18 @@ because the UI + data model are signed off in Phase 0.
    plan (4 consolidated floods steady-state; a hold drops only its light group to per-light addressing). No
    runtime Store migrator yet — that lands in Phase 3 with editing. (`legacy_enable` is *not* on the stored
    source group — it was dropped as vestigial in v0.5.0.) 157 tests, 100% cov, mypy-strict + ruff clean.
-2. **Panel + read-only (a usable read-only dashboard).** Register the `panel_custom` panel + serve the Lit
-   bundle + mount the SPA shell; wire the **read** API — `websocket_api` live streams (engine snapshot /
-   diagnostics / occupancy / publish-log) + config `GET` — and build the **read-only tabs** (Overview live
-   tiles, Rooms view, Curves visualizer, Occupancy view, Activity log). Endpoints are designed per-screen.
-   Proves the whole stack (panel + auth + WS + Lit + viz) end-to-end with **zero write risk**. (Confirm
-   current `panel_custom` / static-path / `websocket_api` signatures with the `ha-dev` agent here.)
+2. **Panel + read-only (a usable read-only dashboard). ✅ DONE — `v0.7.0` (2026-06-11).** `panel.py` registers
+   a `panel_custom` web component (require_admin) + serves the SPA from `panel/` via `async_register_static_paths`;
+   `websocket.py` exposes two **read-only, admin-gated** commands — `light_man/config` (stored topology +
+   switch map) and `light_man/subscribe` (live panel state pushed on every coordinator update). The SPA
+   (`panel/index.js`) is **dependency-free vanilla JS** (no build step → HACS copy-paste stays clean; the Lit
+   migration is deferred to Polish) with all 5 read-only tabs: Overview (live source-group tiles, push/sleep/
+   alerts badges, holds), Rooms (lights+curve / switches→governs / sensors), Curves (hand-rolled SVG
+   brightness-vs-elevation viz + CT/RGB color strip + "Used by"), Occupancy (zones, per-sensor sweeps),
+   Activity (latest publish per topic). **The panel is optional** — guarded on `frontend`/`websocket_api`
+   availability so a minimal install (or the test harness) loads the engine without it. Signatures were
+   verified against current HA via the `ha-dev` agent. 163 tests, 100% cov, mypy-strict + ruff clean. **Zero
+   write risk** (no write API). Confirmed live (clean boot, panel in sidebar).
 3. **Editing + persistence.** Add the **write** API (config `POST` → Store) and the editors (curve editor,
    per-group curve assignment, sweep builder); implement **Save & Export / Save As / Load config / Reset**;
    **flip the loader to migrate-the-Store-in-place** (M1) and add **`/XF light_man_config.json`** to the
@@ -285,7 +292,10 @@ because the UI + data model are signed off in Phase 0.
   before coding — these HA frontend APIs shift between releases.)
 - **Frontend stack — Lit** (HA's own frontend is Lit; the panel entry *is* a web component, so HA's `ha-*`
   components + theming come for free) **+ hand-rolled SVG/canvas** for the curve + sweep visualizers (no
-  heavy chart dependency). Keep the bundle tiny for HACS copy-paste.
+  heavy chart dependency). Keep the bundle tiny for HACS copy-paste. **v0.7.0 shipped a dependency-free
+  *vanilla* web component instead** (a single `panel/index.js`, no build step) to land the read-only panel
+  without wiring an npm/Vite pipeline; it reads HA CSS vars for theming and hand-rolls the SVG viz. The **Lit
+  migration is deferred to Polish** (it needs the build pipeline below).
 - **Apply semantics — stage + explicit Save, with live preview.** Edits stage locally; the curve redraws /
   sweep replays as preview only; nothing writes the Store or touches the house until Save.
 - **Live transport — HA `websocket_api` custom commands** (subscribe to engine snapshot / diagnostics /
