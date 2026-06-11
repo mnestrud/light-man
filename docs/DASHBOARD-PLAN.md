@@ -254,15 +254,17 @@ because the UI + data model are signed off in Phase 0.
    wireframes, and the config-persistence model are all specified ([`reference/data-model.md`](reference/data-model.md)
    + the App-layout / Architecture sections above). This phase is the **sign-off gate**; nothing past it
    starts until the design is confirmed.
-1. **Schema migration (foundational; normal release, no panel).** Land the reconciled model in `models.py`
-   (`curves{}` library, source groups carry `curve_ref`, first-class merged `Room` with
-   `lights[]`/`switches[]`/`sensors{}`, switch `governs` ref, `OccupancyZone.sensors` as references, sweep
-   `lights` as room-fixture ids, top-level `sleep`) + the `switch_map` value-shape change (M2); rewrite
-   `light_man_config.json` to the new shape and **bump `seed_version`**. On upgrade the Store **re-seeds from
-   the new bundle (overwrite is fine — the git seed is still the authority, no panel edits exist yet)**; an
-   **equivalence test** asserts the new seed's push plan — **incl. hold addressing** — equals the old seed's
-   (4 consolidated floods, byte-identical). **Runtime addressing is untouched** (S1). No runtime Store
-   migrator yet — that lands in Phase 3 with editing. Ships ahead of the panel.
+1. **Schema migration (foundational; normal release, no panel). ✅ DONE — `v0.6.0` (2026-06-11).** Landed the
+   reconciled model in `models.py` (stored `Curve`/`SourceGroup`/`Room`/`RoomLight`/`RoomSwitch`/`RoomSensor`/
+   `ZoneConfig`/`SleepConfig`/`StoredConfig`) + the `switch_map` value-shape change (M2, `base → (group,
+   light_ref)`); rewrote `light_man_config.json` to the new shape and bumped `seed_version` → **8**. Key move:
+   `config_loader.py` **derives the unchanged runtime view** (source groups whose `rooms` are keyed by
+   light-ref `"<room>.<id>"`, switches reattached by `governs`), so `coordinator.py`/`push.py` are
+   structurally untouched and **addressing is byte-identical** (S1). On upgrade the Store **re-seeds from the
+   new bundle** (overwrite is fine — no panel edits exist yet). `tests/test_seed_equivalence.py` pins the push
+   plan (4 consolidated floods steady-state; a hold drops only its light group to per-light addressing). No
+   runtime Store migrator yet — that lands in Phase 3 with editing. (`legacy_enable` is *not* on the stored
+   source group — it was dropped as vestigial in v0.5.0.) 157 tests, 100% cov, mypy-strict + ruff clean.
 2. **Panel + read-only (a usable read-only dashboard).** Register the `panel_custom` panel + serve the Lit
    bundle + mount the SPA shell; wire the **read** API — `websocket_api` live streams (engine snapshot /
    diagnostics / occupancy / publish-log) + config `GET` — and build the **read-only tabs** (Overview live

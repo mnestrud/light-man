@@ -130,7 +130,7 @@ async def test_config_single_holds_night_per_room(
     _fire(hass, LR_SWITCH, {"action": "config_single"})
     await hass.async_block_till_done()
     assert coordinator.data["held_count"] == 1
-    assert coordinator.data["held"]["living_room"]["mode"] == "night"
+    assert coordinator.data["held"]["living_room.overhead"]["mode"] == "night"
 
     pubs = published(mqtt_mock)
     assert pubs[LR_SET] == NIGHT
@@ -148,7 +148,7 @@ async def test_config_double_holds_day_per_room(
 
     _fire(hass, LR_SWITCH, {"action": "config_double"})
     await hass.async_block_till_done()
-    assert coordinator.data["held"]["living_room"]["mode"] == "day"
+    assert coordinator.data["held"]["living_room.overhead"]["mode"] == "day"
 
     pubs = published(mqtt_mock)
     assert pubs[LR_SET] == DAY_LOOK  # forced peak-day look, distinct from adaptive
@@ -286,7 +286,10 @@ async def test_ttl_sweep_clears_expired(
     """An expired held mode is swept and the source re-floods consolidated."""
     now = dt_util.utcnow()
     await coordinator._modes.set_held(
-        "living_room", kind="night", armed_at=now, expires_at=now - timedelta(minutes=1)
+        "living_room.overhead",
+        kind="night",
+        armed_at=now,
+        expires_at=now - timedelta(minutes=1),
     )
     await coordinator.async_set_push_enabled(enabled=True)
     await hass.async_block_till_done()
@@ -334,8 +337,8 @@ async def test_disabled_force_push_is_noop(
 
 async def test_clear_holds(hass: HomeAssistant, coordinator: Coord) -> None:
     """clear_holds resumes every room."""
-    await coordinator.async_hold("living_room", "night")
-    await coordinator.async_hold("kitchen", "day")
+    await coordinator.async_hold("living_room.overhead", "night")
+    await coordinator.async_hold("kitchen.overhead", "day")
     assert coordinator.data["held_count"] == 2
     await coordinator.async_clear_holds()
     assert coordinator.data["held_count"] == 0
@@ -343,7 +346,7 @@ async def test_clear_holds(hass: HomeAssistant, coordinator: Coord) -> None:
 
 async def test_release_unheld_is_noop(hass: HomeAssistant, coordinator: Coord) -> None:
     """Resuming a room that is already adaptive does nothing."""
-    await coordinator.async_release_hold("living_room")
+    await coordinator.async_release_hold("living_room.overhead")
     assert coordinator.data["held_count"] == 0
 
 

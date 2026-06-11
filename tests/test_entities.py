@@ -38,11 +38,11 @@ async def test_active_holds_sensor_tracks_holds(
 
     assert hass.states.get(sensor_id).state == "0"
 
-    await coordinator.async_hold("living_room", "night")
+    await coordinator.async_hold("living_room.overhead", "night")
     await hass.async_block_till_done()
     state = hass.states.get(sensor_id)
     assert state.state == "1"
-    assert state.attributes["rooms"]["living_room"]["mode"] == "night"
+    assert state.attributes["rooms"]["living_room.overhead"]["mode"] == "night"
 
 
 async def test_push_enable_switch_toggles_stack(

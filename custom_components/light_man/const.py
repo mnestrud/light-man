@@ -20,17 +20,36 @@ CONFIG_STORE_VERSION: Final = 1
 # cutover (legacy_enable + the master-tick disable) — the engine is the sole source.
 MODES_STORE_KEY: Final = "light_man_modes"
 MODES_STORE_VERSION: Final = 1
-BUNDLED_SEED_VERSION: Final = 7
+# v8 reconciled the topology to the dashboard data model (docs/reference/data-model.md):
+# curves became a top-level named library; "sources" became curve-bearing *groups*
+# (carrying curve_ref, not an inline profile); physical rooms became first-class
+# top-level objects merged across groups; occupancy moved to `occupancy_zones`
+# referencing room-owned sensors; sleep ramp became a top-level block. The loader
+# derives the unchanged runtime view from this shape, so addressing is identical.
+BUNDLED_SEED_VERSION: Final = 8
 
 # --- Seed-config JSON keys --------------------------------------------------
 CONF_PUSH_INTERVAL: Final = "push_interval_s"
+# Stored shape (data model): a top-level curve library + curve-bearing source
+# groups + first-class rooms + zones referencing room sensors + a sleep block.
+CONF_CURVES: Final = "curves"
+CONF_CURVE_REF: Final = "curve_ref"
 CONF_SOURCES: Final = "sources"
 CONF_CONSOLIDATED_TOPIC: Final = "consolidated_topic"
 CONF_TRANSITION: Final = "transition_s"
+# `profile` is the *runtime* key the engine reads (the curve resolved from
+# curve_ref); it is not present in the stored seed any more.
 CONF_PROFILE: Final = "profile"
 CONF_ROOMS: Final = "rooms"
+CONF_NAME: Final = "name"
+CONF_ID: Final = "id"
+CONF_GOVERNS: Final = "governs"
 CONF_SET_TOPIC: Final = "set_topic"
 CONF_SWITCHES: Final = "switches"
+CONF_OCCUPANCY_ZONES: Final = "occupancy_zones"
+CONF_SLEEP: Final = "sleep"
+CONF_RAMP_IN: Final = "ramp_in_s"
+CONF_RAMP_OUT: Final = "ramp_out_s"
 
 # --- Color modes ------------------------------------------------------------
 COLOR_MODE_COLOR_TEMP: Final = "color_temp"

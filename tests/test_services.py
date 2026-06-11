@@ -39,9 +39,9 @@ async def test_release_hold_known_room(hass: HomeAssistant, mqtt_mock: Any) -> N
     """A known, held room is released by the service."""
     entry = await setup_lightman(hass)
     coordinator = entry.runtime_data.coordinator
-    await coordinator.async_hold("living_room", "night")
+    await coordinator.async_hold("living_room.overhead", "night")
     await hass.services.async_call(
-        DOMAIN, SERVICE_RELEASE_HOLD, {"room": "living_room"}, blocking=True
+        DOMAIN, SERVICE_RELEASE_HOLD, {"room": "living_room.overhead"}, blocking=True
     )
     assert coordinator.data["held_count"] == 0
 
@@ -50,8 +50,8 @@ async def test_clear_holds_service(hass: HomeAssistant, mqtt_mock: Any) -> None:
     """clear_holds releases everything."""
     entry = await setup_lightman(hass)
     coordinator = entry.runtime_data.coordinator
-    await coordinator.async_hold("living_room", "night")
-    await coordinator.async_hold("kitchen", "day")
+    await coordinator.async_hold("living_room.overhead", "night")
+    await coordinator.async_hold("kitchen.overhead", "day")
     await hass.services.async_call(DOMAIN, SERVICE_CLEAR_HOLDS, {}, blocking=True)
     assert coordinator.data["held_count"] == 0
 

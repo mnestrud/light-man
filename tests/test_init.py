@@ -98,7 +98,7 @@ async def test_setup_with_invalid_config_retries(
     hass: HomeAssistant, mqtt_mock: Any
 ) -> None:
     """A current-version but structurally invalid Store -> retry (not re-seeded)."""
-    entry = await setup_lightman(hass, seed={"seed_version": 7, "push_interval_s": 30})
+    entry = await setup_lightman(hass, seed={"seed_version": 8, "push_interval_s": 30})
     assert entry.state is ConfigEntryState.SETUP_RETRY
 
 
@@ -128,7 +128,7 @@ async def test_setup_reseeds_when_stored_seed_is_old(
         await hass.config_entries.async_setup(entry.entry_id)
         await hass.async_block_till_done()
     assert entry.state is ConfigEntryState.LOADED
-    assert stores[CONFIG_STORE_KEY]._data.get("seed_version") == 7
+    assert stores[CONFIG_STORE_KEY]._data.get("seed_version") == 8
 
 
 def test_bundled_seed_is_valid() -> None:
@@ -141,5 +141,6 @@ def test_bundled_seed_is_valid() -> None:
         "hallway_up",
         "hallway_down",
     }
-    # under_vanity is addressable but not holdable (no switch).
-    assert result.config["sources"]["accent"]["rooms"]["under_vanity"]["switches"] == []
+    # under_vanity is addressable but not holdable (no switch governs it).
+    accent_rooms = result.config["sources"]["accent"]["rooms"]
+    assert accent_rooms["primary_bath.under_vanity"]["switches"] == []

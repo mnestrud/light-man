@@ -39,97 +39,112 @@ PORCH_A1_SET = "zigbee2mqtt/zgb_porch_a1/set"
 PORCH_A2_SET = "zigbee2mqtt/zgb_porch_a2/set"
 PORCH_OFF = "zigbee2mqtt/zgb_porch/set"
 
+# The test seed in the reconciled data model: a named curve library, curve-bearing
+# source groups, first-class rooms (lights/switches/sensors), and cross-room zones
+# referencing room sensors. The loader derives the runtime view (light-ref-keyed
+# source groups) — see config_loader.py.
 SEED: dict[str, Any] = {
-    "seed_version": 7,
+    "seed_version": 8,
     "push_interval_s": 30,
-    "sources": {
-        "overhead": {
-            "consolidated_topic": OVERHEAD_ALL,
-            "profile": {
-                "min_br": 30,
-                "max_br": 90,
-                "min_ct": 2700,
-                "max_ct": 6500,
-                "sat": 0.5,
-                "base_color_mode": "color_temp",
-                "base_rgb": None,
-                "dusk_floor_ct": 2200,
-                "night_floor_br": 30,
-                "sleep": {"br": 30, "color_mode": "color_temp", "ct": 2700},
-                "day_window": {"enabled": False, "start": "08:00", "end": "17:00"},
-            },
-            "rooms": {
-                "living_room": {"set_topic": LR_SET, "switches": [LR_SWITCH]},
-                "kitchen": {"set_topic": KIT_SET, "switches": [KIT_SWITCH]},
-            },
+    "curves": {
+        "standard": {
+            "min_br": 30,
+            "max_br": 90,
+            "min_ct": 2700,
+            "max_ct": 6500,
+            "sat": 0.5,
+            "base_color_mode": "color_temp",
+            "base_rgb": None,
+            "dusk_floor_ct": 2200,
+            "night_floor_br": 30,
+            "sleep": {"br": 30, "color_mode": "color_temp", "ct": 2700},
+            "day_window": {"enabled": False, "start": "08:00", "end": "17:00"},
         },
-        "hallway_up": {
-            "consolidated_topic": HALL_UP,
-            "profile": {
-                "min_br": 30,
-                "max_br": 90,
-                "min_ct": 2700,
-                "max_ct": 6500,
-                "sat": 0.5,
-                "base_color_mode": "rgb",
-                "base_rgb": [135, 206, 235],
-                "dusk_floor_ct": 2200,
-                "night_floor_br": 30,
-                "sleep": {"br": 40, "color_mode": "rgb", "rgb": [255, 126, 30]},
-                "day_window": {"enabled": False, "start": "08:00", "end": "17:00"},
-            },
-            "rooms": {},
+        "sky": {
+            "min_br": 30,
+            "max_br": 90,
+            "min_ct": 2700,
+            "max_ct": 6500,
+            "sat": 0.5,
+            "base_color_mode": "rgb",
+            "base_rgb": [135, 206, 235],
+            "dusk_floor_ct": 2200,
+            "night_floor_br": 30,
+            "sleep": {"br": 40, "color_mode": "rgb", "rgb": [255, 126, 30]},
+            "day_window": {"enabled": False, "start": "08:00", "end": "17:00"},
         },
     },
-    "occupancy": {
-        "hallway": {
-            "off_lights": [HALL_OFF],
+    "sources": {
+        "overhead": {"consolidated_topic": OVERHEAD_ALL, "curve_ref": "standard"},
+        "hallway_up": {"consolidated_topic": HALL_UP, "curve_ref": "sky"},
+    },
+    "rooms": {
+        "living_room": {
+            "name": "Living Room",
+            "lights": [{"id": "overhead", "set_topic": LR_SET, "source": "overhead"}],
+            "switches": [{"topic": LR_SWITCH, "governs": "living_room.overhead"}],
+            "sensors": {},
+        },
+        "kitchen": {
+            "name": "Kitchen",
+            "lights": [{"id": "overhead", "set_topic": KIT_SET, "source": "overhead"}],
+            "switches": [{"topic": KIT_SWITCH, "governs": "kitchen.overhead"}],
+            "sensors": {},
+        },
+        "hall": {
+            "name": "Hall",
+            "lights": [
+                {"id": "up_main", "set_topic": HALL_UP, "source": "hallway_up"},
+                {"id": "center", "set_topic": HALL_CENTER_SET, "source": "hallway_up"},
+            ],
+            "switches": [],
             "sensors": {
-                "east": {
-                    "topic": MMWAVE_EAST,
-                    "sweep": [
-                        {"lights": [{"set_topic": HALL_UP, "source": "hallway_up"}]},
-                        {
-                            "delay_s": 1.0,
-                            "lights": [
-                                {"set_topic": HALL_CENTER_SET, "source": "hallway_up"}
-                            ],
-                        },
-                    ],
-                },
-                "west": {
-                    "topic": MMWAVE_WEST,
-                    "sweep": [
-                        {
-                            "lights": [
-                                {"set_topic": HALL_CENTER_SET, "source": "hallway_up"}
-                            ]
-                        }
-                    ],
-                },
+                "east": {"topic": MMWAVE_EAST},
+                "west": {"topic": MMWAVE_WEST},
             },
         },
-        # One physical switch, two detection areas wired as independent triggers.
+        # One physical switch, two detection areas wired as independent sensors.
         "porch": {
-            "off_lights": [PORCH_OFF],
+            "name": "Porch",
+            "lights": [
+                {"id": "a1", "set_topic": PORCH_A1_SET, "source": "overhead"},
+                {"id": "a2", "set_topic": PORCH_A2_SET, "source": "overhead"},
+            ],
+            "switches": [],
             "sensors": {
                 "porch_a1": {
                     "topic": MMWAVE_PORCH,
                     "occupancy_key": "mmwave_area1_occupancy",
-                    "sweep": [
-                        {"lights": [{"set_topic": PORCH_A1_SET, "source": "overhead"}]}
-                    ],
                 },
                 "porch_a2": {
                     "topic": MMWAVE_PORCH,
                     "occupancy_key": "mmwave_area2_occupancy",
-                    "sweep": [
-                        {"lights": [{"set_topic": PORCH_A2_SET, "source": "overhead"}]}
-                    ],
                 },
             },
         },
     },
+    "occupancy_zones": {
+        "hallway": {
+            "off_lights": [HALL_OFF],
+            "sensors": {
+                "hall.east": {
+                    "sweep": [
+                        {"lights": ["hall.up_main"]},
+                        {"delay_s": 1.0, "lights": ["hall.center"]},
+                    ],
+                },
+                "hall.west": {"sweep": [{"lights": ["hall.center"]}]},
+            },
+        },
+        "porch": {
+            "off_lights": [PORCH_OFF],
+            "sensors": {
+                "porch.porch_a1": {"sweep": [{"lights": ["porch.a1"]}]},
+                "porch.porch_a2": {"sweep": [{"lights": ["porch.a2"]}]},
+            },
+        },
+    },
+    "sleep": {"ramp_in_s": 5400, "ramp_out_s": 1800},
 }
 
 

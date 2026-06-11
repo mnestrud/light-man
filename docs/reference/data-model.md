@@ -27,7 +27,7 @@ across sources** (kitchen = an `overhead` room *and* an `accent` `kitchen_island
 
 | Term | What | Count today | Owns / is |
 |---|---|---|---|
-| **Source group** (`sources{}`) | the **curve-bearing consolidated unit** — formerly the inline-`profile` "source" | 4 | `consolidated_topic`, `legacy_enable`, **`curve_ref`** |
+| **Source group** (`sources{}`) | the **curve-bearing consolidated unit** — formerly the inline-`profile` "source" | 4 | `consolidated_topic`, **`curve_ref`** (no `legacy_enable` — dropped v0.5.0) |
 | **Light group** (`set_topic`) | a fixture's per-room `/set` topic — the **hold / SBM-bind / skip** unit | ~12 | the addressable bulbs a switch governs and a hold skips |
 
 A light belongs to **one source group** (for its curve + the consolidated flood) and **is** a light group
@@ -88,7 +88,7 @@ change**. No day/night regime needs adding to a curve.
 
 ```jsonc
 {
-  "seed_version": 7,                            // bumped — triggers the old-Store migration (M1)
+  "seed_version": 8,                            // bumped — re-seeds the Store from the new bundle (Phase 1)
   "push_interval_s": 30,
 
   "curves": {                                   // NEW top-level library (today's 4 profiles, named)
@@ -108,14 +108,10 @@ change**. No day/night regime needs adding to a curve.
   },
 
   "sources": {                                  // SOURCE GROUPS: the curve-bearing consolidated unit (S1)
-    "overhead":     { "consolidated_topic":"zigbee2mqtt/zgb_overhead_all/set",
-                      "legacy_enable":"input_boolean.adaptive_lighting_overhead_all", "curve_ref":"daylight_standard" },
-    "accent":       { "consolidated_topic":"zigbee2mqtt/zgb_accent_all/set",
-                      "legacy_enable":"input_boolean.adaptive_lighting_accent_all",   "curve_ref":"accent_dim" },
-    "hallway_up":   { "consolidated_topic":"zigbee2mqtt/zgb_hallway_up/set",
-                      "legacy_enable":"input_boolean.adaptive_lighting_switch_hallway","curve_ref":"hallway_sky" },
-    "hallway_down": { "consolidated_topic":"zigbee2mqtt/zgb_hallway_down/set",
-                      "legacy_enable":"input_boolean.adaptive_lighting_switch_hallway","curve_ref":"hallway_ct_winddown" }
+    "overhead":     { "consolidated_topic":"zigbee2mqtt/zgb_overhead_all/set", "curve_ref":"daylight_standard" },
+    "accent":       { "consolidated_topic":"zigbee2mqtt/zgb_accent_all/set",   "curve_ref":"accent_dim" },
+    "hallway_up":   { "consolidated_topic":"zigbee2mqtt/zgb_hallway_up/set",   "curve_ref":"hallway_sky" },
+    "hallway_down": { "consolidated_topic":"zigbee2mqtt/zgb_hallway_down/set", "curve_ref":"hallway_ct_winddown" }
   },
 
   "rooms": {                                    // NEW top-level physical spaces (merged across source groups)
@@ -185,7 +181,7 @@ inline `profile`s into a named top-level `curves{}` map** that source groups ref
   **"Used by"** backref (which source groups → edit blast radius).
 
 ### Source groups (`sources{}`)
-The curve-bearing consolidated unit: `consolidated_topic`, `legacy_enable`, `curve_ref`. Its **members are
+The curve-bearing consolidated unit: `consolidated_topic`, `curve_ref` (optional `transition_s`). Its **members are
 derived** — every room-light whose `source` names it. This is the unit the consolidated flood targets and the
 unit a curve is assigned to (S1). The four recognizable groups remain visible in the UI.
 
@@ -252,7 +248,7 @@ Cross-checks the reconciled model against live Z2M; surfaceable as HA repair iss
 | Today (`light_man_config.json`) | New |
 |---|---|
 | `sources.<s>.profile` (×4) | `curves.<name>` (×4), referenced by `sources.<s>.curve_ref` (S1) |
-| `sources.<s>` (consolidated_topic, legacy_enable) | kept on the source group; loses `profile`/`night_*`/`rooms` |
+| `sources.<s>` (consolidated_topic) | kept on the source group as `consolidated_topic`+`curve_ref`; loses `profile`/`rooms` |
 | `sources.<s>.rooms.<r>` (set_topic, switches) | `rooms.<r>` with a light `{set_topic, source:<s>}` + switches `{topic, governs}` |
 | same physical room under 2 sources (kitchen / kitchen_island) | **one** `rooms.kitchen` with two lights + two switches, **holds preserved per light group** (S2) |
 | `sources.<s>.night_brightness_pct/_color_temp_kelvin/_rgb` | **dropped** — vestigial (held looks derived; profile-less only) |
@@ -303,12 +299,17 @@ device and needs **no git commit** to work:
 Phasing is **canonical in [`DASHBOARD-PLAN.md`](../DASHBOARD-PLAN.md#implementation-phases)** (Phases 0–4).
 Where this doc's pieces land:
 
-- **Phase 1 (schema migration):** the new schema here — `models.py` (`curves{}`, source groups carry
-  `curve_ref`, first-class `Room`, `OccupancyZone.sensors` → references, sweep `lights` → fixture ids,
-  top-level `sleep`) + the **M2** `switch_map` shape + rewritten `light_man_config.json` with a bumped
-  `seed_version`. On upgrade the Store **re-seeds from the new bundle** (overwrite is fine — no panel edits
-  exist yet); a **byte-identical equivalence test** covers the push plan incl. hold addressing. **Addressing
-  untouched** (S1). **No runtime Store migrator yet.**
+- **Phase 1 (schema migration): ✅ shipped in `v0.6.0` (2026-06-11).** The new schema landed in `models.py`
+  (stored types `Curve`/`SourceGroup`/`Room`/`RoomLight`/`RoomSwitch`/`RoomSensor`/`ZoneConfig`/`SleepConfig`
+  +`StoredConfig`) and `config_loader.py` **derives the unchanged runtime view** (source groups whose `rooms`
+  are keyed by light-ref `"<room>.<id>"`, switches reattached by `governs`), so `coordinator.py`/`push.py` are
+  structurally untouched and addressing is byte-identical (S1). `light_man_config.json` was rewritten to the
+  new shape; on upgrade the Store **re-seeds from the new bundle** (overwrite is fine — no panel edits exist
+  yet). `tests/test_seed_equivalence.py` pins the push plan (4 consolidated floods steady-state; a hold drops
+  only its light group to per-light addressing). **No runtime Store migrator yet.** Two deltas from the shape
+  sketched below: the shipped **`seed_version` is `8`** (not 7 — v7 was the prior AL-fallback cleanup), and
+  **`legacy_enable` is omitted** from source groups (it was dropped as vestigial in v0.5.0; the engine never
+  reads it). The **M2** `switch_map` shape (`base → (group, light_ref)`) shipped as designed.
 - **Phase 3 (editing + persistence):** the **in-place migration (M1)** flip and the `/XF` deploy exclusion —
   both only load-bearing once the panel writes the Store. See "Config persistence & files" above.
 

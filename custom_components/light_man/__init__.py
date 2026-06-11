@@ -66,9 +66,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: LightManConfigEntry) -> 
         or raw.get("seed_version", 0) < BUNDLED_SEED_VERSION
     ):
         # (Re-)seed the Store from the bundled default: first run, a corrupt
-        # store, or a store predating the shipped seed_version (e.g. Phase 2
-        # added per-source profiles). Overwriting is safe while the config is
-        # code-owned; once the OptionsFlow lets users edit it, merge instead.
+        # store, or a store predating the shipped seed_version (e.g. v8 reconciled
+        # the topology to the dashboard data model). Overwriting is safe while the
+        # config is code-owned; once the panel lets users edit it, migrate instead.
         try:
             raw = await hass.async_add_executor_job(_read_bundled_seed)
         except (OSError, ValueError) as err:

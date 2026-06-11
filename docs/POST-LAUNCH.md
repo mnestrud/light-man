@@ -22,6 +22,11 @@ status boxes as items are picked up. Last reviewed: **2026-06-11**.
   `sleep_switch`) and made `profile` required on every source. **Operational note:** since Light Man no
   longer disables them, the legacy tick automation + `script.al_*` must stay registry-disabled on live
   (they already are, 2026-06-10).
+- [x] **Dashboard schema migration (Phase 1).** *(Done 2026-06-11, v0.6.0.)* Landed the reconciled data
+  model (top-level curve library, curve-bearing source groups, first-class rooms, zones referencing room
+  sensors, sleep block) in `models.py` + `light_man_config.json` (seed_version 8). `config_loader.py` derives
+  the unchanged runtime view, so `coordinator.py`/`push.py` are untouched and addressing is byte-identical
+  (`tests/test_seed_equivalence.py`). Next: Phase 2 (panel + read-only).
 - [ ] **Web control panel (self-hosted, sidebar app).** A standalone HTML/JS app in the HA left sidebar —
   like Zigbee2MQTT / Node-RED present their own UIs — not a Lovelace dashboard. The integration registers
   a custom **panel** and serves the SPA + a backend **API** (HTTP views for Store config read/write +
