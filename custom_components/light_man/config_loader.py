@@ -31,6 +31,7 @@ from .const import (
     CONF_STAGE_DELAY,
     CONF_SWEEP,
     CONF_SWITCHES,
+    CONF_TOPIC,
     DEFAULT_COLOR_MODE,
     DEFAULT_OCCUPANCY_KEY,
     DEFAULT_OCCUPANCY_TRANSITION_S,
@@ -212,6 +213,36 @@ def _validate_sweep(
     return stages
 
 
+def _validate_sensor(
+    zone_key: str,
+    name: str,
+    raw: object,
+    source_keys: set[str],
+    issues: list[str],
+) -> OccupancySensor | None:
+    """Validate one named sensor ``{topic, occupancy_key?, sweep}``; None if invalid.
+
+    ``occupancy_key`` is per-sensor so two sensors can share a ``topic`` while
+    watching different mmwave areas (e.g. ``area1occupancy`` / ``area2occupancy``)
+    as independent triggers.
+    """
+    if not isinstance(raw, dict):
+        return None
+    topic = raw.get(CONF_TOPIC)
+    if not isinstance(topic, str) or not topic:
+        issues.append(f"occupancy.{zone_key}.{name}: sensor missing topic")
+        return None
+    sweep = _validate_sweep(zone_key, raw.get(CONF_SWEEP, []), source_keys, issues)
+    if not sweep:
+        return None
+    key = raw.get(CONF_OCCUPANCY_KEY, DEFAULT_OCCUPANCY_KEY)
+    return OccupancySensor(
+        topic=topic,
+        occupancy_key=key if isinstance(key, str) and key else DEFAULT_OCCUPANCY_KEY,
+        sweep=sweep,
+    )
+
+
 def _validate_occupancy(
     raw: dict[str, object], source_keys: set[str], issues: list[str]
 ) -> dict[str, OccupancyZone]:
@@ -228,14 +259,12 @@ def _validate_occupancy(
         sensors: dict[str, OccupancySensor] = {}
         raw_sensors = zone_raw.get(CONF_SENSORS, {})
         if isinstance(raw_sensors, dict):
-            for topic, sensor_raw in raw_sensors.items():
-                if not isinstance(sensor_raw, dict):
-                    continue
-                sweep = _validate_sweep(
-                    zone_key, sensor_raw.get(CONF_SWEEP, []), source_keys, issues
+            for name, sensor_raw in raw_sensors.items():
+                sensor = _validate_sensor(
+                    zone_key, name, sensor_raw, source_keys, issues
                 )
-                if sweep:
-                    sensors[topic] = OccupancySensor(sweep=sweep)
+                if sensor is not None:
+                    sensors[name] = sensor
         if not sensors:
             issues.append(f"occupancy.{zone_key}: no valid sensors/sweeps")
             continue
@@ -245,12 +274,8 @@ def _validate_occupancy(
             if isinstance(raw_off, list)
             else []
         )
-        key = zone_raw.get(CONF_OCCUPANCY_KEY, DEFAULT_OCCUPANCY_KEY)
         off_trans = zone_raw.get(CONF_OFF_TRANSITION, DEFAULT_OCCUPANCY_TRANSITION_S)
         zones[zone_key] = OccupancyZone(
-            occupancy_key=key
-            if isinstance(key, str) and key
-            else DEFAULT_OCCUPANCY_KEY,
             sensors=sensors,
             off_lights=off_lights,
             off_transition_s=float(off_trans)

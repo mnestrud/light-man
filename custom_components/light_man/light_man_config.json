@@ -1,5 +1,5 @@
 {
-  "seed_version": 4,
+  "seed_version": 5,
   "push_interval_s": 30,
   "sources": {
     "overhead": {
@@ -145,10 +145,11 @@
   },
   "occupancy": {
     "hallway": {
-      "occupancy_key": "occupancy",
       "off_lights": ["zigbee2mqtt/zgb_hallwayf/set"],
       "sensors": {
-        "zigbee2mqtt/Hallway Light Switch East New New mmwave": {
+        "hall_east": {
+          "topic": "zigbee2mqtt/Hallway Light Switch East New New mmwave",
+          "occupancy_key": "area1occupancy",
           "sweep": [
             {"lights": [
               {"set_topic": "zigbee2mqtt/Hallway Light East Uplight/set", "source": "hallway_up"},
@@ -164,7 +165,9 @@
             ]}
           ]
         },
-        "zigbee2mqtt/Hall Smart Switch West New mmwave": {
+        "hall_west": {
+          "topic": "zigbee2mqtt/Hall Smart Switch West New mmwave",
+          "occupancy_key": "area1occupancy",
           "sweep": [
             {"lights": [
               {"set_topic": "zigbee2mqtt/Hallway Light West Uplight/set", "source": "hallway_up"},
@@ -183,15 +186,18 @@
       }
     },
     "stairwell": {
-      "occupancy_key": "occupancy",
       "off_lights": ["zigbee2mqtt/zgb_stairwell/set"],
       "sensors": {
-        "zigbee2mqtt/Stairwell Top Smart Switch mmwave": {
+        "stairwell_top": {
+          "topic": "zigbee2mqtt/Stairwell Top Smart Switch mmwave",
+          "occupancy_key": "area1occupancy",
           "sweep": [
             {"lights": [{"set_topic": "zigbee2mqtt/zgb_stairwell/set", "source": "overhead"}]}
           ]
         },
-        "zigbee2mqtt/Hall Smart Switch West New mmwave": {
+        "hall_west": {
+          "topic": "zigbee2mqtt/Hall Smart Switch West New mmwave",
+          "occupancy_key": "area1occupancy",
           "sweep": [
             {"lights": [{"set_topic": "zigbee2mqtt/zgb_stairwell/set", "source": "overhead"}]}
           ]

@@ -18,7 +18,7 @@ import asyncio
 import json
 import logging
 from datetime import datetime, timedelta
-from typing import TYPE_CHECKING, Any, TypedDict
+from typing import TYPE_CHECKING, Any, NamedTuple, TypedDict
 
 from homeassistant.components import mqtt
 from homeassistant.const import STATE_UNAVAILABLE, STATE_UNKNOWN
@@ -49,6 +49,7 @@ from .const import (
     CONF_SOURCES,
     CONF_STAGE_DELAY,
     CONF_SWEEP,
+    CONF_TOPIC,
     CONF_TRANSITION,
     DEFAULT_OCCUPANCY_KEY,
     DEFAULT_OCCUPANCY_TRANSITION_S,
@@ -90,6 +91,23 @@ if TYPE_CHECKING:
     from .modes import ModeManager
 
 _LOGGER = logging.getLogger(__name__)
+
+
+class _Binding(NamedTuple):
+    """One occupancy trigger: a named sensor's ``(zone, topic, key, sweep)``.
+
+    ``zone``/``name`` identify it; ``topic`` is the mmwave device topic and
+    ``key`` the JSON field watched on it (``occupancy`` aggregate or a specific
+    ``areaNoccupancy``). Multiple bindings can share a ``topic`` with different
+    ``key``s, each tracking its own edge + sweep — so a second mmwave area is
+    just another binding, not a refactor.
+    """
+
+    zone: str
+    name: str
+    topic: str
+    key: str
+    sweep: list[OccupancyStage]
 
 
 class CoordinatorData(TypedDict):
@@ -142,14 +160,29 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         self.sleep_on = False
         self._sleep_start = 0.0
         self._sleep_changed_at: datetime | None = None
-        # Occupancy: zone defs + a sensor-topic->zones index + per-sensor state +
-        # in-flight sweep tasks (keyed per zone+sensor for restart-on-retrigger).
+        # Occupancy: flatten zones into named (zone, sensor) bindings, indexed by
+        # topic (for the message handler) and by zone (for the all-clear check).
+        # Edge state + in-flight sweeps are keyed per binding so two areas of one
+        # switch (same topic, different key) trigger independently.
         self._occupancy = config[CONF_OCCUPANCY]
-        self._mmwave_zones: dict[str, list[str]] = {}
+        self._bindings: list[_Binding] = []
         for zone_key, zone in self._occupancy.items():
-            for topic in zone.get(CONF_SENSORS, {}):
-                self._mmwave_zones.setdefault(topic, []).append(zone_key)
-        self._sensor_occupied: dict[str, bool] = {}
+            for name, sensor in zone.get(CONF_SENSORS, {}).items():
+                self._bindings.append(
+                    _Binding(
+                        zone=zone_key,
+                        name=name,
+                        topic=sensor[CONF_TOPIC],
+                        key=sensor.get(CONF_OCCUPANCY_KEY, DEFAULT_OCCUPANCY_KEY),
+                        sweep=sensor[CONF_SWEEP],
+                    )
+                )
+        self._bindings_by_topic: dict[str, list[_Binding]] = {}
+        self._bindings_by_zone: dict[str, list[_Binding]] = {}
+        for binding in self._bindings:
+            self._bindings_by_topic.setdefault(binding.topic, []).append(binding)
+            self._bindings_by_zone.setdefault(binding.zone, []).append(binding)
+        self._sensor_occupied: dict[tuple[str, str], bool] = {}
         self._sweep_tasks: dict[tuple[str, str], asyncio.Task[None]] = {}
         self.diagnostics: dict[str, Any] = {
             "issues": validated.issues,
@@ -175,7 +208,7 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
                     self.hass, base + ACTION_SUFFIX, self._handle_message
                 )
             )
-        for topic in self._mmwave_zones:
+        for topic in self._bindings_by_topic:
             self._unsubs.append(
                 await mqtt.async_subscribe(self.hass, topic, self._handle_occupancy)
             )
@@ -526,37 +559,43 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
     # --- occupancy (mmwave presence -> directional sweep, MQTT-driven) ------
 
     async def _handle_occupancy(self, msg: mqtt.ReceiveMessage) -> None:
-        """Run a sensor's sweep on its occupied edge; clear the zone on all-off."""
-        zones = self._mmwave_zones.get(msg.topic)
-        if not zones or not self.push_enabled:
+        """Run each binding's sweep on its occupied edge; clear the zone on all-off.
+
+        A topic may carry several bindings (e.g. ``area1occupancy`` and
+        ``area2occupancy`` on one switch); each reads its own field, tracks its
+        own edge, and drives its own sweep independently.
+        """
+        bindings = self._bindings_by_topic.get(msg.topic)
+        if not bindings or not self.push_enabled:
             return
         data = _parse_json(str(msg.payload))
         if data is None:
             return
-        key = self._occupancy[zones[0]].get(CONF_OCCUPANCY_KEY, DEFAULT_OCCUPANCY_KEY)
-        value = data.get(key)
-        if value is None:
-            return  # a non-occupancy update on the same topic (state/action)
-        occupied = _truthy(value)
-        if occupied == self._sensor_occupied.get(msg.topic):
-            return  # no edge
-        self._sensor_occupied[msg.topic] = occupied
-        for zone_key in zones:
+        for binding in bindings:
+            value = data.get(binding.key)
+            if value is None:
+                continue  # this binding's field is absent from this message
+            occupied = _truthy(value)
+            bid = (binding.zone, binding.name)
+            if occupied == self._sensor_occupied.get(bid):
+                continue  # no edge for this binding
+            self._sensor_occupied[bid] = occupied
             if occupied:
-                self._start_sweep(zone_key, msg.topic)
+                self._start_sweep(binding)
             else:
-                await self._maybe_clear_zone(zone_key)
+                await self._maybe_clear_zone(binding.zone)
 
-    def _start_sweep(self, zone_key: str, topic: str) -> None:
-        """Launch a sensor's sweep as a task, restarting any in-flight run."""
-        sweep = self._occupancy[zone_key][CONF_SENSORS][topic][CONF_SWEEP]
-        task_key = (zone_key, topic)
+    def _start_sweep(self, binding: _Binding) -> None:
+        """Launch a binding's sweep as a task, restarting any in-flight run."""
+        task_key = (binding.zone, binding.name)
         running = self._sweep_tasks.get(task_key)
         if running is not None and not running.done():
             running.cancel()
-        self.diagnostics["occupancy"][zone_key] = True
+        self.diagnostics["occupancy"][binding.zone] = True
         self._sweep_tasks[task_key] = self._entry.async_create_background_task(
-            self.hass, self._run_sweep(sweep), name=f"lm_sweep_{zone_key}_{topic}"
+            self.hass,
+            self._run_sweep(binding.sweep),
+            name=f"lm_sweep_{binding.zone}_{binding.name}",
         )
 
     async def _run_sweep(self, sweep: list[OccupancyStage]) -> None:
@@ -576,9 +615,12 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
                 )
 
     async def _maybe_clear_zone(self, zone_key: str) -> None:
-        """Turn the zone's off_lights off once all its sensors report no presence."""
+        """Turn the zone's off_lights off once all its bindings report no presence."""
         zone = self._occupancy[zone_key]
-        if any(self._sensor_occupied.get(t) for t in zone.get(CONF_SENSORS, {})):
+        if any(
+            self._sensor_occupied.get((b.zone, b.name))
+            for b in self._bindings_by_zone.get(zone_key, [])
+        ):
             return
         self.diagnostics["occupancy"][zone_key] = False
         transition = zone.get(CONF_OFF_TRANSITION, DEFAULT_OCCUPANCY_TRANSITION_S)

@@ -37,11 +37,22 @@ def test_profile_passes_through_untouched() -> None:
 def test_occupancy_passes_through() -> None:
     result = validate_config(copy.deepcopy(SEED))
     zone = result.config["occupancy"]["hallway"]
-    assert zone["occupancy_key"] == "occupancy"
     assert zone["off_lights"] == [HALL_OFF]
-    east = zone["sensors"][MMWAVE_EAST]["sweep"]
-    assert east[0]["lights"][0]["source"] == "hallway_up"
-    assert east[1]["delay_s"] == 1.0  # the staggered stage's lead-in delay
+    east = zone["sensors"]["east"]
+    assert east["topic"] == MMWAVE_EAST
+    assert east["occupancy_key"] == "occupancy"  # default when omitted
+    assert east["sweep"][0]["lights"][0]["source"] == "hallway_up"
+    assert east["sweep"][1]["delay_s"] == 1.0  # the staggered stage's lead-in delay
+
+
+def test_occupancy_per_sensor_area_keys() -> None:
+    # Two sensors on one switch watch distinct mmwave areas independently.
+    sensors = validate_config(copy.deepcopy(SEED)).config["occupancy"]["porch"][
+        "sensors"
+    ]
+    assert sensors["porch_a1"]["occupancy_key"] == "area1occupancy"
+    assert sensors["porch_a2"]["occupancy_key"] == "area2occupancy"
+    assert sensors["porch_a1"]["topic"] == sensors["porch_a2"]["topic"]
 
 
 def test_occupancy_non_dict_is_soft_issue() -> None:
@@ -57,21 +68,34 @@ def test_occupancy_bad_zones_dropped_with_issues() -> None:
     cfg["occupancy"] = {
         "z1": "not-a-mapping",
         "z2": {"sensors": {}},
-        "z3": {"sensors": {"t": {"sweep": [{"lights": [{"set_topic": "", "s": 1}]}]}}},
+        "z3": {
+            "sensors": {
+                "s": {"topic": "t", "sweep": [{"lights": [{"set_topic": "", "s": 1}]}]}
+            }
+        },
         "z4": {
             "sensors": {
-                "t": {"sweep": [{"lights": [{"set_topic": "x", "source": "ghost"}]}]}
+                "s": {
+                    "topic": "t",
+                    "sweep": [{"lights": [{"set_topic": "x", "source": "ghost"}]}],
+                }
             }
         },
         "z5": {"sensors": "not-a-dict"},
-        "z6": {"sensors": {"t": {"sweep": "not-a-list"}}},
-        "z7": {"sensors": {"t": {"sweep": ["bad-stage", {"lights": 5}]}}},
-        "z8": {"sensors": {"t": "not-a-mapping"}},
-        "z9": {"sensors": {"t": {"sweep": [{"lights": ["not-a-dict"]}]}}},
+        "z6": {"sensors": {"s": {"topic": "t", "sweep": "not-a-list"}}},
+        "z7": {"sensors": {"s": {"topic": "t", "sweep": ["bad-stage", {"lights": 5}]}}},
+        "z8": {"sensors": {"s": "not-a-mapping"}},
+        "z9": {"sensors": {"s": {"topic": "t", "sweep": [{"lights": ["not-a-dict"]}]}}},
+        "z10": {
+            "sensors": {
+                "s": {"sweep": [{"lights": [{"set_topic": "x", "source": "overhead"}]}]}
+            }
+        },
     }
     result = validate_config(cfg)
     assert result.config["occupancy"] == {}  # every zone invalid
     assert len([i for i in result.issues if "occupancy" in i]) >= 3
+    assert any("missing topic" in i for i in result.issues)  # z10
 
 
 def test_occupancy_defaults_applied() -> None:
@@ -79,12 +103,15 @@ def test_occupancy_defaults_applied() -> None:
     cfg["occupancy"] = {
         "z": {
             "sensors": {
-                "t": {"sweep": [{"lights": [{"set_topic": "x", "source": "overhead"}]}]}
+                "s": {
+                    "topic": "t",
+                    "sweep": [{"lights": [{"set_topic": "x", "source": "overhead"}]}],
+                }
             }
         }
     }
     zone = validate_config(cfg).config["occupancy"]["z"]
-    assert zone["occupancy_key"] == "occupancy"  # default key
+    assert zone["sensors"]["s"]["occupancy_key"] == "occupancy"  # default key
     assert zone["off_transition_s"] == 1.5  # default off transition
     assert zone["off_lights"] == []  # none configured
 

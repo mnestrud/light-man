@@ -43,9 +43,14 @@ MMWAVE_EAST = "zigbee2mqtt/Hall East mmwave"
 MMWAVE_WEST = "zigbee2mqtt/Hall West mmwave"
 HALL_CENTER_SET = "zigbee2mqtt/Hall Center/set"
 HALL_OFF = "zigbee2mqtt/zgb_hallwayf/set"
+# A single mmwave switch whose two detection areas drive independent triggers.
+MMWAVE_PORCH = "zigbee2mqtt/Porch mmwave"
+PORCH_A1_SET = "zigbee2mqtt/zgb_porch_a1/set"
+PORCH_A2_SET = "zigbee2mqtt/zgb_porch_a2/set"
+PORCH_OFF = "zigbee2mqtt/zgb_porch/set"
 
 SEED: dict[str, Any] = {
-    "seed_version": 4,
+    "seed_version": 5,
     "push_interval_s": 30,
     "sources": {
         "overhead": {
@@ -99,10 +104,10 @@ SEED: dict[str, Any] = {
     },
     "occupancy": {
         "hallway": {
-            "occupancy_key": "occupancy",
             "off_lights": [HALL_OFF],
             "sensors": {
-                MMWAVE_EAST: {
+                "east": {
+                    "topic": MMWAVE_EAST,
                     "sweep": [
                         {"lights": [{"set_topic": HALL_UP, "source": "hallway_up"}]},
                         {
@@ -111,16 +116,37 @@ SEED: dict[str, Any] = {
                                 {"set_topic": HALL_CENTER_SET, "source": "hallway_up"}
                             ],
                         },
-                    ]
+                    ],
                 },
-                MMWAVE_WEST: {
+                "west": {
+                    "topic": MMWAVE_WEST,
                     "sweep": [
                         {
                             "lights": [
                                 {"set_topic": HALL_CENTER_SET, "source": "hallway_up"}
                             ]
                         }
-                    ]
+                    ],
+                },
+            },
+        },
+        # One physical switch, two detection areas wired as independent triggers.
+        "porch": {
+            "off_lights": [PORCH_OFF],
+            "sensors": {
+                "porch_a1": {
+                    "topic": MMWAVE_PORCH,
+                    "occupancy_key": "area1occupancy",
+                    "sweep": [
+                        {"lights": [{"set_topic": PORCH_A1_SET, "source": "overhead"}]}
+                    ],
+                },
+                "porch_a2": {
+                    "topic": MMWAVE_PORCH,
+                    "occupancy_key": "area2occupancy",
+                    "sweep": [
+                        {"lights": [{"set_topic": PORCH_A2_SET, "source": "overhead"}]}
+                    ],
                 },
             },
         },

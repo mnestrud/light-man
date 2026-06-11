@@ -60,22 +60,32 @@ class OccupancyStage(TypedDict, total=False):
     lights: list[OccupancyLight]
 
 
-class OccupancySensor(TypedDict):
-    """A sensor's directional sweep — the ordered stages it lights on presence."""
+class OccupancySensor(TypedDict, total=False):
+    """One presence binding: a field on an mmwave topic + the sweep it runs.
 
+    ``topic`` is the Z2M device topic; ``occupancy_key`` is the JSON field
+    watched (default ``"occupancy"`` — the device's aggregate; set to e.g.
+    ``"area1occupancy"`` to watch a single mmwave detection area). Each sensor
+    runs its own ``sweep`` on its occupied edge. Two named sensors may share a
+    ``topic`` with different ``occupancy_key``s to monitor several areas of one
+    switch as independent triggers (no code change — just another sensor entry).
+    """
+
+    topic: str
+    occupancy_key: str  # JSON field in the mmwave payload (default "occupancy")
     sweep: list[OccupancyStage]
 
 
 class OccupancyZone(TypedDict, total=False):
-    """A presence zone: its mmwave sensors, their sweeps, and the off targets.
+    """A presence zone: its named mmwave sensors and the off targets.
 
-    Each sensor runs its own ``sweep`` on its occupied edge (so the lights come
-    on staggered in the direction of approach). The zone is cleared when **all**
-    its sensors report no presence, at which point ``off_lights`` turn off.
+    Each sensor (keyed by an arbitrary name) runs its own ``sweep`` on its
+    occupied edge (so the lights come on staggered in the direction of
+    approach). The zone is cleared when **all** its sensors report no presence,
+    at which point ``off_lights`` turn off.
     """
 
-    occupancy_key: str  # JSON field in the mmwave payload (default "occupancy")
-    sensors: dict[str, OccupancySensor]  # mmwave topic -> its sweep
+    sensors: dict[str, OccupancySensor]  # sensor name -> its binding
     off_lights: list[str]  # /set topics turned off on all-clear
     off_transition_s: float
 

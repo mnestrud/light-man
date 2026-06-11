@@ -32,8 +32,12 @@ from .conftest import (
     LR_SET,
     LR_SWITCH,
     MMWAVE_EAST,
+    MMWAVE_PORCH,
     MMWAVE_WEST,
     OVERHEAD_ALL,
+    PORCH_A1_SET,
+    PORCH_A2_SET,
+    PORCH_OFF,
     SEED,
     TICK_CALLS_KEY,
     FakeStore,
@@ -625,15 +629,55 @@ async def test_occupancy_stays_on_until_all_clear(
     assert HALL_OFF not in published(mqtt_mock)
 
 
+async def test_occupancy_areas_on_one_switch_are_independent(
+    hass: HomeAssistant, coordinator: Coord, mqtt_mock: Any
+) -> None:
+    """Two mmwave areas on one topic trigger and clear as independent sensors."""
+    await coordinator.async_set_push_enabled(enabled=True)
+    await hass.async_block_till_done()
+    mqtt_mock.async_publish.reset_mock()
+
+    async def _fire_payload(payload: dict[str, Any]) -> None:
+        with patch("custom_components.light_man.coordinator.asyncio.sleep", _instant):
+            _fire(hass, MMWAVE_PORCH, payload)
+            await hass.async_block_till_done()
+            pending = [t for t in coordinator._sweep_tasks.values() if not t.done()]
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+            await hass.async_block_till_done()
+
+    # area1 alone -> only area1's light; the zone is not cleared.
+    await _fire_payload({"area1occupancy": True})
+    pubs = published(mqtt_mock)
+    assert PORCH_A1_SET in pubs
+    assert PORCH_A2_SET not in pubs
+    assert PORCH_OFF not in pubs
+
+    # area2 turns on -> its own light fires independently.
+    mqtt_mock.async_publish.reset_mock()
+    await _fire_payload({"area2occupancy": True})
+    assert PORCH_A2_SET in published(mqtt_mock)
+
+    # area1 clears but area2 still occupied -> zone stays on.
+    mqtt_mock.async_publish.reset_mock()
+    await _fire_payload({"area1occupancy": False})
+    assert PORCH_OFF not in published(mqtt_mock)
+
+    # area2 clears too -> now every binding is clear, so the zone turns off.
+    mqtt_mock.async_publish.reset_mock()
+    await _fire_payload({"area2occupancy": False})
+    assert published(mqtt_mock)[PORCH_OFF] == {"state": "OFF", "transition": 1.5}
+
+
 async def test_occupancy_sweep_restarts_on_retrigger(
     hass: HomeAssistant, coordinator: Coord, mqtt_mock: Any
 ) -> None:
     """A new occupied edge cancels the in-flight sweep before starting a fresh one."""
     await coordinator.async_set_push_enabled(enabled=True)
-    task_key = ("hallway", MMWAVE_EAST)
+    task_key = ("hallway", "east")
     stuck = hass.async_create_task(asyncio.Event().wait())
     coordinator._sweep_tasks[task_key] = stuck
-    coordinator._sensor_occupied[MMWAVE_EAST] = False
+    coordinator._sensor_occupied[task_key] = False
     await _walk(hass, coordinator, MMWAVE_EAST, occupied=True)
     assert stuck.cancelled()
     assert coordinator._sweep_tasks[task_key] is not stuck

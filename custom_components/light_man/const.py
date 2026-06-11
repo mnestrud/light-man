@@ -16,7 +16,7 @@ CONFIG_STORE_VERSION: Final = 1
 # Content version of the bundled seed. Bump when the shipped light_man_config.json
 # gains new structure (e.g. Phase 2 per-source profiles) so installs whose Store
 # predates it re-seed from the bundle instead of running a stale config.
-BUNDLED_SEED_VERSION: Final = 4
+BUNDLED_SEED_VERSION: Final = 5
 # Per-room mode intent; must survive restarts so a held look is not dropped.
 MODES_STORE_KEY: Final = "light_man_modes"
 MODES_STORE_VERSION: Final = 1
@@ -118,6 +118,7 @@ STATE_OFF: Final = "OFF"
 CONF_OCCUPANCY: Final = "occupancy"
 CONF_OCCUPANCY_KEY: Final = "occupancy_key"
 CONF_SENSORS: Final = "sensors"
+CONF_TOPIC: Final = "topic"
 CONF_SWEEP: Final = "sweep"
 CONF_STAGE_DELAY: Final = "delay_s"
 CONF_LIGHTS: Final = "lights"
