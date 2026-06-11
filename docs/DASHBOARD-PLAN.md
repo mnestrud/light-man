@@ -98,6 +98,113 @@ orphan sensors, sweep fixtures owned by no room, **`off_lights` resolving to no 
 `hue_native_control`, switch bound to a different light group than it governs, bulb in a per-room but not the
 consolidated group, etc.
 
+## Wireframes (Phase-1 deliverable)
+
+Low-fidelity, to lock layout + interaction — not visual design. Grounded in the real seed (merged Kitchen,
+the 4 curves, the Hallway/Stairwell occupancy). Lit + hand-rolled SVG/canvas for the viz; stage-then-Save.
+
+### 1. Overview — live state + global controls
+```
++- Light Man -------------------------------- [Rooms][Curves][Occupancy][Activity] -+
+|                                                                                    |
+|  Push [ ON o]    Sleep [o OFF]  ramp 90m/30m   [ Force push ]  [ Clear holds ]     |
+|                                                                   (!) 2 alerts >   |
+|  Live targets (source groups)                                                      |
+|  +--------------+ +--------------+ +--------------+ +--------------+               |
+|  | Overhead     | | Accent       | | Hallway Up   | | Hallway Down |               |
+|  | 90%  5200K   | | 28%  4100K   | | 90%  #sky    | | 75%  4800K   |               |
+|  | adaptive     | | adaptive     | | rgb          | | color_temp   |               |
+|  +--------------+ +--------------+ +--------------+ +--------------+               |
+|                                                                                    |
+|  Active holds (2)                                                                  |
+|   - Kitchen / Overhead   night    clears 12:00am   [release]                       |
+|   - Office  / Overhead   manual   clears 12:00am   [release]                       |
++------------------------------------------------------------------------------------+
+```
+
+### 2. Rooms — primary "tune this room" surface
+```
++- Rooms ----------------------------------------------------------------------------+
+|  [ search... ]                                                                     |
+|  +- Kitchen ----------------------------------------------------------------------+|
+|  | Lights                                                                         ||
+|  |   Overhead (zgb_kitchen)         curve [ daylight_standard v ]  (group-wide)   ||
+|  |   Island   (zgb_kitchen_island)  curve [ accent_dim v ]         (group-wide)   ||
+|  | Switches                                                                       ||
+|  |   Kitchen Overhead Switch  governs > Overhead  . bound: zgb_kitchen        (ok)||
+|  |   Kitchen Island Switch    governs > Island    . bound: zgb_kitchen_island (ok)||
+|  | Sensors  (none)                                                                ||
+|  +--------------------------------------------------------------------------------+|
+|  +- Hallway ---------------------------------------------------------------------+|
+|  | Lights  6 fixtures / 2 groups                                                  ||
+|  |   *_up   (zgb_hallway_up)    curve [ hallway_sky v ]                           ||
+|  |   *_down (zgb_hallway_down)  curve [ hallway_ct_winddown v ]                   ||
+|  | Switches  (none holdable)                                                      ||
+|  | Sensors                                                                        ||
+|  |   hall_east  ->  Hallway zone                                                  ||
+|  |   hall_west  ->  Hallway zone, Stairwell zone   (cross-room)                   ||
+|  +--------------------------------------------------------------------------------+|
+|  (!) Office: switch bound to zgb_office but governs Overhead/zgb_office_overhead   |
++------------------------------------------------------------------------------------+
+```
+Note: the curve dropdown edits the **source group's** curve (S1) — "group-wide", with a Used-by warning;
+per-light/room override is deferred (a disabled "+ override" affordance hints at it).
+
+### 3. Curves — library + editor/visualizer
+```
++- Curves ---------------------------------------------------------------------------+
+|  Library                       |  Editor - daylight_standard                       |
+|  +---------------------------+ |  Used by: Overhead group (10 rooms)               |
+|  | > daylight_standard       | |  Season: (Summer) (Equinox*) (Winter)             |
+|  |   accent_dim              | |  br% |                 _________                   |
+|  |   hallway_sky             | |   90 |          ______/                           |
+|  |   hallway_ct_winddown     | |   30 |____ ____/                                  |
+|  | [+ new] [dup] [delete]    | |      +--+-----+-----+-----+--  elevation          |
+|  +---------------------------+ |       -18    0    35    71                        |
+|                                |  color |warm|...gradient...|cool|                  |
+|                                |  Brightness  min[30] max[90] sat[0.5] nfloor[30]   |
+|                                |  Day color   (CT ramp*) (fixed RGB)               |
+|                                |              min_ct[2700] max_ct[6500] dusk[2200] |
+|                                |  Sleep       br[30] (CT*)(RGB) ct[2700]           |
+|                                |  Day window  [x] 08:00-17:00                       |
+|                                |  ~ ramp preview ~   in 90m / out 30m              |
+|                                |                            [ Cancel ] [ Save ]    |
++------------------------------------------------------------------------------------+
+```
+For an RGB curve (`hallway_sky`) the color strip is a flat swatch and the CT knobs (`min_ct/max_ct/dusk`)
+grey out; Day color toggle sits on "fixed RGB" with a color picker.
+
+### 4. Occupancy — zones + sweep builder
+```
++- Occupancy ------------------------------------------------------------------------+
+|  Zones                  |  Hallway zone                                            |
+|  +-------------------+   |  Sensors:  hall_east (Hallway)                          |
+|  | > Hallway         |   |            hall_west (Hallway)  -> also Stairwell        |
+|  |   Stairwell       |   |  Off when: all sensors clear                            |
+|  +-------------------+   |  Off targets: zgb_hallwayf   transition 1.5s            |
+|                                                                                    |
+|  Sweep - hall_east                                       [ mirror -> hall_west ]   |
+|  +- stage 1 --+  +1.0s  +- stage 2 --+  +1.0s  +- stage 3 --+                      |
+|  | east_up    | ------> | center_up  | ------> | west_up    |                      |
+|  | east_down  |         | center_down|         | west_down  |                      |
+|  +------------+         +------------+         +------------+                      |
+|  [+ fixture]   drag from Hallway v                              [ > replay ]       |
++------------------------------------------------------------------------------------+
+```
+
+### 5. Activity / log
+```
++- Activity -------------------------------------------------------------------------+
+|  [ all v ]  [ || pause ]                                              live o       |
+|  12:04:01  set   zgb_overhead_all     bri 254  ct 5200K                            |
+|  12:04:01  set   zgb_accent_all       bri 71   ct 4100K                            |
+|  12:04:01  skip  zgb_hallway_up       (dedup, unchanged)                           |
+|  12:03:58  hold  kitchen/overhead -> night   (tap config_single)                   |
+|  12:03:31  occ   Hallway hall_east occupied -> sweep x3                            |
+|  (!)12:03:02 issue  sweep light 'stairwell.overhead' owned by no room              |
++------------------------------------------------------------------------------------+
+```
+
 ## Build pipeline
 
 - A small frontend in `frontend/` (Lit or Preact or vanilla + Vite). `npm run build` emits a hashed
