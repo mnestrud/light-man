@@ -73,13 +73,16 @@ editor — see data-model.md S3):
    **bound** to in Z2M. **Sensors** the room owns, cross-room edges flagged ("also feeds the Stairwell
    zone"). Inline linter chips on anything broken.
 3. **Curves (library + editor)** — named, reusable curves with a **"Used by"** backref (which source groups →
-   blast radius). **Viz (shipped v0.7.0, read-only):** a **time-of-day** brightness arc — rise → peak →
+   blast radius). **Viz (shipped v0.7.0–0.7.3, read-only):** a **time-of-day** brightness arc — rise → peak →
    **sunset wind-down** — computed *server-side by the real engine* (`coordinator.curve_previews()` samples
    today's sun path and runs `compute_target`, so the picture matches what gets published, day-window and all),
    with x-axis labels at **dawn/sunrise/noon/sunset/dusk** (today's actual times), a color strip following the
-   day, and the **sleep target as a reference line**. **Day color** and **Sleep color** are each a mode toggle
-   (CT ramp ↔ fixed RGB) — what separates `hallway_up` (fixed sky-blue→orange) from `hallway_down` (CT
-   day→fixed purple); the **per-curve sleep target lives here** (S3).
+   day (drawn just above the axis so it can't overwrite the labels), and the **sleep target as a reference
+   line**. **Inflection markers** (`coordinator._curve_inflections`, read from the brightness series): dots +
+   a one-line legend giving the **ramp-up span** (floor→peak), **solar noon**, and the **ramp-down span**
+   (peak→floor — its end is the daily minimum), each with times + brightness range. **Day color** and **Sleep
+   color** are each a mode toggle (CT ramp ↔ fixed RGB) — what separates `hallway_up` (fixed sky-blue→orange)
+   from `hallway_down` (CT day→fixed purple); the **per-curve sleep target lives here** (S3).
    **Phase 3 — what the editor will make configurable (per curve):**
    - **Brightness:** `min_br`, `max_br`, `sat` (how early in the morning it saturates to full), `night_floor_br`.
    - **Day color:** mode (CT ramp ↔ fixed RGB); CT → `min_ct`/`max_ct`/`dusk_floor_ct`; RGB → `base_rgb` swatch.

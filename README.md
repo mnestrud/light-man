@@ -17,9 +17,10 @@ bindings, `hue_native_control`, and the Inovelli Smart Bulb Mode bindings.
   then floods the consolidated Zigbee group, addressing **per-light-group** only when one diverges
   (held/off). The engine is the sole value source — every source group carries a curve.
 - **Per-room holds** driven by explicit Inovelli paddle actions: a Config tap holds the room at the
-  engine's **night** (single) or a distinct forced **day** look (double); a single up/down tap releases
-  it back to adaptive; a held-dim freezes it (the hardware binding owns the ramp). Holds auto-expire at
-  the next solar midnight and survive restarts.
+  engine's **night** (single) or a distinct forced **day** look (double); a single up/down tap — **or
+  switching the light off** — releases it back to adaptive; a held-dim freezes it (the hardware binding
+  owns the ramp). Holds auto-expire at the next solar midnight and survive restarts (any hold orphaned by
+  a topology change is pruned on load).
 - **Global sleep overlay.** A sleep toggle ramps the whole house into each source's per-source sleep
   target (warm/dim) over a configurable ramp (default 90 min in / 30 min out), and back out on wake.
 - **mmwave occupancy.** Subscribes to each Inovelli Blue mmwave sensor's `occupancy` over MQTT and runs a

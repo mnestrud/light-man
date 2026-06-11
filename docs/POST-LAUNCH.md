@@ -27,11 +27,18 @@ status boxes as items are picked up. Last reviewed: **2026-06-11**.
   sensors, sleep block) in `models.py` + `light_man_config.json` (seed_version 8). `config_loader.py` derives
   the unchanged runtime view, so `coordinator.py`/`push.py` are untouched and addressing is byte-identical
   (`tests/test_seed_equivalence.py`). Next: Phase 2 (panel + read-only).
-- [x] **Web control panel — read-only (Phase 2).** *(Done 2026-06-11, v0.7.0.)* `panel_custom` sidebar web
-  component (`panel/index.js`, dependency-free vanilla JS) + a read-only `websocket_api` (`light_man/config`,
-  `light_man/subscribe`), both admin-gated. 5 tabs: Overview / Rooms / Curves (SVG viz) / Occupancy /
-  Activity. The panel is optional (guarded on `frontend`/`websocket_api`). Plan:
+- [x] **Web control panel — read-only (Phase 2).** *(Done 2026-06-11, v0.7.0; refined through v0.7.3.)*
+  `panel_custom` sidebar web component (`panel/index.js`, dependency-free vanilla JS) + a read-only
+  `websocket_api` (`light_man/config`, `light_man/subscribe`), both admin-gated. 5 tabs: Overview / Rooms
+  (each light's hold group + flood group) / Curves / Occupancy / Activity. The panel is optional (guarded on
+  `frontend`/`websocket_api`). The **Curves viz** is a server-computed time-of-day brightness arc (real engine
+  over today's sun path) with dawn/sunrise/noon/sunset/dusk labels, a day color strip, the sleep target line,
+  and **inflection markers** (ramp-up / solar-noon / ramp-down spans). Plan:
   [`docs/DASHBOARD-PLAN.md`](DASHBOARD-PLAN.md).
+- [x] **Hold-release fixes.** *(Done 2026-06-11, v0.7.2.)* Switching a held light **off** now releases its
+  hold (`_on_state`); orphaned holds (keys left un-mapped by a topology change, e.g. the v8 light-ref rename)
+  are **pruned at setup** (`ModeManager.prune`). See `ARCHITECTURE.md` §5.3. *(If holds should instead survive
+  an off, revert the `_on_state` release.)*
 - [ ] **Web control panel — editing + persistence (Phase 3).** The write API (config `POST` → Store),
   curve/sweep/assignment editors, Save & Export / Save As / Load config / Reset, the in-place Store
   migration (M1) + `/XF light_man_config.json` deploy exclusion, and the live linter. Replaces the static

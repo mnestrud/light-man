@@ -165,7 +165,7 @@ stale bulb NVRAM groups; the **runtime** integration just never uses it. See §8
   look. `expires_at = next solar midnight` (holds always clear overnight).
 - **Release** (on `up_single` *or* `down_single` — **either single paddle tap**): clear the hold,
   then **trigger an immediate push cycle** so the room snaps to adaptive at once (reuses the push path,
-  no bespoke single-room publish). Release is tap-driven only — never inferred from on/off state.
+  no bespoke single-room publish).
 - **TTL sweep** (piggyback the push loop) clears expired holds; info line on expiry.
 - **Holdable rooms** must have a per-room `set_topic` — without one the push cannot address around the
   room (it would fall back to the consolidated flood and hit the held bulbs). Validate the
@@ -177,6 +177,17 @@ stale bulb NVRAM groups; the **runtime** integration just never uses it. See §8
 > kitchen, the overhead switch holds only `zgb_kitchen` and the island switch only `zgb_kitchen_island` —
 > the merge does not widen the hold. Behaviourally identical to today's per-room hold (each old per-source
 > room = one light group); `switch_map` carries `(room, light_group)` instead of `(source, room)`.
+
+> **Hold-release update (v0.7.2, 2026-06-11).** Two additions to release semantics:
+> 1. **Switch-off releases a hold.** When a held light's paddle goes **OFF** (`_on_state`), the hold is
+>    cleared so a night/day look does not linger and reappear when the light is switched back on. (This is
+>    *explicit* paddle-off → release; distinct from the old, dropped behavior of *inferring* a hold from
+>    on/off bounce, which fired spuriously. Hold *arming* is still tap-only.)
+> 2. **Orphaned-hold prune at setup.** `ModeManager.prune(valid_keys)` runs in `_async_setup` against the
+>    current light-refs, dropping any persisted hold whose key no longer maps to a light — the modes Store
+>    is not migrated when the topology changes (e.g. the v8 light-ref rename), so a stale key would
+>    otherwise stay un-releasable until TTL/clear. So holds now clear on: a single tap, **switch-off**, TTL
+>    (solar midnight), `clear_holds`, or an orphaning topology change.
 
 ### 5.4 Write-on-change dedup
 Keep last-published per (source, target) in memory only; skip unchanged. Replaces
