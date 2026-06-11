@@ -54,40 +54,49 @@ a **custom integration**, so the equivalent is:
 
 ## App layout — room-centric IA
 
-The model is **room-centric** (the human mental model); curves and occupancy are sibling views; the linter
-is cross-cutting. Built on the four overlay graphs and reconciled schema in
-[`reference/data-model.md`](reference/data-model.md). Tabs:
+The model is **room-centric** (the human mental model); curves and occupancy are sibling library/visual
+views; the linter is cross-cutting. Built on the four overlay graphs and reconciled schema in
+[`reference/data-model.md`](reference/data-model.md). **5 tabs** (Sleep dissolved into Overview + the Curve
+editor — see data-model.md S3):
 
-1. **Overview** — live house state: per-group current target (brightness/color/mode) updating in real time,
-   push on/off, sleep state + ramp progress, active holds with countdowns, big action buttons.
-2. **Rooms (home / physical)** — the primary, task-oriented surface. A room shows its **lights** (each with
-   its source-group + assigned curve), its **switches**, and its **sensors**. Edit relationships *inline*:
-   set a light/room's `curve_ref`; see (read-only) what each switch is **bound** to in Z2M; see the
-   cross-room edges ("these sensors also feed the Stairwell zone"). "Tune this room" lives here.
-3. **Curves (library + editor)** — named, reusable curves. Each shows the **elevation→target
-   visualization**: a brightness line across the solar arc, a color strip (CT gradient or flat RGB swatch
-   **per regime**), a **summer/equinox/winter** selector (the seasonal swing is real — `REF=71.5°` is
-   fixed), and a sleep-ramp preview. Create / duplicate-and-tweak / delete; a **"Used by"** backref shows
-   blast radius. **Day color** and **Sleep color** are each a mode toggle (CT ramp ↔ fixed RGB) — exactly
-   what separates `hallway_up` (fixed sky-blue→orange) from `hallway_down` (CT day→fixed purple). Curve math
-   reused from `custom_components/light_man/adaptive.py` / `reference/adaptive-algorithm.md` (port to JS or
-   compute server-side).
-4. **Sleep** — global toggle, ramp-in/out, per-curve sleep targets, with a preview of the ramp.
-5. **Occupancy (zones + sweep builder)** — per zone: its sensors (room-owned; cross-room ones flagged),
+1. **Overview** — live house state + global controls. Per **source-group** target tiles (current
+   brightness/color/mode from the engine snapshot); **push on/off**; **sleep on/off**
+   (`switch.light_man_sleep`) with **ramp progress** and the global **ramp-in/ramp-out** timing;
+   **force push** + **clear all holds**; the **active holds** list (which light groups, the look, countdowns,
+   per-hold release); a **linter summary badge**.
+2. **Rooms** — the primary, task-oriented surface ("tune this room"). One card per **physical room**
+   (merged; kitchen = overhead + island groups together). **Lights** organized by their **source group**,
+   each showing the group's **assigned curve** — curve assignment is **per source group** here (S1; the main
+   edit on this tab; a "+ override this group's curve" affordance exists but per-light override is **not** in
+   v1). **Switches** each show the **light group they govern/hold** (S2) + a read-only view of what they're
+   **bound** to in Z2M. **Sensors** the room owns, cross-room edges flagged ("also feeds the Stairwell
+   zone"). Inline linter chips on anything broken.
+3. **Curves (library + editor)** — named, reusable curves with a **"Used by"** backref (which source groups →
+   blast radius). Per curve: the **elevation→target visualization** — brightness line across the solar arc, a
+   color strip (CT gradient or flat RGB swatch **per regime**), a **summer/equinox/winter** selector (the
+   seasonal swing is real — `REF=71.5°` is fixed), a **sleep-ramp preview**. **Day color** and **Sleep
+   color** are each a mode toggle (CT ramp ↔ fixed RGB) — what separates `hallway_up` (fixed sky-blue→orange)
+   from `hallway_down` (CT day→fixed purple); the **per-curve sleep target lives here** (S3). Create /
+   duplicate-and-tweak / delete; editable fields = the full curve
+   (`min_br/max_br/sat/night_floor_br/min_ct/max_ct/dusk_floor_ct`, base color mode + `base_rgb`, sleep
+   target, optional `day_window`). Math reused from `custom_components/light_man/adaptive.py` /
+   `reference/adaptive-algorithm.md` (port to JS or compute server-side).
+4. **Occupancy (zones + sweep builder)** — per zone: its sensors (room-owned; cross-room ones flagged),
    off-targets + all-clear rule. Per (zone, sensor): a **timeline sweep builder** — ordered stages, per-stage
-   delay, drag room **fixtures/switches** into stages — with a live replay and **duplicate / mirror**
-   actions. Sweeps reference room fixtures by id (resolving to set_topic + curve), so they can't drift from
-   the room's lights. Note/link for Z2M-side mmwave tuning.
-6. **Activity / log** — a live tail of Light Man's MQTT `/set` publishes + dedup skips + issues (the Z2M
+   delay, drag room **fixtures/switches** into stages — with a live replay. Sweeps reference room fixtures by
+   id (resolving to set_topic + curve), so they can't drift from the room's lights. **Mirror / duplicate**
+   sweep actions are editor sugar — **deferred to Polish**. Note/link for Z2M-side mmwave tuning.
+5. **Activity / log** — a live tail of Light Man's MQTT `/set` publishes + dedup skips + issues (the Z2M
    "I can see what it's doing" view), straight from the coordinator.
 
 ### Linter (cross-cutting "smart alerts")
 
-Surfaced wherever relevant (room view, curve "Used by", zone view) and as a consolidated list; later
-promotable to HA repair issues. The full check list is in
+Surfaced wherever relevant (room view, curve "Used by", zone view) and as a consolidated list (Overview
+badge); later promotable to HA repair issues. The full check list is in
 [`reference/data-model.md`](reference/data-model.md#config-linter-the-smart-alerts) — dangling `curve_ref`,
-orphan sensors, sweep fixtures owned by no room, missing `hue_native_control`, switch bound to the wrong
-group, bulb in a per-room but not the consolidated group, etc.
+orphan sensors, sweep fixtures owned by no room, **`off_lights` resolving to no known Z2M group**, missing
+`hue_native_control`, switch bound to a different light group than it governs, bulb in a per-room but not the
+consolidated group, etc.
 
 ## Build pipeline
 
@@ -127,12 +136,14 @@ not a commitment to specific endpoints; treat its API bullets as candidates to b
    (live vs. save), and reset-to-seed. **Gate: confirm the design approach (this doc + data-model.md) before
    proceeding.** Nothing past this phase starts until sign-off.
 1b. **Schema + migration (foundational).** Land the reconciled model in `models.py` (`curves{}` library,
-   first-class `Room`, light `curve_ref`+group tag, `OccupancyZone.sensors` as references, sweep `lights` as
-   room-fixture ids), with a **behaviour-preserving** old→new loader migration in `config_loader.py` and the
-   rewritten `light_man_config.json`. A test asserts the no-hold/no-override push plan is byte-identical to
-   today (4 consolidated floods). The coordinator's addressing generalizes for curve-divergent members
-   (`push.plan_publishes`) — see the addressing implication in data-model.md. This is independent of the
-   panel and can ship as a normal release ahead of it.
+   source groups keep `curve_ref`, first-class merged `Room` with `lights[]`/`switches[]`/`sensors{}`, switch
+   `governs` ref, `OccupancyZone.sensors` as references, sweep `lights` as room-fixture ids, top-level
+   `sleep`), with a **behaviour-preserving** old→new migration in `config_loader.py` — a **`seed_version` bump
+   + in-place old-Store migration** (M1) and the `switch_map` value-shape change (M2) — and the rewritten
+   `light_man_config.json`. **Runtime addressing is untouched** (S1: curves at the source-group level keep
+   `push.plan_publishes` as-is). A test runs the migration on the **old** seed and asserts the push plan —
+   **incl. hold addressing** — equals the new seed's (4 consolidated floods, byte-identical). Independent of
+   the panel; can ship as a normal release ahead of it.
 2. **Design the API (only after sign-off).** Derive the minimal HTTP views + websocket commands from the
    confirmed UI: config read/write endpoints, action endpoints, and the live streams the design requires —
    shaped to the screens, not invented up front. (Confirm current `panel_custom` / static-path /
@@ -145,15 +156,33 @@ not a commitment to specific endpoints; treat its API bullets as candidates to b
    (room relationships, curve library, sweep builder) with write-back + reset-to-seed.
 6. **Polish.** Curve/visualizer, the live linter, auth/admin gating (`require_admin`), mobile layout.
 
-## Open decisions (resolve at build time)
+## Architecture decisions (2026-06-11)
 
-- **`panel_custom` web component vs. `embed_iframe`** — confirm which gives the cleanest "own the whole
-  document" feel while keeping HA auth. (Verify current panel/static-path/WS-command API signatures with
-  the `ha-dev` agent before coding — these HA frontend APIs shift between releases.)
-- **Frontend stack** — Lit (HA-aligned) vs. Preact/vanilla; keep the bundle small for HACS.
-- **Config source of truth** — the panel writes the Store directly via the API; the bundled JSON stays as
-  seed + reset baseline. Decide on optimistic-concurrency / last-writer-wins for simultaneous edits.
-- **Live streams** — WS-command push vs. SSE; and whether the publish-log tail comes from the coordinator
-  or a thin MQTT subscription.
-- **Keep a minimal entity surface** (`push_enable`, `sleep`, maybe `force_push` button) for
-  scripting/voice even though the panel is the main UI.
+- **Delivery — `panel_custom` web component.** HA injects `hass` → free HA auth + the live websocket; mount a
+  custom SPA inside. (Verify current panel / static-path / `websocket_api` signatures with the `ha-dev` agent
+  before coding — these HA frontend APIs shift between releases.)
+- **Frontend stack — Lit** (HA's own frontend is Lit; the panel entry *is* a web component, so HA's `ha-*`
+  components + theming come for free) **+ hand-rolled SVG/canvas** for the curve + sweep visualizers (no
+  heavy chart dependency). Keep the bundle tiny for HACS copy-paste.
+- **Apply semantics — stage + explicit Save, with live preview.** Edits stage locally; the curve redraws /
+  sweep replays as preview only; nothing writes the Store or touches the house until Save.
+- **Live transport — HA `websocket_api` custom commands** (subscribe to engine snapshot / diagnostics /
+  occupancy / publish-log). The publish-log tail comes from the **coordinator** (it already sees all `/set`
+  traffic), not a browser-side MQTT sub. No SSE.
+- **Config read/write — `HomeAssistantView` HTTP GET/POST → the Store**; the bundled JSON stays as seed +
+  reset baseline. Single-user house → **last-writer-wins** (no optimistic-concurrency machinery).
+- **Reset-to-seed — both** a global reset and per-curve / per-room "revert to seed."
+- **Validation — derived from the engine's own clamps** (br 1–100, ct within bulb range, sat 0–1, delays ≥0);
+  no bespoke rules.
+- **Minimal HA entity surface kept** — `push_enable`, `sleep`, and a `force_push` button stay real HA
+  entities for scripting/voice, in parallel with the panel.
+- **Packaging** — `frontend/` source → `npm run build` → hashed bundle into
+  `custom_components/light_man/panel/`, shipped in the integration (+ robocopy to live); CI lints/builds the
+  panel without blocking the Python gate.
+- **Auth — `require_admin`** on the panel registration + all write views.
+
+## Still open (deferred by design)
+
+- **API endpoints** — the concrete HTTP views + WS commands are *derived* from the confirmed UI in Phase 2
+  (after sign-off), not invented now.
+- **Per-tab wireframes/mockups** — the remaining Phase-1 design deliverable.

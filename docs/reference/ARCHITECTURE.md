@@ -134,6 +134,14 @@ publish to a native group. Light Man's payload is identical to the blueprint's `
 `hue_native_control` is active on the target**, whether that's a per-room group or the bulb's own
 device-level option (see §5.5).
 
+> **Reconciled-model note (2026-06-11, `docs/reference/data-model.md`).** The dashboard redesign assigns a
+> curve to each **source group** (the consolidated unit), not per light, so this addressing stays **exactly
+> as written here** — held = skip, nothing else leaves the flood. Per-light/per-room curve override (which
+> would make the consolidated flood valid only for curve-uniform groups, forcing per-curve planning) is
+> **deferred** to a future tier. Separately, the per-source `sleep_switch` field is superseded by the
+> reconciled split: a **per-curve sleep target** + a **global ramp** (`sleep` block) + a **runtime on/off**
+> (`switch.light_man_sleep`).
+
 ### 5.2 What this deletes vs. the membership draft
 No `bridge/request/group/members/{add,remove}` primitive, no unique-per-attempt `transaction`
 correlation, no 3-attempt retry state machine, no membership reconciler, no bind churn. Reliability is
@@ -162,6 +170,13 @@ stale bulb NVRAM groups; the **runtime** integration just never uses it. See §8
 - **Holdable rooms** must have a per-room `set_topic` — without one the push cannot address around the
   room (it would fall back to the consolidated flood and hit the held bulbs). Validate the
   `switch → room → set_topic` chain at config load.
+
+> **Reconciled-model note (2026-06-11, `docs/reference/data-model.md`).** Under the dashboard model the hold
+> unit is **the light group a tapped switch governs** (its SBM-bound `set_topic`), not the physical room.
+> This matters because rooms become first-class and **merge across source groups** for display: in the
+> kitchen, the overhead switch holds only `zgb_kitchen` and the island switch only `zgb_kitchen_island` —
+> the merge does not widen the hold. Behaviourally identical to today's per-room hold (each old per-source
+> room = one light group); `switch_map` carries `(room, light_group)` instead of `(source, room)`.
 
 ### 5.4 Write-on-change dedup
 Keep last-published per (source, target) in memory only; skip unchanged. Replaces

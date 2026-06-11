@@ -1,104 +1,150 @@
 # Light Man — Reconciled Data Model (dashboard design)
 
-**Status:** design, sign-off pending (added 2026-06-11). This is the target topology model the web control
-panel (`docs/DASHBOARD-PLAN.md`) is built on. It supersedes the source-centric shape currently in
-`custom_components/light_man/light_man_config.json` / `models.py`. **No code/schema change lands until this
-design is signed off** (per the design-first rule in `DASHBOARD-PLAN.md`); this doc is the artifact being
-reviewed.
+**Status:** design, sign-off pending (added 2026-06-11; simplified after review). This is the target
+topology model the web control panel (`docs/DASHBOARD-PLAN.md`) sits on. It supersedes the source-centric
+shape in `custom_components/light_man/light_man_config.json` / `models.py`. **No code/schema change lands
+until this design is signed off** (the design-first gate in `DASHBOARD-PLAN.md`); this doc is the artifact
+being reviewed.
+
+Guiding principle: **complexity only where it buys functionality; preserve current behavior.** The review
+that produced this revision removed the heaviest new complexity (per-light curve addressing) on exactly that
+basis — see "Decisions" S1.
 
 ## Why this exists
 
-The dashboard brief is **user-/room-centric and task-oriented**: it must present the **physical layout**
-(rooms hold lights, switches, occupancy sensors) and reconcile it against the **control reality** —
-occupancy sensors drive lights across rooms, switches bind to Zigbee groups or not, and adaptive "curves"
-span many rooms. The user must be able to **define/edit the switch↔light↔curve↔occupancy relationships**,
-get **smart alerts on config mismatches**, and **create/visualize multiple adaptive curves**.
+The dashboard brief is **user-/room-centric and task-oriented**: present the **physical layout** (rooms hold
+lights, switches, occupancy sensors) and reconcile it against the **control reality** — occupancy sensors
+drive lights across rooms, switches bind to Zigbee groups or not, adaptive curves span many rooms. The user
+must **define/edit the switch↔light↔curve↔occupancy relationships**, get **smart alerts on config
+mismatches**, and **create/visualize multiple curves**.
 
-The stored model doesn't match that mental model. Today:
+The stored model doesn't match that. Today there is **no "room" object** (a "room" is a per-source addressing
+slot), the four curves are **inline `profile` blocks glued one-per-source**, a physical room is **fragmented
+across sources** (kitchen = an `overhead` room *and* an `accent` `kitchen_island` room), and occupancy
+**sensors are redefined per zone** (`hall_west` duplicated in the hallway and stairwell zones).
 
-- there is **no "room" object** — a "room" is just a per-source addressing slot (`SourceConfig.rooms`);
-- the four adaptive **curves are inline `profile` blocks, one glued per source** — not nameable or reusable;
-- a physical room is **fragmented across sources** (the kitchen is an `overhead` room *and* an `accent`
-  `kitchen_island` room);
-- occupancy **sensors are redefined per zone** — `hall_west` is duplicated in the `hallway` and `stairwell`
-  zones.
+## Terminology (two different "groups" — kept distinct on purpose)
 
-So the panel needs a reconciled model underneath it. This doc defines it.
+| Term | What | Count today | Owns / is |
+|---|---|---|---|
+| **Source group** (`sources{}`) | the **curve-bearing consolidated unit** — formerly the inline-`profile` "source" | 4 | `consolidated_topic`, `legacy_enable`, **`curve_ref`** |
+| **Light group** (`set_topic`) | a fixture's per-room `/set` topic — the **hold / SBM-bind / skip** unit | ~12 | the addressable bulbs a switch governs and a hold skips |
+
+A light belongs to **one source group** (for its curve + the consolidated flood) and **is** a light group
+(its `set_topic`, for holds). A switch **governs one light group**. Keeping these separate is what makes the
+simplifications below behaviour-identical to today.
 
 ## The four overlay graphs
 
-The same physical devices participate in four independent relationship graphs. The dashboard's job is to
-present each and flag inconsistencies *between* them.
+The same devices participate in four independent relationship graphs; the dashboard presents each and flags
+inconsistencies *between* them.
 
-1. **Physical containment (room-centric)** — Room ⊃ {lights, switches, occupancy sensors}. The human mental
-   model. *Not* stored as such today.
-2. **Adaptive control (curve-centric)** — Curve → applies to → {room-lights, switches}. "What recipe does
-   this fixture follow?"
-3. **Occupancy control (zone-centric)** — Sensor(s) → staged sweep → lights; all-clear → off-targets.
-   Inherently cross-room; one sensor can feed several zones.
-4. **Direct binding (Z2M / Inovelli SBM)** — Switch → bound Zigbee group → bulbs; owns on/off. **Not in
-   Light Man config at all** — lives in Z2M. The dashboard *reads and validates* it, never edits it.
+1. **Physical containment (room-centric)** — Room ⊃ {lights, switches, sensors}. The human model; not stored today.
+2. **Adaptive control (curve-centric)** — Curve → applies to → **source groups**. "What recipe does this fixture follow?"
+3. **Occupancy control (zone-centric)** — Sensor(s) → staged sweep → lights; all-clear → off-targets. Cross-room; one sensor can feed several zones.
+4. **Direct binding (Z2M / Inovelli SBM)** — Switch → bound light group → bulbs; owns on/off. **Not in Light Man config** — lives in Z2M. The dashboard *reads and validates* it, never edits it.
 
 ## Decisions (locked 2026-06-11)
 
-1. **Curves → shared library, assigned per target.** Curves become named, reusable objects. Sources and
-   **rooms** reference one (`curve_ref`); a room override beats the source default. **No per-switch
-   override** — switches stay `list[str]`, inherit their room's curve, and consume only the curve's
-   **brightness** channel (`defaultLevel` + LED bar), never color.
-2. **Curves are per-regime color-configurable.** Each curve sets **Day color** and **Sleep color**
-   independently, each either an elevation **CT ramp** (`min_ct`→`max_ct`) or a **fixed RGB** swatch
-   (`base_rgb` / `sleep.rgb`). Brightness endpoints always apply; the CT-only knobs are inert (grey out) when
-   a regime is fixed-RGB. This is exactly what separates the two hallway curves (below).
-3. **Room → first-class top-level object, one per physical space.** Each room owns `lights[]` (many — incl.
-   from multiple sources), `switches[]`, and `sensors{}`. Single-bulb "rooms" become rooms with one light.
-4. **Source → dissolved.** Each room-light carries its own `curve_ref` + an RF/addressing **group tag**
-   (`consolidated_topic`, `legacy_enable`). "Source" survives only as a **derived grouping** — the set of
-   lights sharing a consolidated topic — used purely for flood addressing.
-5. **Occupancy → two layers.** **Physical:** a room owns its mmwave **sensors** (defined once). **Logical:**
-   a top-level **zone** *references* room-owned sensors (`"<room>.<sensor>"`), is cross-room, and carries the
-   all-clear off-targets. De-duplicates shared sensors.
-6. **Sweeps → inline on each (zone, sensor) binding** (not a named library). The sweep is what *this sensor,
-   on behalf of this zone* runs. Editor offers **duplicate** + **mirror/reverse** (the two hallway sensors
-   are mirror images). Stages reference **room fixtures** by id (→ set_topic + curve); a stage target may be
-   a **switch** as well as a light.
+### S1 — Curves → shared library, assigned **per source group** (not per light)
+Curves become named, reusable objects; each **source group** carries a `curve_ref`. **No per-light/per-room
+override in v1.** No current case needs one: even the hallway up/down split (`hallway_sky` vs
+`hallway_ct_winddown`) is across **different source groups** (`zgb_hallway_up` vs `zgb_hallway_down`), not
+within one. This keeps the **curve library + editor UX fully** while leaving runtime **addressing
+byte-identical to today** (`push.plan_publishes` unchanged; held = skip, nothing else leaves the flood).
+Per-light override + the addressing inversion it forces (consolidated flood valid only when a group is
+curve-uniform → planning by `(topic, curve)`) are **deferred until a real need appears** — see "Addressing".
+
+### S2 — Hold scope = the switch's **light group**, not the merged room
+A hold keys on **the light group a tapped switch governs** (the group it's Inovelli-SBM-bound to), not on the
+physical room. So rooms **merge for display** (kitchen shows both light groups, both switches, its sensor)
+while a tap on the island switch holds **only** the island light group and the overhead switch **only** the
+overhead light group — identical to today, with no per-light `arms` list. Each switch carries a single
+`governs` reference to its light group.
+
+### S3 / C1 — Sleep is split; no dedicated tab
+Sleep is three separable things with natural homes: **global on/off** = runtime, exposed as
+`switch.light_man_sleep` (Overview); **ramp-in/out timing** = one top-level `sleep` block (a global setting
+on Overview); **per-curve sleep target** = on the curve, beside its day color (Curve editor). No dedicated
+Sleep tab; nothing lost.
+
+### Unchanged from the first cut
+- **Curves are per-regime color-configurable.** Day color and Sleep color each toggle CT-ramp ↔ fixed-RGB —
+  exactly what separates `hallway_up` (fixed sky-blue→orange) from `hallway_down` (CT day→fixed purple).
+- **Room → first-class, one per physical space.** Owns `lights[]` (across source groups), `switches[]`, `sensors{}`.
+- **Occupancy → two layers.** Room owns its sensors (defined once); a top-level **zone** *references* them
+  (`"<room>.<sensor>"`), is cross-room, carries the all-clear off-targets.
+- **Sweeps → inline on each (zone, sensor) binding.** Stages reference room fixtures by id (→ set_topic +
+  curve), so they can't drift. (Editor **mirror/duplicate** sugar is deferred to the Polish phase.)
+
+### Correction — held day/night looks are **derived from the curve**, not stored
+`adaptive.day_look` = the curve at peak sun; `adaptive.night_look` = the curve at sun-down + sleep overlay
+(`adaptive.py`); `_look_payloads` uses these for any profile source (`coordinator.py`). The per-source
+`night_brightness_pct` / `night_color_temp_kelvin` / `night_rgb` fields are read **only for profile-less
+sources** — none exist in the seed. They are **vestigial**; the migration drops them with **zero behavior
+change**. No day/night regime needs adding to a curve.
 
 ## Target config shape
 
 ```jsonc
 {
+  "seed_version": 7,                            // bumped — triggers the old-Store migration (M1)
+  "push_interval_s": 30,
+
   "curves": {                                   // NEW top-level library (today's 4 profiles, named)
     "daylight_standard":   { "min_br":30,"max_br":90,"min_ct":2700,"max_ct":6500,"sat":0.5,
-                             "base_color_mode":"color_temp", "sleep":{...}, "day_window":{...} },
-    "accent_dim":          { "min_br":10,"max_br":30,"min_ct":2700,"max_ct":6000, ... },
-    "hallway_sky":         { "base_color_mode":"rgb","base_rgb":[135,206,235],
-                             "sleep":{"color_mode":"rgb","rgb":[255,126,30]} },     // fixed RGB both regimes
-    "hallway_ct_winddown": { "base_color_mode":"color_temp",
-                             "sleep":{"color_mode":"rgb","rgb":[155,123,232]} }     // CT day → fixed RGB sleep
+                             "base_color_mode":"color_temp","dusk_floor_ct":2200,"night_floor_br":30,
+                             "sleep":{ "br":30,"color_mode":"color_temp","ct":2700 },
+                             "day_window":{ "enabled":true,"start":"08:00","end":"17:00" } },
+    "accent_dim":          { "min_br":10,"max_br":30,"min_ct":2700,"max_ct":6000,"sat":0.5,
+                             "base_color_mode":"color_temp","dusk_floor_ct":2200,"night_floor_br":10,
+                             "sleep":{ "br":10,"color_mode":"color_temp","ct":2500 }, "day_window":{ ... } },
+    "hallway_sky":         { "min_br":30,"max_br":90,"sat":0.5,"base_color_mode":"rgb","base_rgb":[135,206,235],
+                             "dusk_floor_ct":2200,"night_floor_br":30,
+                             "sleep":{ "br":40,"color_mode":"rgb","rgb":[255,126,30] }, "day_window":{ ... } },
+    "hallway_ct_winddown": { "min_br":30,"max_br":90,"min_ct":2700,"max_ct":6500,"sat":0.5,
+                             "base_color_mode":"color_temp","dusk_floor_ct":2200,"night_floor_br":30,
+                             "sleep":{ "br":5,"color_mode":"rgb","rgb":[155,123,232] }, "day_window":{ ... } }
   },
 
-  "rooms": {                                    // NEW top-level physical spaces
+  "sources": {                                  // SOURCE GROUPS: the curve-bearing consolidated unit (S1)
+    "overhead":     { "consolidated_topic":"zigbee2mqtt/zgb_overhead_all/set",
+                      "legacy_enable":"input_boolean.adaptive_lighting_overhead_all", "curve_ref":"daylight_standard" },
+    "accent":       { "consolidated_topic":"zigbee2mqtt/zgb_accent_all/set",
+                      "legacy_enable":"input_boolean.adaptive_lighting_accent_all",   "curve_ref":"accent_dim" },
+    "hallway_up":   { "consolidated_topic":"zigbee2mqtt/zgb_hallway_up/set",
+                      "legacy_enable":"input_boolean.adaptive_lighting_switch_hallway","curve_ref":"hallway_sky" },
+    "hallway_down": { "consolidated_topic":"zigbee2mqtt/zgb_hallway_down/set",
+                      "legacy_enable":"input_boolean.adaptive_lighting_switch_hallway","curve_ref":"hallway_ct_winddown" }
+  },
+
+  "rooms": {                                    // NEW top-level physical spaces (merged across source groups)
+    "kitchen": {                                // one physical room, two source groups, two switches
+      "name": "Kitchen",
+      "lights": [
+        { "id":"overhead", "set_topic":"zigbee2mqtt/zgb_kitchen/set",        "source":"overhead" },
+        { "id":"island",   "set_topic":"zigbee2mqtt/zgb_kitchen_island/set", "source":"accent" }
+      ],
+      "switches": [
+        { "topic":"zigbee2mqtt/Kitchen Overhead Light Switch", "governs":"kitchen.overhead" },  // holds zgb_kitchen only (S2)
+        { "topic":"zigbee2mqtt/Kitchen Island Light Switch",   "governs":"kitchen.island"   }   // holds zgb_kitchen_island only
+      ],
+      "sensors": {}
+    },
     "hallway": {
       "name": "Hallway",
       "lights": [
-        { "id":"east_up",   "set_topic":"zigbee2mqtt/Hallway Light East Uplight/set",
-          "curve_ref":"hallway_sky",
-          "group":{ "consolidated_topic":"zigbee2mqtt/zgb_hallway_up/set",
-                    "legacy_enable":"input_boolean.adaptive_lighting_switch_hallway" } },
-        { "id":"east_down", "set_topic":"zigbee2mqtt/Hallway Light East Downlight/set",
-          "curve_ref":"hallway_ct_winddown",
-          "group":{ "consolidated_topic":"zigbee2mqtt/zgb_hallway_down/set",
-                    "legacy_enable":"input_boolean.adaptive_lighting_switch_hallway" } }
-        /* center_up/down, west_up/down — 6 fixtures total */
+        { "id":"east_up",   "set_topic":"zigbee2mqtt/Hallway Light East Uplight/set",   "source":"hallway_up" },
+        { "id":"east_down", "set_topic":"zigbee2mqtt/Hallway Light East Downlight/set", "source":"hallway_down" }
+        /* center_up/down, west_up/down — 6 fixtures across the two hallway source groups */
       ],
-      "switches": ["zigbee2mqtt/Hall Smart Switch West New mmwave"],
+      "switches": [],                           // the hall mmwave devices are sensors here, not holdable switches
       "sensors": {
-        "hall_east": { "topic":"zigbee2mqtt/Hallway Light Switch East New New mmwave",
-                       "occupancy_key":"mmwave_area1_occupancy" },
-        "hall_west": { "topic":"zigbee2mqtt/Hall Smart Switch West New mmwave",
-                       "occupancy_key":"mmwave_area1_occupancy" }
+        "hall_east": { "topic":"zigbee2mqtt/Hallway Light Switch East New New mmwave","occupancy_key":"mmwave_area1_occupancy" },
+        "hall_west": { "topic":"zigbee2mqtt/Hall Smart Switch West New mmwave","occupancy_key":"mmwave_area1_occupancy" }
       }
     }
-    /* living_room, kitchen (overhead + island lights), primary_bedroom, office, stairwell, front_door, ... */
+    /* living_room, primary_bedroom, office, stairwell, front_door (1 light), michael_closet (1 light), ... */
   },
 
   "occupancy_zones": {                          // logical, cross-room; reference room-owned sensors
@@ -109,7 +155,7 @@ present each and flag inconsistencies *between* them.
                                          { "delay_s":1.0, "lights":["hallway.west_up","hallway.west_down"] } ] },
         "hallway.hall_west": { "sweep":[ /* mirror: west → center → east */ ] }
       },
-      "off_lights":["zigbee2mqtt/zgb_hallwayf/set"], "off_transition_s":1.5
+      "off_lights":["zigbee2mqtt/zgb_hallwayf/set"], "off_transition_s":1.5   // zgb_hallwayf is a real group (kept as-is)
     },
     "stairwell": {
       "sensors": {
@@ -118,120 +164,127 @@ present each and flag inconsistencies *between* them.
       },
       "off_lights":["zigbee2mqtt/zgb_stairwell/set"]
     }
-  }
+  },
+
+  "sleep": { "ramp_in_s": 5400, "ramp_out_s": 1800 }   // global ramp timing; on/off is runtime (switch.light_man_sleep)
 }
 ```
 
 ## Element detail
 
 ### Curves (library)
-
-A curve is the elevation→target recipe: brightness endpoints (`min_br`/`max_br`/`sat`/`night_floor_br`) +
-the two color regimes + the sleep overlay + optional `day_window`. The math is unchanged — see
-`docs/reference/adaptive-algorithm.md` and `custom_components/light_man/adaptive.py`. The only schema change
-is **lifting the four inline `profile`s into a named top-level `curves{}` map** that targets reference.
-
+The elevation→target recipe: brightness endpoints (`min_br`/`max_br`/`sat`/`night_floor_br`) + `dusk_floor_ct`
++ the two color regimes + the sleep **target** + optional `day_window`. Math unchanged — see
+`adaptive-algorithm.md` / `custom_components/light_man/adaptive.py`. The schema change is **lifting the four
+inline `profile`s into a named top-level `curves{}` map** that source groups reference.
 - **Day color** = `base_color_mode` (`color_temp` ⇒ `min_ct`/`max_ct` ramp | `rgb` ⇒ fixed `base_rgb`).
 - **Sleep color** = `sleep.color_mode` (`color_temp` ⇒ `sleep.ct` | `rgb` ⇒ fixed `sleep.rgb`).
-- **Editor visualization:** brightness line across the solar arc (always), plus a color strip rendered as a
-  CT gradient or a flat RGB swatch per regime; a **summer / equinox / winter** selector (the seasonal swing
-  is real — `REF=71.5°` is fixed); a sleep-ramp preview. A **"Used by"** backref lists every source/room/
-  switch on the curve so edit blast-radius is visible.
+- **Held looks are derived** (peak-sun day, sun-down+sleep night) — not stored on the curve.
+- **Editor:** brightness line across the solar arc; color strip = CT gradient or flat RGB swatch per regime; a
+  **summer/equinox/winter** selector (seasonal swing is real — `REF=71.5°` fixed); sleep-ramp preview; a
+  **"Used by"** backref (which source groups → edit blast radius).
+
+### Source groups (`sources{}`)
+The curve-bearing consolidated unit: `consolidated_topic`, `legacy_enable`, `curve_ref`. Its **members are
+derived** — every room-light whose `source` names it. This is the unit the consolidated flood targets and the
+unit a curve is assigned to (S1). The four recognizable groups remain visible in the UI.
 
 ### Rooms (first-class)
-
-`rooms{}` keyed by an id, each with a display `name`. Owns:
-- `lights[]` — each a fixture/group with its `id`, `set_topic`, `curve_ref` (override; else inherits its
-  group default), and a `group` RF tag (`consolidated_topic` + `legacy_enable`). A room may hold lights from
-  several groups (kitchen overhead + island accent).
-- `switches[]` — Inovelli base topics whose `action`/`state` arm+release holds and receive `defaultLevel`/
-  LED-bar writes (brightness-only).
+`rooms{}` keyed by id, each with a display `name`. Owns:
+- `lights[]` — each `{ id, set_topic, source }`; its curve = `sources[source].curve_ref`. A room may hold
+  lights from several source groups (kitchen overhead + island).
+- `switches[]` — each `{ topic, governs }` where `governs` is `"<room>.<light_id>"` — the **light group it is
+  SBM-bound to and holds** (S2). Switch writes are brightness-only (`defaultLevel` + LED bar), the brightness
+  coming from the governed light's source-group curve.
 - `sensors{}` — the mmwave devices **mounted in this room** (`{topic, occupancy_key}`), defined once.
 
-### Source (dissolved → derived grouping)
-
-There is no `source` object. A "source" is the **set of room-lights sharing a `group.consolidated_topic`**,
-materialized at load for addressing + the legacy-enable reconcile. Each light's `curve_ref` (its own, or its
-group default) gives its recipe. The four recognizable sources remain visible in the UI as derived groups.
+### Holds
+Key on the **governed light group** (`"<room>.<light_id>"` → its `set_topic`) — the same skip granularity as
+today's per-room hold; merging rooms for display does not widen it. Arm/release/TTL semantics unchanged
+(ARCHITECTURE §5.3).
 
 ### Occupancy (two layers)
-
-- **Sensor (physical):** owned by the room it's mounted in. Defined once; identified house-wide as
-  `"<room>.<sensor>"`.
-- **Zone (logical):** top-level, cross-room. References room-owned sensors and attaches a **per-sensor
-  sweep**; carries `off_lights` + `off_transition_s`; clears (off-targets fire) when **all** its sensors
-  report empty. A sensor may be referenced by several zones with a different sweep each (`hall_west` → a
-  hallway sweep in `hallway`, a stairwell-overhead sweep in `stairwell`).
+- **Sensor (physical):** owned by the room it's mounted in; defined once; identified house-wide as `"<room>.<sensor>"`.
+- **Zone (logical):** top-level, cross-room; references room sensors and attaches a **per-sensor sweep**;
+  carries `off_lights` + `off_transition_s`; clears when **all** its sensors report empty. A sensor may be
+  referenced by several zones with a different sweep each (`hall_west` → hallway sweep + stairwell-overhead sweep).
 
 ### Sweeps (inline)
+Ordered stages `{ delay_s, lights[] }`; each light is a **room-fixture reference** → its `set_topic` + curve. A
+stage target may be a switch. Lives on the `(zone, sensor)` binding (where `coordinator.py` `_Binding` already
+flattens it). Builder = a **timeline** (stages, per-stage delay, drag room fixtures/switches in) with live
+replay; **mirror/duplicate** are Polish-phase sugar.
 
-A sweep is an ordered list of stages `{ delay_s, lights[] }`; each light is a **room-fixture reference**
-resolving to its `set_topic` + curve (so a sweep can't drift from the room's fixtures). A stage target may
-be a switch. It lives on the `(zone, sensor)` binding — exactly where the coordinator already flattens it
-(`coordinator.py` `_Binding`). The builder is a **timeline** (stages left→right, per-stage delay, drag room
-fixtures/switches in) with a live replay and **duplicate / mirror** actions.
+### Sleep (split — S3/C1)
+- Per-curve **target** (`sleep.br` + color) lives on the curve.
+- Global **ramp** timing (`ramp_in_s`/`ramp_out_s`) → top-level `sleep` block.
+- **On/off** is runtime, exposed as `switch.light_man_sleep` (the minimal-entity-surface decision).
 
-## Addressing implication (caught in the push code)
+## Addressing — unchanged from today (S1)
 
-`coordinator.py` / `push.plan_publishes` floods one value to the consolidated group when no room is held,
-and only addresses per-room to **skip held rooms**. With dissolved sources + **per-room curve overrides**,
-the consolidated flood is valid **only when every member of a group resolves to the same curve**. A
-curve-overridden room must be published individually at its own value — the **same machinery as a hold,
-generalized**:
+With curves at the **source-group** level, the consolidated flood is always valid: every member of a group
+resolves to the **same** curve. So `coordinator.py` / `push.plan_publishes` stays exactly as-is — **no held
+room** → one consolidated flood (4 floods steady state); **a switch's light group held** → publish per-unheld
+light group, skipping the held one (the only reason a member leaves the flood). No per-curve planning, no
+`(topic, curve)` membership.
 
-| reason a member leaves the consolidated flood | what happens to it |
-|---|---|
-| **held** (scene owns it) | **skipped** — not published |
-| **curve-divergent** (room override ≠ group default) | **published per-room** at its own curve |
-
-Net rule for the build: consolidated flood stays the fast path for a **curve-uniform** group; any held or
-curve-divergent member drops (that member, or the group) to per-room addressing. With the behaviour-
-preserving migration (every room on its group default) this is **identical to today** — overrides are opt-in
-complexity.
+> **Deferred (forward note):** if per-light/per-room curve override is ever wanted, it reintroduces the
+> **addressing inversion** — a curve-divergent member must be published individually at its own curve (the
+> hold machinery generalized: a hold *skips*, an override *publishes with a different curve*), and the
+> consolidated flood becomes the fast path only for curve-uniform groups. Out of scope for v1.
 
 ## Config linter (the "smart alerts")
 
 Cross-checks the reconciled model against live Z2M; surfaceable as HA repair issues later.
-
-- Holdable room (has switches) with **no per-room `set_topic`** (already enforced in `config_loader`).
-- `curve_ref` naming **no library curve**; a room override **identical** to its group default (info only).
-- Sweep stage referencing a **light/switch owned by no room**; zone referencing a sensor **owned by no
-  room**; a room sensor used by **no zone** (orphan).
+- Holdable light group (a switch governs it) with **no valid `set_topic`** (already enforced in `config_loader`).
+- `curve_ref` naming **no library curve**.
+- Sweep stage referencing a **light/switch owned by no room**; zone referencing a sensor **owned by no room**;
+  a room sensor used by **no zone** (orphan).
 - Sensor `topic` / `occupancy_key` **not exposed** by that Z2M device.
-- Consolidated-group member **missing `hue_native_control`** (ARCHITECTURE §5.5 orphan coverage).
-- Switch in a room **bound (Z2M) to a different group** than its room's light group (paddle drives other
-  bulbs than the curve).
-- Bulb in a per-room group but **not** in the consolidated group (stale-NVRAM bulb-split class —
-  `docs/reference/bulb-split-investigation.md`).
+- **`off_lights` topic resolving to no known Z2M group** (catches an off-target that names no real group).
+- Source-group member **missing `hue_native_control`** (ARCHITECTURE §5.5 orphan coverage).
+- Switch **bound (Z2M) to a different light group** than the one it `governs` (paddle drives other bulbs).
+- Bulb in a per-room light group but **not** in its source group's consolidated group (stale-NVRAM bulb-split
+  class — `bulb-split-investigation.md`).
 
 ## Old → new migration mapping (behaviour-preserving)
 
 | Today (`light_man_config.json`) | New |
 |---|---|
-| `sources.<s>.profile` (×4) | `curves.<name>` (×4), referenced by `curve_ref` |
-| `sources.<s>.consolidated_topic` / `legacy_enable` | each member light's `group` tag |
-| `sources.<s>.rooms.<r>` (set_topic, switches) | `rooms.<r>` light(s) + `switches[]`, lights tagged with the source's group + curve |
-| same physical room under 2 sources (kitchen / kitchen_island) | one `rooms.kitchen` owning both groups' lights |
+| `sources.<s>.profile` (×4) | `curves.<name>` (×4), referenced by `sources.<s>.curve_ref` (S1) |
+| `sources.<s>` (consolidated_topic, legacy_enable) | kept on the source group; loses `profile`/`night_*`/`rooms` |
+| `sources.<s>.rooms.<r>` (set_topic, switches) | `rooms.<r>` with a light `{set_topic, source:<s>}` + switches `{topic, governs}` |
+| same physical room under 2 sources (kitchen / kitchen_island) | **one** `rooms.kitchen` with two lights + two switches, **holds preserved per light group** (S2) |
+| `sources.<s>.night_brightness_pct/_color_temp_kelvin/_rgb` | **dropped** — vestigial (held looks derived; profile-less only) |
 | `occupancy.<z>.sensors.<n>` (inline topic+key+sweep) | sensor → `rooms.<room>.sensors.<n>`; zone keeps a **reference** + the sweep |
-| `hall_west` defined in 2 zones | one room-owned sensor, referenced by both zones |
-| sweep light `{set_topic, source}` | room-fixture id (`"<room>.<id>"`), curve derived |
+| `hall_west` defined in 2 zones | **one** room-owned sensor, referenced by both zones |
+| sweep light `{set_topic, source}` | room-fixture id (`"<room>.<id>"`); curve derived from the fixture's source group |
+| (sleep ramp constants, per-source `sleep`) | top-level `sleep` block (ramp) + per-curve `sleep` target |
 
-A loader migration performs this pivot from the current seed; a test asserts the resulting push plan for the
-no-hold / no-override steady state is byte-identical (4 consolidated floods).
+### Migration mechanics (M1 — Store-seeded, not bundle-read at runtime)
+Config loads from a `Store` **seeded** from the bundled JSON, so existing installs hold the **old shape
+persisted**. Three obligations:
+1. Rewrite the bundled `light_man_config.json` to the new shape with a **bumped `seed_version`** (→ 7).
+2. The loader detects an **old-shape Store** (by `seed_version`) and migrates it **in place** to the new shape.
+3. The behaviour-preserving test runs the migration on the **old** seed and asserts the resulting push plan —
+   **including hold addressing** — equals the new seed's ("4 floods, byte-identical").
+
+### `switch_map` shape (M2 — doc note; code is Phase 1b)
+`switch_map` becomes `dict[base, (room, light_group)]` (was `(source, room)`); consumers at
+`coordinator.py:202,756,770` resolve a tapped switch to its physical room + the governed light group it holds.
 
 ## Staged work (after sign-off)
 
-1. **Schema + migration** — `models.py` (`Curve`/`curves`, first-class `Room`, light `curve_ref`+group tag,
-   `OccupancyZone.sensors` → references, sweep `lights` → fixture ids); `config_loader.py` old→new migration;
-   `light_man_config.json`. Tests vs. the existing seed.
-2. **Coordinator addressing** — derive group members from room-lights; generalize `plan_publishes` for
-   curve-divergent members; resolve sweep fixture refs. Push payloads/MQTT behaviour unchanged.
-3. **Backend API → panel registration/static serving → frontend SPA → polish** — per `DASHBOARD-PLAN.md`
-   phases 2–6 (read-only surfaces first, then editors + linter).
+1. **Schema + migration** — `models.py` (`curves{}`, source groups keep `curve_ref`, first-class `Room` with
+   `lights[]`/`switches[]`/`sensors{}`, `OccupancyZone.sensors` → references, sweep `lights` → fixture ids,
+   top-level `sleep`); `config_loader.py` old→new + **`seed_version` bump + old-Store migration (M1)**;
+   `switch_map` value shape (M2); `light_man_config.json`. **Addressing untouched** (S1). Tests vs. the
+   existing seed incl. the byte-identical hold-addressing assertion.
+2. **Backend API → panel registration/static serving → frontend SPA → polish** — per `DASHBOARD-PLAN.md`
+   phases 2–6 (read-only surfaces first, then editors + linter; sweep mirror/duplicate in Polish).
 
 ## See also
-
-- `docs/DASHBOARD-PLAN.md` — the panel (delivery mechanism, IA, build pipeline, phases).
+- `docs/DASHBOARD-PLAN.md` — the panel (delivery, IA, build pipeline, phases).
 - `docs/reference/adaptive-algorithm.md` — the curve math the editor visualizes.
-- `docs/reference/ARCHITECTURE.md` §5 — addressing / hold semantics the override rule generalizes.
+- `docs/reference/ARCHITECTURE.md` §5 — addressing / hold semantics (per-group curves keep §5.1 as-is; §5.3 hold scope = light group).
 - `docs/reference/bulb-split-investigation.md` — the stale-NVRAM class the linter surfaces.
