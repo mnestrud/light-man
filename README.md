@@ -27,8 +27,8 @@ bindings, `hue_native_control`, and the Inovelli Smart Bulb Mode bindings.
   value; turns the zone off when all its sensors clear.
 - **Inovelli prestage.** Pushes each switch's `defaultLevelLocal/Remote` to the live adaptive brightness
   (so a tap-on comes up at the right level) plus the LED-bar brightness while the paddle is on.
-- **One toggle** swaps the whole stack between Light Man and the legacy tick automation. It defaults ON
-  and restores across restarts, so Light Man is the house default.
+- **One master toggle** turns Light Man on or off — ON runs the adaptive push, OFF makes it inert. It
+  defaults ON and restores across restarts, so Light Man is the house default.
 
 Full design: [`docs/reference/adaptive-algorithm.md`](docs/reference/adaptive-algorithm.md).
 
@@ -36,8 +36,9 @@ Full design: [`docs/reference/adaptive-algorithm.md`](docs/reference/adaptive-al
 
 - Home Assistant **2026.1+**.
 - The **MQTT** integration configured (Zigbee2MQTT).
-- Adaptive Lighting (HACS) is **optional** — only used as a value fallback for a source that has no
-  profile. With every source profiled, Light Man is fully self-contained and AL can be disabled.
+- Adaptive Lighting (HACS) is **not required** — Light Man computes every value from real solar elevation
+  and is fully self-contained. Any legacy AL / master-tick automations should be disabled; Light Man no
+  longer manages them.
 
 ## Installation
 
@@ -57,22 +58,21 @@ JSON (`custom_components/light_man/light_man_config.json`), keyed by **source**:
 | Field | Meaning |
 |---|---|
 | `consolidated_topic` | the source's group `/set` topic (steady-state flood) |
-| `day_color_mode` / `night_color_mode` | `color_temp` or `rgb` |
 | `profile.min_br` / `max_br` | brightness endpoints (%) across the elevation range |
 | `profile.min_ct` / `max_ct` | warm/cool color-temp endpoints (Kelvin) |
 | `profile.base_color_mode` / `base_rgb` | optional fixed daytime color (e.g. hallway sky-blue) |
 | `profile.dusk_floor_ct` / `night_floor_br` | warm/dim floors at low elevation |
 | `profile.sleep` | per-source sleep target (`br`, `color_mode`, `ct`/`rgb`, ramp overrides) |
 | `profile.day_window` | optional forced sunrise/sunset clamp (`start`/`end` "HH:MM") |
-| `al_switch` | optional Adaptive Lighting dummy switch (fallback when no profile) |
+| `transition_s` | optional per-source transition time (seconds; default 1.0) |
 | `rooms.<room>.set_topic` | per-room group `/set` (addressed when the room is held/off) |
 | `rooms.<room>.switches` | Inovelli switch base topic(s) whose actions arm/release the hold |
 | `occupancy.<zone>` | mmwave sensor topics, per-sensor directional sweep, off-lights |
 
 ## Entities
 
-- **`switch.light_man_adaptive_push`** — the single stack toggle (ON = Light Man owns the push; OFF
-  restores the legacy tick automation). Defaults ON; restored across restarts.
+- **`switch.light_man_adaptive_push`** — the master on/off toggle (ON = Light Man runs the adaptive push;
+  OFF = inert). Defaults ON; restored across restarts.
 - **Sleep switch** (`*_sleep_enable`) — global sleep overlay; ramps the house into its sleep target.
 - **Active-holds sensor** — count of currently-held rooms; attributes list each room and its expiry.
 
@@ -86,9 +86,9 @@ JSON (`custom_components/light_man/light_man_config.json`), keyed by **source**:
 
 ## Removal
 
-**Settings → Devices & Services → Light Man → ⋮ → Delete.** On unload Light Man restores the legacy
-stack (re-enables the master tick automation + the legacy enable booleans) so the house keeps adapting.
-To fully remove, also delete `custom_components/light_man/` from `config/custom_components/` and restart.
+**Settings → Devices & Services → Light Man → ⋮ → Delete.** Light Man goes inert on unload (it does not
+manage any legacy stack). To fully remove, also delete `custom_components/light_man/` from
+`config/custom_components/` and restart.
 
 ## Status & quality
 

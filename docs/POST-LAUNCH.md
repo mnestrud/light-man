@@ -2,7 +2,7 @@
 
 Standing list of deferred / put-off / explicitly-not-tackling items, carried forward after the
 Phase-2 cutover (real-elevation engine is the house default; Adaptive Lighting disabled). Update the
-status boxes as items are picked up. Last reviewed: **2026-06-10**.
+status boxes as items are picked up. Last reviewed: **2026-06-11**.
 
 ## Pending (next, but not started)
 
@@ -15,15 +15,13 @@ status boxes as items are picked up. Last reviewed: **2026-06-10**.
 
 ## Planned next (added 2026-06-10)
 
-- [ ] **Pull out the master-switch machinery (code).** The legacy tick automation
-  (`automation.ataraxia_lighting_master_tick_automation`) and all 20 `script.al_*` push scripts are now
-  **registry-disabled directly on live** (Spook `homeassistant.disable_entity`, 2026-06-10) — they no
-  longer depend on the `push_enable` toggle. So the integration's `_reconcile_legacy` machinery (driving
-  the tick + legacy enable booleans on/off, and re-enabling them on unload) is now dead weight. Remove it:
-  drop `_reconcile_legacy`, `_reconcile_legacy_on_start`, `async_restore_legacy`, `TICK_AUTOMATION`, the
-  `legacy_enable` reads, and simplify `async_set_push_enabled` to just own the push (no legacy reconcile).
-  Keep `push_enable` as the inert-vs-owning toggle. Update tests accordingly. *(Live legacy entities stay
-  disabled regardless; the integration just stops trying to manage them.)*
+- [x] **Pull out the master-switch machinery (code).** *(Done 2026-06-11, v0.5.0.)* Removed
+  `_reconcile_legacy`, `_reconcile_legacy_on_start` (now `_takeover_on_start`), `async_restore_legacy`,
+  `TICK_AUTOMATION`, and all `legacy_enable` reads; `async_set_push_enabled` is now a plain master on/off.
+  Also dropped the vestigial AL-fallback (`al_switch`, `day/night_color_mode`, `night_*` targets,
+  `sleep_switch`) and made `profile` required on every source. **Operational note:** since Light Man no
+  longer disables them, the legacy tick automation + `script.al_*` must stay registry-disabled on live
+  (they already are, 2026-06-10).
 - [ ] **Web control panel (self-hosted, sidebar app).** A standalone HTML/JS app in the HA left sidebar —
   like Zigbee2MQTT / Node-RED present their own UIs — not a Lovelace dashboard. The integration registers
   a custom **panel** and serves the SPA + a backend **API** (HTTP views for Store config read/write +
@@ -54,8 +52,8 @@ status boxes as items are picked up. Last reviewed: **2026-06-10**.
   variant was reverted (v0.2.3 on main) and is not being revisited. (Note: the *current* conditional
   per-room addressing — consolidated when uniform, per-room on hold/divergence — **is** in use; this
   item is only about the abandoned older variant.)
-- [ ] **Interim `night_brightness_pct` / `night_color_temp_kelvin` seed fields** — superseded by the
-  engine, left in place harmlessly (still used by the fallback path for a profile-less source).
+- [x] **Interim `night_brightness_pct` / `night_color_temp_kelvin` seed fields** — *(Removed 2026-06-11,
+  v0.5.0)* dropped with the vestigial AL-fallback; held day/night looks are derived from the curve.
 
 ## Future tiers (not this session)
 

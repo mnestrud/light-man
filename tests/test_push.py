@@ -5,22 +5,16 @@ from __future__ import annotations
 from typing import Any
 
 from custom_components.light_man.push import (
-    build_night_payload,
     build_payload,
     kelvin_to_mired,
     mired_to_kelvin,
     pct_to_brightness,
     plan_publishes,
-    resolve_color_mode,
     valid_rgb,
 )
 
 OVERHEAD: dict[str, Any] = {
     "consolidated_topic": "zigbee2mqtt/zgb_overhead_all/set",
-    "day_color_mode": "color_temp",
-    "night_color_mode": "color_temp",
-    "night_brightness_pct": 20,
-    "night_color_temp_kelvin": 2700,
     "rooms": {
         "living_room": {"set_topic": "zigbee2mqtt/zgb_living_room/set", "switches": []},
         "kitchen": {"set_topic": "zigbee2mqtt/zgb_kitchen/set", "switches": []},
@@ -33,7 +27,14 @@ DAY = build_payload(
     mode="color_temp",
     transition=1.0,
 )
-NIGHT = build_night_payload(OVERHEAD, 1.0)
+# A distinct night look (the engine supplies this at runtime via night_look()).
+NIGHT = build_payload(
+    brightness_pct=20,
+    color_temp_kelvin=2700,
+    rgb_color=None,
+    mode="color_temp",
+    transition=1.0,
+)
 # A distinct forced day-look payload (config_double hold), not the live value.
 DAY_HOLD = {"brightness": 254, "transition": 1.0, "color_temp": 153}
 
@@ -57,13 +58,6 @@ def test_mired_to_kelvin_inverts_and_guards_zero() -> None:
     assert mired_to_kelvin(370) == 2703  # round-trips kelvin_to_mired(2700)
     assert mired_to_kelvin(0) == 0  # guard
     assert mired_to_kelvin(-5) == 0
-
-
-def test_resolve_color_mode_by_sleep_state() -> None:
-    hall = {"day_color_mode": "color_temp", "night_color_mode": "rgb"}
-    assert resolve_color_mode(hall, sleeping=False) == "color_temp"
-    assert resolve_color_mode(hall, sleeping=True) == "rgb"
-    assert resolve_color_mode({}, sleeping=False) == "color_temp"
 
 
 def test_valid_rgb() -> None:
@@ -91,26 +85,6 @@ def test_build_payload_color_temp_and_rgb() -> None:
     )
     assert rgb["color"] == {"r": 255, "g": 100, "b": 50}
     assert "color_temp" not in rgb
-
-
-def test_build_night_payload_color_temp() -> None:
-    expected = {
-        "brightness": pct_to_brightness(20),
-        "transition": 1.0,
-        "color_temp": kelvin_to_mired(2700),
-    }
-    assert expected == NIGHT
-
-
-def test_build_night_payload_rgb() -> None:
-    source = {"night_rgb": [10, 20, 30]}
-    payload = build_night_payload(source, 1.0)
-    assert payload["color"] == {"r": 10, "g": 20, "b": 30}
-
-
-def test_build_night_payload_defaults() -> None:
-    payload = build_night_payload({}, 1.0)
-    assert payload["color_temp"] == kelvin_to_mired(2700)  # default night ct
 
 
 def _plan(modes: dict[str, str]) -> list[tuple[str, Any]]:

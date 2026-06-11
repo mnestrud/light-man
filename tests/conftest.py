@@ -10,7 +10,6 @@ from typing import TYPE_CHECKING, Any
 from unittest.mock import patch
 
 import pytest
-from homeassistant.setup import async_setup_component
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.light_man.config_loader import validate_config
@@ -24,15 +23,6 @@ if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
 
 # --- Entity ids / topics used across the suite ------------------------------
-AL_OVERHEAD = "switch.al_overhead"
-AL_HALL = "switch.al_hall"
-SLEEP_SWITCH = "switch.sleep_mode"
-LEG_OVERHEAD = "input_boolean.legacy_overhead"
-LEG_HALL = "input_boolean.legacy_hallway"
-
-# Recorded (service, data) for automation.turn_on/off — the tick toggle target.
-TICK_CALLS_KEY = "lm_tick_calls"
-
 OVERHEAD_ALL = "zigbee2mqtt/zgb_overhead_all/set"
 HALL_UP = "zigbee2mqtt/zgb_hallway_up/set"
 LR_SET = "zigbee2mqtt/zgb_living_room/set"
@@ -50,17 +40,11 @@ PORCH_A2_SET = "zigbee2mqtt/zgb_porch_a2/set"
 PORCH_OFF = "zigbee2mqtt/zgb_porch/set"
 
 SEED: dict[str, Any] = {
-    "seed_version": 6,
+    "seed_version": 7,
     "push_interval_s": 30,
     "sources": {
         "overhead": {
-            "al_switch": AL_OVERHEAD,
             "consolidated_topic": OVERHEAD_ALL,
-            "legacy_enable": LEG_OVERHEAD,
-            "day_color_mode": "color_temp",
-            "night_color_mode": "color_temp",
-            "night_brightness_pct": 20,
-            "night_color_temp_kelvin": 2700,
             "profile": {
                 "min_br": 30,
                 "max_br": 90,
@@ -80,12 +64,7 @@ SEED: dict[str, Any] = {
             },
         },
         "hallway_up": {
-            "al_switch": AL_HALL,
             "consolidated_topic": HALL_UP,
-            "legacy_enable": LEG_HALL,
-            "day_color_mode": "color_temp",
-            "night_color_mode": "rgb",
-            "sleep_switch": SLEEP_SWITCH,
             "profile": {
                 "min_br": 30,
                 "max_br": 90,
@@ -201,31 +180,7 @@ def _fixed_solar() -> Iterator[None]:
 
 
 async def seed_states(hass: HomeAssistant) -> None:
-    """Set up the legacy booleans, AL dummy switches, and stub tick services."""
-    await async_setup_component(
-        hass,
-        "input_boolean",
-        {"input_boolean": {"legacy_overhead": None, "legacy_hallway": None}},
-    )
-    # Stub + record automation.turn_on/off so the toggle's tick reconcile both
-    # succeeds and is observable (real ServiceRegistry is slotted, can't patch).
-    tick_calls: list[tuple[str, dict[str, Any]]] = []
-
-    def _record_tick(call: Any) -> None:
-        tick_calls.append((call.service, dict(call.data)))
-
-    hass.services.async_register("automation", "turn_on", _record_tick)
-    hass.services.async_register("automation", "turn_off", _record_tick)
-    hass.data[TICK_CALLS_KEY] = tick_calls
-    hass.states.async_set(
-        AL_OVERHEAD, "on", {"brightness_pct": 50, "color_temp_kelvin": 4000}
-    )
-    hass.states.async_set(
-        AL_HALL,
-        "on",
-        {"brightness_pct": 30, "color_temp_kelvin": 2700, "rgb_color": [255, 100, 50]},
-    )
-    hass.states.async_set(SLEEP_SWITCH, "off", {})
+    """No external HA state is needed — the engine is the sole value source."""
     await hass.async_block_till_done()
 
 

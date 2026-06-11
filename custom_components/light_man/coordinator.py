@@ -7,9 +7,8 @@ so an off room is never re-on'd and a held look is never clobbered.
 
 Modes are driven only by explicit Inovelli action intents (``config_*`` hold,
 single taps release, held-dim freezes) — never inferred from switch on/off
-bounce. The single ``push_enable`` switch swaps the whole legacy stack: ON
-disables the master tick automation + the a16-a19 booleans and runs Light Man;
-OFF restores them and goes inert.
+bounce. The ``push_enable`` switch is a plain master on/off: ON runs the adaptive
+push, OFF makes Light Man inert (it no longer touches any legacy stack).
 """
 
 from __future__ import annotations
@@ -21,7 +20,6 @@ from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any, NamedTuple, TypedDict
 
 from homeassistant.components import mqtt
-from homeassistant.const import STATE_UNAVAILABLE, STATE_UNKNOWN
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.start import async_at_started
 from homeassistant.helpers.sun import get_astral_event_next
@@ -31,11 +29,7 @@ from homeassistant.util import dt as dt_util
 from .adaptive import compute_target, day_look, night_look, sleep_ramp
 from .const import (
     ACTION_SUFFIX,
-    ATTR_BRIGHTNESS_PCT,
-    ATTR_COLOR_TEMP_KELVIN,
-    ATTR_RGB_COLOR,
-    CONF_AL_SWITCH,
-    CONF_LEGACY_ENABLE,
+    CONF_CONSOLIDATED_TOPIC,
     CONF_LIGHTS,
     CONF_OCCUPANCY,
     CONF_OCCUPANCY_KEY,
@@ -62,23 +56,14 @@ from .const import (
     SOLAR_MIDNIGHT_EVENT,
     STATE_OFF,
     STATE_ON,
-    TICK_AUTOMATION,
 )
-from .models import AdaptiveValues
 from .modes import action_to_mode
-from .push import (
-    _room_target,
-    build_night_payload,
-    build_payload,
-    plan_publishes,
-    resolve_color_mode,
-)
+from .push import _room_target, build_payload, plan_publishes
 from .solar import solar_inputs
 
 if TYPE_CHECKING:
     from homeassistant.config_entries import ConfigEntry
     from homeassistant.core import HomeAssistant
-    from homeassistant.helpers.typing import StateType
 
     from .config_loader import ValidatedConfig
     from .models import (
@@ -212,15 +197,11 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
             self._unsubs.append(
                 await mqtt.async_subscribe(self.hass, topic, self._handle_occupancy)
             )
-        # Defer the legacy reconcile until HA has started — the automation /
-        # input_boolean services aren't registered yet during entry setup.
-        self._unsubs.append(
-            async_at_started(self.hass, self._reconcile_legacy_on_start)
-        )
+        # Defer the first push until HA has fully started.
+        self._unsubs.append(async_at_started(self.hass, self._takeover_on_start))
 
-    async def _reconcile_legacy_on_start(self, _hass: HomeAssistant) -> None:
-        """Take over once HA (and its services) are up: reconcile, then push."""
-        await self._reconcile_legacy(enabled=self.push_enabled)
+    async def _takeover_on_start(self, _hass: HomeAssistant) -> None:
+        """Run the first push once HA is fully up (if Light Man is enabled)."""
         if self.push_enabled:
             await self._run_push(force=True)
             self.async_set_updated_data(self._snapshot())
@@ -229,10 +210,6 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         """Unsubscribe all MQTT subscriptions (called on unload)."""
         while self._unsubs:
             self._unsubs.pop()()
-
-    async def async_restore_legacy(self) -> None:
-        """Re-enable the legacy stack (tick + booleans) — called on unload."""
-        await self._reconcile_legacy(enabled=False)
 
     def is_known_room(self, room: str) -> bool:
         """Return True if ``room`` exists in the seed config (service validation)."""
@@ -244,7 +221,7 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
             "push_interval_s": self._config[CONF_PUSH_INTERVAL],
             "sources": {
                 key: {
-                    "al_switch": source.get(CONF_AL_SWITCH),
+                    "consolidated_topic": source.get(CONF_CONSOLIDATED_TOPIC),
                     "rooms": sorted(source.get(CONF_ROOMS, {})),
                 }
                 for key, source in self._config[CONF_SOURCES].items()
@@ -312,11 +289,7 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         adaptive_payload = self._adaptive_payload(
             key, source, elevation, noon, now_minutes, sleep_s, transition
         )
-        if adaptive_payload is None:
-            return [], []
-        day_payload, night_payload = self._look_payloads(
-            source, adaptive_payload, transition
-        )
+        day_payload, night_payload = self._look_payloads(source, transition)
         rooms = source.get(CONF_ROOMS, {})
         modes = {r: self._modes.mode_of(r) for r in rooms if self._modes.is_held(r)}
         plan = plan_publishes(
@@ -376,30 +349,17 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         now_minutes: float,
         sleep_s: float,
         transition: float,
-    ) -> tuple[PushPayload, EngineTarget | None] | None:
-        """Return ``(payload, engine_target | None)`` for a source, or None.
+    ) -> tuple[PushPayload, EngineTarget]:
+        """Return ``(payload, engine_target)`` for a source via the engine.
 
-        Profile sources use the real-elevation engine; a profile-less source
-        falls back to its AL dummy switch (its color mode follows the global
-        sleep flag). Shared by the periodic push and occupancy turn-on.
+        The real-elevation engine is the sole value source (the loader requires a
+        ``profile`` on every source). Shared by the periodic push and occupancy
+        turn-on.
         """
-        profile = source.get("profile")
-        if profile is not None:
-            target = compute_target(
-                elevation, noon, profile, sleep_s=sleep_s, now_minutes=now_minutes
-            )
-            return _target_to_payload(target, transition), target
-        adaptive = self._read_adaptive(source)
-        if adaptive is None:
-            return None
-        payload = build_payload(
-            brightness_pct=adaptive["brightness_pct"],
-            color_temp_kelvin=adaptive["color_temp_kelvin"],
-            rgb_color=adaptive["rgb_color"],
-            mode=resolve_color_mode(source, sleeping=self.sleep_on),
-            transition=transition,
+        target = compute_target(
+            elevation, noon, source["profile"], sleep_s=sleep_s, now_minutes=now_minutes
         )
-        return payload, None
+        return _target_to_payload(target, transition), target
 
     def _adaptive_payload(
         self,
@@ -410,37 +370,29 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         now_minutes: float,
         sleep_s: float,
         transition: float,
-    ) -> PushPayload | None:
+    ) -> PushPayload:
         """Return the live adaptive payload for a source, recording diagnostics."""
-        result = self._source_payload(
+        payload, target = self._source_payload(
             source, elevation, noon, now_minutes, sleep_s, transition
         )
-        if result is None:
-            return None
-        payload, target = result
-        if target is not None:
-            self.diagnostics["engine"][key] = {
-                "elevation": round(elevation, 2),
-                "brightness_pct": round(target.brightness_pct, 1),
-                "color_mode": target.color_mode,
-                "color_temp_kelvin": target.color_temp_kelvin,
-                "rgb_color": list(target.rgb_color) if target.rgb_color else None,
-            }
+        self.diagnostics["engine"][key] = {
+            "elevation": round(elevation, 2),
+            "brightness_pct": round(target.brightness_pct, 1),
+            "color_mode": target.color_mode,
+            "color_temp_kelvin": target.color_temp_kelvin,
+            "rgb_color": list(target.rgb_color) if target.rgb_color else None,
+        }
         return payload
 
     def _look_payloads(
-        self, source: SourceConfig, adaptive_payload: PushPayload, transition: float
+        self, source: SourceConfig, transition: float
     ) -> tuple[PushPayload, PushPayload]:
-        """Return the ``(day, night)`` hold payloads for a source's config taps.
+        """Return the engine's ``(day, night)`` forced-hold looks for a source.
 
-        Profile sources get the engine's forced day (peak-sun) and night (sun
-        down + sleep) looks — distinct from the live adaptive value, so a hold is
-        actually visible. A profile-less source falls back to the live value for
-        day and its config night target for night.
+        Day = the curve at peak sun; night = the curve at sun-down + sleep — both
+        distinct from the live adaptive value, so a config-tap hold is visible.
         """
-        profile = source.get("profile")
-        if profile is None:
-            return adaptive_payload, build_night_payload(source, transition)
+        profile = source["profile"]
         return (
             _target_to_payload(day_look(profile), transition),
             _target_to_payload(night_look(profile), transition),
@@ -513,23 +465,6 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
             _LOGGER.info("MQTT reconnected; resuming push")
         else:
             _LOGGER.warning("MQTT unavailable; skipping push until reconnected")
-
-    # --- adaptive value reads (AL dummy switches are HA-internal, not Zigbee) -
-
-    def _read_adaptive(self, source: SourceConfig) -> AdaptiveValues | None:
-        """Read brightness/ct/rgb from the source's AL dummy switch state."""
-        state = self.hass.states.get(source[CONF_AL_SWITCH])
-        if state is None or state.state in (STATE_UNAVAILABLE, STATE_UNKNOWN):
-            return None
-        bri: StateType = state.attributes.get(ATTR_BRIGHTNESS_PCT)
-        ct: StateType = state.attributes.get(ATTR_COLOR_TEMP_KELVIN)
-        if bri is None or ct is None:
-            return None
-        return AdaptiveValues(
-            brightness_pct=float(bri),
-            color_temp_kelvin=float(ct),
-            rgb_color=state.attributes.get(ATTR_RGB_COLOR),
-        )
 
     # --- sleep overlay (Light-Man-owned global toggle + ramp) ---------------
 
@@ -640,10 +575,10 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
             return None
         local = dt_util.as_local(now)
         now_minutes = local.hour * 60 + local.minute + local.second / 60
-        result = self._source_payload(
+        payload, _target = self._source_payload(
             source, elevation, noon, now_minutes, self._compute_sleep_s(now), transition
         )
-        return result[0] if result is not None else None
+        return payload
 
     # --- modes --------------------------------------------------------------
 
@@ -692,43 +627,14 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         """Re-publish every source now, bypassing dedup."""
         await self._run_push(force=True)
 
-    # --- single-toggle stack switch ----------------------------------------
+    # --- master on/off switch ----------------------------------------------
 
     async def async_set_push_enabled(self, *, enabled: bool) -> None:
-        """Flip the stack: ON runs LM + legacy off; OFF restores legacy."""
+        """Master on/off. ON runs the adaptive push; OFF makes Light Man inert."""
         self.push_enabled = enabled
-        await self._reconcile_legacy(enabled=enabled)
         if enabled:
             await self._run_push(force=True)
         self.async_set_updated_data(self._snapshot())
-
-    async def _reconcile_legacy(self, *, enabled: bool) -> None:
-        """Drive the legacy stack to the inverse of Light Man ownership.
-
-        The ``automation`` / ``input_boolean`` services may not be registered yet
-        if this runs early in boot, so each call is guarded — a missing service is
-        skipped rather than raised (the ``async_at_started`` hook re-runs the
-        reconcile once HA is fully up).
-        """
-        if self.hass.services.has_service("automation", "turn_off"):
-            await self.hass.services.async_call(
-                "automation",
-                "turn_off" if enabled else "turn_on",
-                {"entity_id": TICK_AUTOMATION},
-                blocking=False,
-            )
-        entity_ids = [
-            legacy
-            for source in self._config[CONF_SOURCES].values()
-            if (legacy := source.get(CONF_LEGACY_ENABLE))
-        ]
-        if entity_ids and self.hass.services.has_service("input_boolean", "turn_off"):
-            await self.hass.services.async_call(
-                "input_boolean",
-                "turn_off" if enabled else "turn_on",
-                {"entity_id": entity_ids},
-                blocking=False,
-            )
 
     # --- MQTT message handling ---------------------------------------------
 
@@ -752,7 +658,7 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
     async def _on_action(self, base: str, action: str) -> None:
         """Apply an action's mode intent to the base switch's room."""
         if not self.push_enabled:
-            return  # inert in legacy mode — the blueprint owns taps
+            return  # inert when Light Man is off — the blueprint owns taps
         mapping = self._switch_map.get(base)
         if mapping is None:
             return

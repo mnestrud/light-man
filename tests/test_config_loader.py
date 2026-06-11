@@ -126,18 +126,25 @@ def test_missing_sources_raises() -> None:
         validate_config({"push_interval_s": 30})
 
 
-def test_source_missing_al_switch_raises() -> None:
+def test_source_missing_profile_raises() -> None:
     bad: dict[str, Any] = {
         "sources": {"x": {"consolidated_topic": "zigbee2mqtt/x/set"}}
     }
-    with pytest.raises(ValueError, match="missing 'al_switch'"):
+    with pytest.raises(ValueError, match="missing 'profile'"):
         validate_config(bad)
 
 
 def test_source_missing_consolidated_topic_raises() -> None:
-    bad: dict[str, Any] = {"sources": {"x": {"al_switch": "switch.x"}}}
+    bad: dict[str, Any] = {"sources": {"x": {"profile": {"min_br": 30}}}}
     with pytest.raises(ValueError, match="missing 'consolidated_topic'"):
         validate_config(bad)
+
+
+def test_source_transition_is_carried() -> None:
+    cfg = copy.deepcopy(SEED)
+    cfg["sources"]["overhead"]["transition_s"] = 2.5
+    result = validate_config(cfg)
+    assert result.config["sources"]["overhead"]["transition_s"] == 2.5
 
 
 def test_bad_interval_is_soft_issue() -> None:
@@ -146,14 +153,6 @@ def test_bad_interval_is_soft_issue() -> None:
     result = validate_config(cfg)
     assert result.config["push_interval_s"] == 30
     assert any("push_interval_s" in issue for issue in result.issues)
-
-
-def test_unknown_color_mode_is_soft_issue() -> None:
-    cfg = copy.deepcopy(SEED)
-    cfg["sources"]["overhead"]["day_color_mode"] = "rainbow"
-    result = validate_config(cfg)
-    assert result.config["sources"]["overhead"]["day_color_mode"] == "color_temp"
-    assert any("rainbow" in issue for issue in result.issues)
 
 
 def test_holdable_room_without_set_topic_is_flagged() -> None:

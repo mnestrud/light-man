@@ -34,7 +34,7 @@ async def async_setup_entry(
 
 
 class PushEnableSwitch(LightManEntity, RestoreEntity, SwitchEntity):
-    """ON: Light Man owns the push (legacy floods off). OFF: revert to legacy.
+    """Master on/off. ON: Light Man runs the adaptive push. OFF: Light Man is inert.
 
     Defaults ON and restores across restarts, so Light Man is the house default
     and you never have to re-enable it after a reboot.
@@ -48,12 +48,11 @@ class PushEnableSwitch(LightManEntity, RestoreEntity, SwitchEntity):
         super().__init__(coordinator, UID_PUSH_ENABLE)
 
     async def async_added_to_hass(self) -> None:
-        """Take over the push on startup unless it was explicitly turned off.
+        """Restore the enabled state on startup unless it was turned off.
 
-        On a cold boot the ``automation`` / ``input_boolean`` services aren't
-        registered yet, so we only set the desired state here; the coordinator's
-        ``async_at_started`` hook does the legacy reconcile + takeover once HA is
-        fully up. When added while HA is already running (a reload), reconcile now.
+        On a cold boot we only set the desired state here; the coordinator's
+        ``async_at_started`` hook runs the first push once HA is fully up. When
+        added while HA is already running (a reload), push now.
         """
         await super().async_added_to_hass()
         last = await self.async_get_last_state()
@@ -64,15 +63,15 @@ class PushEnableSwitch(LightManEntity, RestoreEntity, SwitchEntity):
 
     @property
     def is_on(self) -> bool:
-        """True when Light Man owns the adaptive push."""
+        """True when Light Man is running the adaptive push."""
         return self.coordinator.push_enabled
 
     async def async_turn_on(self, **kwargs: Any) -> None:
-        """Take over the push and turn the legacy floods off."""
+        """Enable Light Man's adaptive push."""
         await self.coordinator.async_set_push_enabled(enabled=True)
 
     async def async_turn_off(self, **kwargs: Any) -> None:
-        """Hand the push back to the legacy stack."""
+        """Disable Light Man — it goes inert (no pushes)."""
         await self.coordinator.async_set_push_enabled(enabled=False)
 
 

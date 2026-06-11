@@ -60,10 +60,11 @@ views; the linter is cross-cutting. Built on the four overlay graphs and reconci
 editor — see data-model.md S3):
 
 1. **Overview** — live house state + global controls. Per **source-group** target tiles (current
-   brightness/color/mode from the engine snapshot); **push on/off**; **sleep on/off**
-   (`switch.light_man_sleep`) with **ramp progress** and the global **ramp-in/ramp-out** timing;
-   **force push** + **clear all holds**; the **active holds** list (which light groups, the look, countdowns,
-   per-hold release); a **linter summary badge**.
+   brightness/color/mode from the engine snapshot); **push on/off**; the global **push interval**
+   (`push_interval_s`, the cadence in seconds); **sleep on/off** (`switch.light_man_sleep`) with **ramp
+   progress** and the global **ramp-in/ramp-out** timing; **force push** + **clear all holds**; the
+   **active holds** list (which light groups, the look, countdowns, per-hold release); a **linter summary
+   badge**.
 2. **Rooms** — the primary, task-oriented surface ("tune this room"). One card per **physical room**
    (merged; kitchen = overhead + island groups together). **Lights** organized by their **source group**,
    each showing the group's **assigned curve** — curve assignment is **per source group** here (S1; the main
@@ -107,7 +108,7 @@ the 4 curves, the Hallway/Stairwell occupancy). Lit + hand-rolled SVG/canvas for
 ```
 +- Light Man -------------------------------- [Rooms][Curves][Occupancy][Activity] -+
 |                                                                                    |
-|  Push [ ON o]    Sleep [o OFF]  ramp 90m/30m   [ Force push ]  [ Clear holds ]     |
+|  Push [ ON o]  every 30s   Sleep [o OFF]  ramp 90m/30m   [ Force push ] [ Clear holds ] |
 |                                                                   (!) 2 alerts >   |
 |  Live targets (source groups)                                                      |
 |  +--------------+ +--------------+ +--------------+ +--------------+               |

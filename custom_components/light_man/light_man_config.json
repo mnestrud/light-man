@@ -1,15 +1,9 @@
 {
-  "seed_version": 6,
+  "seed_version": 7,
   "push_interval_s": 30,
   "sources": {
     "overhead": {
-      "al_switch": "switch.adaptive_lighting_al_dummy_overhead_control",
       "consolidated_topic": "zigbee2mqtt/zgb_overhead_all/set",
-      "legacy_enable": "input_boolean.adaptive_lighting_overhead_all",
-      "day_color_mode": "color_temp",
-      "night_color_mode": "color_temp",
-      "night_brightness_pct": 20,
-      "night_color_temp_kelvin": 2700,
       "profile": {
         "min_br": 30,
         "max_br": 90,
@@ -67,13 +61,7 @@
       }
     },
     "accent": {
-      "al_switch": "switch.adaptive_lighting_accent_light_adaptive_lighting_control",
       "consolidated_topic": "zigbee2mqtt/zgb_accent_all/set",
-      "legacy_enable": "input_boolean.adaptive_lighting_accent_all",
-      "day_color_mode": "color_temp",
-      "night_color_mode": "color_temp",
-      "night_brightness_pct": 20,
-      "night_color_temp_kelvin": 2700,
       "profile": {
         "min_br": 10,
         "max_br": 30,
@@ -99,12 +87,7 @@
       }
     },
     "hallway_up": {
-      "al_switch": "switch.hallway_uplights_adaptive_adaptive_lighting_hallway_uplights_adaptive",
       "consolidated_topic": "zigbee2mqtt/zgb_hallway_up/set",
-      "legacy_enable": "input_boolean.adaptive_lighting_switch_hallway",
-      "day_color_mode": "rgb",
-      "night_color_mode": "rgb",
-      "sleep_switch": "switch.adaptive_lighting_hallway_uplights_adaptive_adaptive_lighting_sleep_mode_hallway_uplights_adaptive",
       "profile": {
         "min_br": 30,
         "max_br": 90,
@@ -121,12 +104,7 @@
       "rooms": {}
     },
     "hallway_down": {
-      "al_switch": "switch.hallway_downlights_adaptive_adaptive_lighting_hallway_downlights_adaptive",
       "consolidated_topic": "zigbee2mqtt/zgb_hallway_down/set",
-      "legacy_enable": "input_boolean.adaptive_lighting_switch_hallway",
-      "day_color_mode": "color_temp",
-      "night_color_mode": "rgb",
-      "sleep_switch": "switch.adaptive_lighting_hallway_downlights_adaptive_adaptive_lighting_sleep_mode_hallway_downlights_adaptive",
       "profile": {
         "min_br": 30,
         "max_br": 90,

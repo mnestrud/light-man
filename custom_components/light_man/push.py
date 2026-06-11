@@ -10,11 +10,7 @@ from typing import TYPE_CHECKING, cast
 
 from .const import (
     BRIGHTNESS_MAX,
-    COLOR_MODE_COLOR_TEMP,
     COLOR_MODE_RGB,
-    DEFAULT_COLOR_MODE,
-    DEFAULT_NIGHT_BRIGHTNESS_PCT,
-    DEFAULT_NIGHT_COLOR_TEMP_KELVIN,
     HELD_DAY,
     HELD_MANUAL,
     HELD_NIGHT,
@@ -44,13 +40,6 @@ def mired_to_kelvin(mired: float) -> int:
     if mired <= 0:
         return 0
     return round(1_000_000 / mired)
-
-
-def resolve_color_mode(source: SourceConfig, *, sleeping: bool) -> str:
-    """Pick the active color mode for a source given the sleep state."""
-    if sleeping:
-        return source.get("night_color_mode", DEFAULT_COLOR_MODE)
-    return source.get("day_color_mode", DEFAULT_COLOR_MODE)
 
 
 def valid_rgb(rgb: object) -> bool:
@@ -84,21 +73,6 @@ def build_payload(
     else:
         payload["color_temp"] = kelvin_to_mired(color_temp_kelvin)
     return payload
-
-
-def build_night_payload(source: SourceConfig, transition: float) -> PushPayload:
-    """Build the source's night-hold payload from its Light-Man-owned target."""
-    rgb = source.get("night_rgb")
-    use_rgb = valid_rgb(rgb)
-    return build_payload(
-        brightness_pct=source.get("night_brightness_pct", DEFAULT_NIGHT_BRIGHTNESS_PCT),
-        color_temp_kelvin=source.get(
-            "night_color_temp_kelvin", DEFAULT_NIGHT_COLOR_TEMP_KELVIN
-        ),
-        rgb_color=rgb if use_rgb else None,
-        mode=COLOR_MODE_RGB if use_rgb else COLOR_MODE_COLOR_TEMP,
-        transition=transition,
-    )
 
 
 def _room_target(

@@ -14,35 +14,27 @@ PLATFORMS: Final = ["sensor", "switch"]
 CONFIG_STORE_KEY: Final = "light_man_config"
 CONFIG_STORE_VERSION: Final = 1
 # Content version of the bundled seed. Bump when the shipped light_man_config.json
-# gains new structure (e.g. Phase 2 per-source profiles) so installs whose Store
-# predates it re-seed from the bundle instead of running a stale config.
-BUNDLED_SEED_VERSION: Final = 6
-# Per-room mode intent; must survive restarts so a held look is not dropped.
+# changes structure so installs whose Store predates it re-seed from the bundle
+# instead of running a stale config. v7 dropped the vestigial AL-fallback fields
+# (al_switch, day/night_color_mode, night_* targets, sleep_switch) and the legacy
+# cutover (legacy_enable + the master-tick disable) — the engine is the sole source.
 MODES_STORE_KEY: Final = "light_man_modes"
 MODES_STORE_VERSION: Final = 1
+BUNDLED_SEED_VERSION: Final = 7
 
 # --- Seed-config JSON keys --------------------------------------------------
 CONF_PUSH_INTERVAL: Final = "push_interval_s"
 CONF_SOURCES: Final = "sources"
-CONF_AL_SWITCH: Final = "al_switch"
 CONF_CONSOLIDATED_TOPIC: Final = "consolidated_topic"
-CONF_LEGACY_ENABLE: Final = "legacy_enable"
-CONF_DAY_COLOR_MODE: Final = "day_color_mode"
-CONF_NIGHT_COLOR_MODE: Final = "night_color_mode"
-CONF_SLEEP_SWITCH: Final = "sleep_switch"
 CONF_TRANSITION: Final = "transition_s"
+CONF_PROFILE: Final = "profile"
 CONF_ROOMS: Final = "rooms"
 CONF_SET_TOPIC: Final = "set_topic"
 CONF_SWITCHES: Final = "switches"
-# Night-hold target (Light-Man-owned; Phase 2's engine replaces these).
-CONF_NIGHT_BRIGHTNESS_PCT: Final = "night_brightness_pct"
-CONF_NIGHT_COLOR_TEMP_KELVIN: Final = "night_color_temp_kelvin"
-CONF_NIGHT_RGB: Final = "night_rgb"
 
 # --- Color modes ------------------------------------------------------------
 COLOR_MODE_COLOR_TEMP: Final = "color_temp"
 COLOR_MODE_RGB: Final = "rgb"
-COLOR_MODES: Final = frozenset({COLOR_MODE_COLOR_TEMP, COLOR_MODE_RGB})
 
 # --- Defaults ---------------------------------------------------------------
 DEFAULT_PUSH_INTERVAL_S: Final = 30
@@ -52,20 +44,16 @@ DEFAULT_TRANSITION_S: Final = 1.0
 # correctness (the color-mode split was a stale bulb group membership, fixed at
 # the device; see docs/reference/bulb-split-investigation.md).
 INTER_PUBLISH_DELAY_S: Final = 0.15
-DEFAULT_COLOR_MODE: Final = COLOR_MODE_COLOR_TEMP
-# Night-hold fallback when a source declares no night target.
-DEFAULT_NIGHT_BRIGHTNESS_PCT: Final = 20.0
-DEFAULT_NIGHT_COLOR_TEMP_KELVIN: Final = 2700.0
 
 # --- Device value ranges (Z2M) ---------------------------------------------
 BRIGHTNESS_MAX: Final = 254
 MIRED_MIN: Final = 153  # ~6500 K
 MIRED_MAX: Final = 500  # 2000 K
 
-# --- Adaptive engine (Phase 2) ----------------------------------------------
-# Real-solar-elevation target engine that replaces the AL dummy switches. These
-# are *engine* constants (not per-source); the per-source profile lives in the
-# seed config / OptionsFlow. Design: docs/reference/adaptive-algorithm.md.
+# --- Adaptive engine --------------------------------------------------------
+# Real-solar-elevation target engine (the sole adaptive source). These are
+# *engine* constants (not per-source); the per-source profile lives in the seed
+# config / OptionsFlow. Design: docs/reference/adaptive-algorithm.md.
 # Fixed color reference = summer solar-noon elevation at the house lat/long, so
 # winter daylight stays honestly warmer (the curve is not renormalized per day).
 REF_ELEVATION_DEG: Final = 71.5
@@ -80,11 +68,6 @@ DEFAULT_SAT: Final = 0.5
 # day_window is enabled — the window gates the edges without remapping midday.
 DEFAULT_EDGE_TRANSITION_S: Final = 1800.0  # 30 min ramp into the live curve
 DEFAULT_WIND_DOWN_S: Final = 5400.0  # 90 min wind-down to the night floor
-
-# --- AL dummy-switch attributes (read from HA state, not Zigbee) ------------
-ATTR_BRIGHTNESS_PCT: Final = "brightness_pct"
-ATTR_COLOR_TEMP_KELVIN: Final = "color_temp_kelvin"
-ATTR_RGB_COLOR: Final = "rgb_color"
 
 # --- MQTT topic suffixes ----------------------------------------------------
 ACTION_SUFFIX: Final = "/action"
@@ -128,9 +111,6 @@ CONF_OFF_TRANSITION: Final = "off_transition_s"
 # Default JSON field in an Inovelli mmwave payload that reports overall presence.
 DEFAULT_OCCUPANCY_KEY: Final = "occupancy"
 DEFAULT_OCCUPANCY_TRANSITION_S: Final = 1.5
-
-# --- Legacy stack the single toggle disables while Light Man owns the push ---
-TICK_AUTOMATION: Final = "automation.ataraxia_lighting_master_tick_automation"
 
 # --- Services ---------------------------------------------------------------
 SERVICE_RELEASE_HOLD: Final = "release_hold"

@@ -27,21 +27,14 @@ class RoomConfig(TypedDict):
 
 
 class SourceConfig(TypedDict, total=False):
-    """One adaptive source (overhead / accent / hallway_up / hallway_down)."""
+    """One adaptive source (overhead / accent / hallway_up / hallway_down).
 
-    al_switch: str
+    The real-elevation engine ``profile`` is the sole value source; ``rooms`` are
+    the per-room addressable groups used to exclude held rooms from the flood.
+    """
+
     consolidated_topic: str
-    legacy_enable: str | None
-    day_color_mode: str
-    night_color_mode: str
-    sleep_switch: str | None
     transition_s: float
-    # Light-Man-owned night-hold target (Phase 2's engine replaces these).
-    night_brightness_pct: float
-    night_color_temp_kelvin: float
-    night_rgb: list[int] | None
-    # Phase 2 adaptive-engine profile (seeded from the live AL config). Carried
-    # through the loader untouched until the engine wires into the coordinator.
     profile: SourceProfile
     rooms: dict[str, RoomConfig]
 
@@ -115,15 +108,7 @@ class PushPayload(TypedDict, total=False):
     color: RGB
 
 
-class AdaptiveValues(TypedDict):
-    """The three attributes read from an AL dummy switch."""
-
-    brightness_pct: float
-    color_temp_kelvin: float
-    rgb_color: list[int] | None
-
-
-# --- Phase 2: adaptive-target engine ---------------------------------------
+# --- Adaptive-target engine -------------------------------------------------
 
 
 class SleepProfile(TypedDict, total=False):

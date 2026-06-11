@@ -2,9 +2,9 @@
 
 Light Man is the single adaptive brain for the Zigbee bulbs: it owns the
 per-source push, the per-room mode (adaptive / held look / off-respect), and a
-single ``push_enable`` toggle that swaps the whole legacy stack. Modes are
-driven by explicit Inovelli action intents over MQTT. Topology + per-source
-night targets load from a Store-seeded JSON (bundled default on first run).
+``push_enable`` master on/off toggle. Modes are driven by explicit Inovelli
+action intents over MQTT. Topology + per-source engine profiles load from a
+Store-seeded JSON (bundled default on first run).
 See docs/PLAN.md and docs/reference/ARCHITECTURE.md.
 """
 
@@ -98,8 +98,6 @@ async def async_unload_entry(hass: HomeAssistant, entry: LightManConfigEntry) ->
     if unload_ok:
         coordinator = entry.runtime_data.coordinator
         coordinator.shutdown_subscriptions()
-        # Hand the house back to the legacy stack (tick + booleans on).
-        await coordinator.async_restore_legacy()
         if not hass.config_entries.async_loaded_entries(DOMAIN):
             async_unregister_services(hass)
     return unload_ok

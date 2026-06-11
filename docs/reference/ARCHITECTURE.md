@@ -224,11 +224,12 @@ are transient.
   holds. Look application, LED effects, PowerView shade scenes, accent toggling, and the held-dim ramp
   stay in the switch-taps blueprint. The tick blueprint keeps a1–a15 (Inovelli unicast); **a16–a19 are
   owned by Light Man** via the single-toggle below.
-- **Single-toggle fallback (until Phase 2):** `switch.light_man_push_enable` is the sole control — ON
-  runs the push and drives the legacy a16–a19 enable booleans (`adaptive_lighting_overhead_all`,
-  `…_accent_all`, `…_switch_hallway`) OFF; OFF no-ops the push and drives them back ON; startup
-  reconciles them to the switch state. The two stacks are never active together; reverting is one flip.
-  This legacy-boolean coupling is removed in Phase 2 when the tick retires.
+- **Master on/off:** `switch.light_man_push_enable` is the sole control — ON runs the push, OFF makes
+  Light Man inert. **(Updated v0.5.0, 2026-06-11:** the original design coupled this toggle to the legacy
+  a16–a19 enable booleans + the master-tick automation, reconciling them on every flip and re-enabling
+  them on unload. That `_reconcile_legacy` machinery is **removed** now that the legacy stack is
+  permanently registry-disabled on live — the toggle is a plain master on/off and Light Man no longer
+  touches any legacy entity.)*
 
 ---
 

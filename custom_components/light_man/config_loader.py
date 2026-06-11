@@ -10,18 +10,16 @@ as issues and surfaced in diagnostics — they never fail setup.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import cast
 
 from .const import (
-    COLOR_MODES,
-    CONF_AL_SWITCH,
     CONF_CONSOLIDATED_TOPIC,
-    CONF_DAY_COLOR_MODE,
     CONF_LIGHTS,
-    CONF_NIGHT_COLOR_MODE,
     CONF_OCCUPANCY,
     CONF_OCCUPANCY_KEY,
     CONF_OFF_LIGHTS,
     CONF_OFF_TRANSITION,
+    CONF_PROFILE,
     CONF_PUSH_INTERVAL,
     CONF_ROOMS,
     CONF_SENSORS,
@@ -32,7 +30,7 @@ from .const import (
     CONF_SWEEP,
     CONF_SWITCHES,
     CONF_TOPIC,
-    DEFAULT_COLOR_MODE,
+    CONF_TRANSITION,
     DEFAULT_OCCUPANCY_KEY,
     DEFAULT_OCCUPANCY_TRANSITION_S,
     DEFAULT_PUSH_INTERVAL_S,
@@ -45,6 +43,7 @@ from .models import (
     OccupancyZone,
     RoomConfig,
     SourceConfig,
+    SourceProfile,
 )
 
 
@@ -89,21 +88,6 @@ def _validate_room(
     return RoomConfig(set_topic=set_topic, switches=switches)
 
 
-def _apply_color_modes(
-    source_key: str, raw: dict[str, object], source: SourceConfig, issues: list[str]
-) -> None:
-    """Normalize the day/night color modes onto ``source``, collecting issues."""
-    for mode_key in (CONF_DAY_COLOR_MODE, CONF_NIGHT_COLOR_MODE):
-        mode = raw.get(mode_key, DEFAULT_COLOR_MODE)
-        if mode not in COLOR_MODES:
-            issues.append(
-                f"{source_key}.{mode_key}: unknown color mode {mode!r}, "
-                f"using {DEFAULT_COLOR_MODE!r}"
-            )
-            mode = DEFAULT_COLOR_MODE
-        source[mode_key] = mode
-
-
 def _validate_rooms(
     source_key: str,
     raw_rooms: object,
@@ -135,35 +119,30 @@ def _validate_source(
     switch_map: dict[str, tuple[str, str]],
     issues: list[str],
 ) -> SourceConfig:
-    """Validate one source block; structural errors raise, soft ones collect."""
+    """Validate one source block; structural errors raise, soft ones collect.
+
+    A source needs a ``consolidated_topic`` (the flood target) and a ``profile``
+    (the real-elevation engine is the sole value source). ``transition_s`` is the
+    only optional carry-through.
+    """
     if not isinstance(raw, dict):
         msg = f"source {source_key!r} must be a mapping"
         raise ValueError(msg)
-    al_switch = raw.get(CONF_AL_SWITCH)
     consolidated = raw.get(CONF_CONSOLIDATED_TOPIC)
-    if not isinstance(al_switch, str) or not al_switch:
-        msg = f"source {source_key!r} is missing '{CONF_AL_SWITCH}'"
-        raise ValueError(msg)
+    profile = raw.get(CONF_PROFILE)
     if not isinstance(consolidated, str) or not consolidated:
         msg = f"source {source_key!r} is missing '{CONF_CONSOLIDATED_TOPIC}'"
         raise ValueError(msg)
+    if not isinstance(profile, dict):
+        msg = f"source {source_key!r} is missing '{CONF_PROFILE}'"
+        raise ValueError(msg)
 
     source: SourceConfig = {
-        CONF_AL_SWITCH: al_switch,
         CONF_CONSOLIDATED_TOPIC: consolidated,
+        CONF_PROFILE: cast("SourceProfile", profile),
     }
-    _apply_color_modes(source_key, raw, source, issues)
-    for opt in (
-        "legacy_enable",
-        "sleep_switch",
-        "transition_s",
-        "night_brightness_pct",
-        "night_color_temp_kelvin",
-        "night_rgb",
-        "profile",
-    ):
-        if opt in raw:
-            source[opt] = raw[opt]
+    if CONF_TRANSITION in raw:
+        source[CONF_TRANSITION] = cast("float", raw[CONF_TRANSITION])
     source[CONF_ROOMS] = _validate_rooms(
         source_key, raw.get(CONF_ROOMS, {}), switch_map, issues
     )

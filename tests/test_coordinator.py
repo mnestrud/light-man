@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import copy
 import json
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any
@@ -12,23 +11,16 @@ from unittest.mock import patch
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.util import dt as dt_util
 from pytest_homeassistant_custom_component.common import (
-    MockConfigEntry,
     async_fire_mqtt_message,
 )
 
-from custom_components.light_man.config_loader import validate_config
-from custom_components.light_man.const import DOMAIN, TICK_AUTOMATION
-from custom_components.light_man.coordinator import LightManCoordinator, _truthy
-from custom_components.light_man.modes import ModeManager
+from custom_components.light_man.coordinator import _truthy
 
 from .conftest import (
-    AL_OVERHEAD,
     HALL_CENTER_SET,
     HALL_OFF,
     HALL_UP,
     KIT_SET,
-    LEG_HALL,
-    LEG_OVERHEAD,
     LR_SET,
     LR_SWITCH,
     MMWAVE_EAST,
@@ -38,11 +30,7 @@ from .conftest import (
     PORCH_A1_SET,
     PORCH_A2_SET,
     PORCH_OFF,
-    SEED,
-    TICK_CALLS_KEY,
-    FakeStore,
     published,
-    seed_states,
 )
 
 if TYPE_CHECKING:
@@ -68,27 +56,21 @@ def _fire(hass: HomeAssistant, topic: str, payload: Any) -> None:
     async_fire_mqtt_message(hass, topic, payload)
 
 
-async def test_startup_reconciles_legacy_on(
-    hass: HomeAssistant, coordinator: Coord
-) -> None:
-    """Push starts disabled, so the legacy booleans are driven ON."""
+async def test_push_starts_disabled(hass: HomeAssistant, coordinator: Coord) -> None:
+    """The coordinator constructs with the push disabled (the switch enables it)."""
     assert coordinator.push_enabled is False
-    assert hass.states.get(LEG_OVERHEAD).state == "on"
-    assert hass.states.get(LEG_HALL).state == "on"
 
 
-async def test_enable_floods_and_legacy_off(
+async def test_enable_floods(
     hass: HomeAssistant, coordinator: Coord, mqtt_mock: Any
 ) -> None:
-    """Enabling floods both consolidated groups and drives legacy booleans off."""
+    """Enabling floods both consolidated groups."""
     mqtt_mock.async_publish.reset_mock()
     await coordinator.async_set_push_enabled(enabled=True)
     await hass.async_block_till_done()
     pubs = published(mqtt_mock)
     assert pubs[OVERHEAD_ALL] == DAY
     assert HALL_UP in pubs
-    assert hass.states.get(LEG_OVERHEAD).state == "off"
-    assert hass.states.get(LEG_HALL).state == "off"
 
 
 async def test_start_hook_takes_over_when_enabled(
@@ -97,44 +79,13 @@ async def test_start_hook_takes_over_when_enabled(
     """The async_at_started hook floods on takeover when push is already enabled.
 
     Mirrors a cold boot where the switch restored ON before HA finished starting:
-    the switch sets the flag, and the deferred hook does the reconcile + push.
+    the switch sets the flag, and the deferred hook runs the first push.
     """
     coordinator.push_enabled = True
     mqtt_mock.async_publish.reset_mock()
-    await coordinator._reconcile_legacy_on_start(hass)
+    await coordinator._takeover_on_start(hass)
     await hass.async_block_till_done()
-    pubs = published(mqtt_mock)
-    assert pubs[OVERHEAD_ALL] == DAY
-    assert hass.states.get(LEG_OVERHEAD).state == "off"
-
-
-async def test_toggle_drives_tick_automation(
-    hass: HomeAssistant, coordinator: Coord
-) -> None:
-    """The toggle disables the master tick on, and re-enables it off."""
-    calls = hass.data[TICK_CALLS_KEY]
-    tick = {"entity_id": TICK_AUTOMATION}
-
-    calls.clear()
-    await coordinator.async_set_push_enabled(enabled=True)
-    await hass.async_block_till_done()
-    assert ("turn_off", tick) in calls
-
-    calls.clear()
-    await coordinator.async_set_push_enabled(enabled=False)
-    await hass.async_block_till_done()
-    assert ("turn_on", tick) in calls
-
-
-async def test_unload_restore_calls_tick_on(
-    hass: HomeAssistant, coordinator: Coord
-) -> None:
-    """async_restore_legacy re-enables the tick (removal-safe fallback)."""
-    calls = hass.data[TICK_CALLS_KEY]
-    calls.clear()
-    await coordinator.async_restore_legacy()
-    await hass.async_block_till_done()
-    assert ("turn_on", {"entity_id": TICK_AUTOMATION}) in calls
+    assert published(mqtt_mock)[OVERHEAD_ALL] == DAY
 
 
 async def test_sleep_snap_applies_engine_sleep_target(
@@ -403,79 +354,6 @@ async def test_invalidate_unknown_room_is_noop(
     coordinator._invalidate_room("ghost")
 
 
-async def test_profiled_source_ignores_unavailable_al(
-    hass: HomeAssistant, coordinator: Coord, mqtt_mock: Any
-) -> None:
-    """A profiled source is engine-driven, so an unavailable AL switch is moot."""
-    hass.states.async_set(AL_OVERHEAD, "unavailable", {})
-    await hass.async_block_till_done()
-    mqtt_mock.async_publish.reset_mock()
-    await coordinator.async_set_push_enabled(enabled=True)
-    await hass.async_block_till_done()
-    assert published(mqtt_mock)[OVERHEAD_ALL] == DAY
-
-
-async def _coord_for(hass: HomeAssistant, seed: Any) -> Coord:
-    """Build + set up a coordinator from a custom seed (push starts disabled)."""
-    entry = MockConfigEntry(domain=DOMAIN, title="Light Man")
-    entry.add_to_hass(hass)
-    modes = ModeManager(FakeStore(None))
-    await modes.async_load()
-    coord = LightManCoordinator(hass, entry, validate_config(seed), modes)
-    await coord._async_setup()
-    await coord.async_refresh()
-    await hass.async_block_till_done()
-    return coord
-
-
-async def test_profileless_source_uses_al_fallback(
-    hass: HomeAssistant, mqtt_mock: Any
-) -> None:
-    """A source with no profile falls back to its AL dummy switch value."""
-    await seed_states(hass)
-    seed = copy.deepcopy(SEED)
-    del seed["sources"]["overhead"]["profile"]
-    coord = await _coord_for(hass, seed)
-    mqtt_mock.async_publish.reset_mock()
-    await coord.async_set_push_enabled(enabled=True)
-    await hass.async_block_till_done()
-    assert published(mqtt_mock)[OVERHEAD_ALL] == {
-        "brightness": 127,
-        "transition": 1.0,
-        "color_temp": 250,
-    }
-
-
-async def test_profileless_source_skips_on_unavailable_al(
-    hass: HomeAssistant, mqtt_mock: Any
-) -> None:
-    """A profile-less source with an unavailable AL switch is skipped."""
-    await seed_states(hass)
-    seed = copy.deepcopy(SEED)
-    del seed["sources"]["overhead"]["profile"]
-    hass.states.async_set(AL_OVERHEAD, "unavailable", {})
-    coord = await _coord_for(hass, seed)
-    mqtt_mock.async_publish.reset_mock()
-    await coord.async_set_push_enabled(enabled=True)
-    await hass.async_block_till_done()
-    assert OVERHEAD_ALL not in published(mqtt_mock)
-
-
-async def test_profileless_source_skips_on_missing_attrs(
-    hass: HomeAssistant, mqtt_mock: Any
-) -> None:
-    """A profile-less source whose AL switch lacks brightness is skipped."""
-    await seed_states(hass)
-    seed = copy.deepcopy(SEED)
-    del seed["sources"]["overhead"]["profile"]
-    hass.states.async_set(AL_OVERHEAD, "on", {"color_temp_kelvin": 4000})
-    coord = await _coord_for(hass, seed)
-    mqtt_mock.async_publish.reset_mock()
-    await coord.async_set_push_enabled(enabled=True)
-    await hass.async_block_till_done()
-    assert OVERHEAD_ALL not in published(mqtt_mock)
-
-
 async def test_mqtt_disabled_skips_publish(
     hass: HomeAssistant,
     coordinator: Coord,
@@ -512,25 +390,6 @@ async def test_publish_error_marks_then_recovers(
     await coordinator.async_force_push()
     await hass.async_block_till_done()
     assert coordinator.mqtt_available is True
-
-
-async def test_reconcile_without_legacy_enable(
-    hass: HomeAssistant, mqtt_mock: Any
-) -> None:
-    """A source with no legacy_enable still pushes; reconcile skips booleans."""
-    await seed_states(hass)
-    seed = copy.deepcopy(SEED)
-    for source in seed["sources"].values():
-        source.pop("legacy_enable", None)
-    entry = MockConfigEntry(domain=DOMAIN, title="Light Man")
-    entry.add_to_hass(hass)
-    modes = ModeManager(FakeStore(None))
-    await modes.async_load()
-    coord = LightManCoordinator(hass, entry, validate_config(seed), modes)
-    await coord._async_setup()
-    await coord.async_set_push_enabled(enabled=True)
-    await hass.async_block_till_done()
-    assert OVERHEAD_ALL in published(mqtt_mock)
 
 
 async def test_engine_drives_the_push_and_records_diagnostics(
