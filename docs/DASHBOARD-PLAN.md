@@ -1,7 +1,9 @@
 # Light Man — Web Control Panel (plan)
 
-**Status:** planning (added 2026-06-10; revised to the custom-panel architecture). Tracked in
-[`POST-LAUNCH.md`](POST-LAUNCH.md).
+**Status:** planning (added 2026-06-10; custom-panel architecture; **data model reconciled 2026-06-11**).
+Tracked in [`POST-LAUNCH.md`](POST-LAUNCH.md). The topology model the panel sits on — curve library,
+first-class rooms, dissolved source, two-layer occupancy, inline sweeps — is specified in
+[`reference/data-model.md`](reference/data-model.md); this doc covers the panel itself (delivery, IA, build).
 
 ## Goal
 
@@ -50,20 +52,42 @@ a **custom integration**, so the equivalent is:
                          Store config  +  MQTT (Z2M)
 ```
 
-## App layout (tabs, now free-form)
+## App layout — room-centric IA
 
-Same information as before, but laid out as a real app instead of cards:
+The model is **room-centric** (the human mental model); curves and occupancy are sibling views; the linter
+is cross-cutting. Built on the four overlay graphs and reconciled schema in
+[`reference/data-model.md`](reference/data-model.md). Tabs:
 
-1. **Overview** — live house state: per-source current target (brightness/color/mode) updating in real
-   time, push on/off, sleep state + ramp progress, active holds with countdowns, big action buttons.
-2. **Profiles** — per-source editor: sliders + numeric inputs for min/max brightness, warm/cool ct
-   endpoints, sat, dusk/night floors; a daytime base **color picker**; `day_window` start/end; and a live
-   **elevation→target curve** (reuse `scripts/adaptive_sim.py`'s math in JS or have the backend compute it).
-3. **Sleep** — global toggle, ramp-in/out, per-source sleep targets, with a preview of the ramp.
-4. **Occupancy** — per-zone enable + timings; a **live sweep visualizer** (hallway segments lighting in
-   order on a floorplan-ish strip) fed by the occupancy WS stream; note/link for Z2M-side mmwave tuning.
-5. **Activity / log** — a live tail of Light Man's MQTT `/set` publishes + dedup skips + issues (the Z2M
+1. **Overview** — live house state: per-group current target (brightness/color/mode) updating in real time,
+   push on/off, sleep state + ramp progress, active holds with countdowns, big action buttons.
+2. **Rooms (home / physical)** — the primary, task-oriented surface. A room shows its **lights** (each with
+   its source-group + assigned curve), its **switches**, and its **sensors**. Edit relationships *inline*:
+   set a light/room's `curve_ref`; see (read-only) what each switch is **bound** to in Z2M; see the
+   cross-room edges ("these sensors also feed the Stairwell zone"). "Tune this room" lives here.
+3. **Curves (library + editor)** — named, reusable curves. Each shows the **elevation→target
+   visualization**: a brightness line across the solar arc, a color strip (CT gradient or flat RGB swatch
+   **per regime**), a **summer/equinox/winter** selector (the seasonal swing is real — `REF=71.5°` is
+   fixed), and a sleep-ramp preview. Create / duplicate-and-tweak / delete; a **"Used by"** backref shows
+   blast radius. **Day color** and **Sleep color** are each a mode toggle (CT ramp ↔ fixed RGB) — exactly
+   what separates `hallway_up` (fixed sky-blue→orange) from `hallway_down` (CT day→fixed purple). Curve math
+   reused from `custom_components/light_man/adaptive.py` / `reference/adaptive-algorithm.md` (port to JS or
+   compute server-side).
+4. **Sleep** — global toggle, ramp-in/out, per-curve sleep targets, with a preview of the ramp.
+5. **Occupancy (zones + sweep builder)** — per zone: its sensors (room-owned; cross-room ones flagged),
+   off-targets + all-clear rule. Per (zone, sensor): a **timeline sweep builder** — ordered stages, per-stage
+   delay, drag room **fixtures/switches** into stages — with a live replay and **duplicate / mirror**
+   actions. Sweeps reference room fixtures by id (resolving to set_topic + curve), so they can't drift from
+   the room's lights. Note/link for Z2M-side mmwave tuning.
+6. **Activity / log** — a live tail of Light Man's MQTT `/set` publishes + dedup skips + issues (the Z2M
    "I can see what it's doing" view), straight from the coordinator.
+
+### Linter (cross-cutting "smart alerts")
+
+Surfaced wherever relevant (room view, curve "Used by", zone view) and as a consolidated list; later
+promotable to HA repair issues. The full check list is in
+[`reference/data-model.md`](reference/data-model.md#config-linter-the-smart-alerts) — dangling `curve_ref`,
+orphan sensors, sweep fixtures owned by no room, missing `hue_native_control`, switch bound to the wrong
+group, bulb in a per-room but not the consolidated group, etc.
 
 ## Build pipeline
 
@@ -96,14 +120,19 @@ not a commitment to specific endpoints; treat its API bullets as candidates to b
 
 ## Implementation phases
 
-1. **Design the panel (UX + configuration approach).** No code. Produce:
-   - Tab structure + wireframes/mockups for each tab (Overview / Profiles / Sleep / Occupancy / Activity).
-   - The **configuration model** as the user experiences it: exactly what is editable, at what granularity
-     (source-level vs. per-room), how edits map onto the Store shapes (`SourceProfile` / sleep /
-     `OccupancyZone`), validation/limits, apply semantics (live vs. save button), and reset-to-seed.
-   - The live/read-only surfaces (current targets, occupancy, activity log) and how "live" they need to be.
-   - **Gate: confirm the design approach with the user before proceeding.** Nothing past this phase starts
-     until sign-off.
+1. **Design the panel (UX + configuration approach).** No code. **Largely done** — the configuration model
+   (what's editable, at what granularity, how it maps onto the Store) is decided and specified in
+   [`reference/data-model.md`](reference/data-model.md); the IA + editable/read-only surfaces are the
+   "App layout" section above. Remaining: per-tab wireframes/mockups, validation/limits, apply semantics
+   (live vs. save), and reset-to-seed. **Gate: confirm the design approach (this doc + data-model.md) before
+   proceeding.** Nothing past this phase starts until sign-off.
+1b. **Schema + migration (foundational).** Land the reconciled model in `models.py` (`curves{}` library,
+   first-class `Room`, light `curve_ref`+group tag, `OccupancyZone.sensors` as references, sweep `lights` as
+   room-fixture ids), with a **behaviour-preserving** old→new loader migration in `config_loader.py` and the
+   rewritten `light_man_config.json`. A test asserts the no-hold/no-override push plan is byte-identical to
+   today (4 consolidated floods). The coordinator's addressing generalizes for curve-divergent members
+   (`push.plan_publishes`) — see the addressing implication in data-model.md. This is independent of the
+   panel and can ship as a normal release ahead of it.
 2. **Design the API (only after sign-off).** Derive the minimal HTTP views + websocket commands from the
    confirmed UI: config read/write endpoints, action endpoints, and the live streams the design requires —
    shaped to the screens, not invented up front. (Confirm current `panel_custom` / static-path /
@@ -112,9 +141,9 @@ not a commitment to specific endpoints; treat its API bullets as candidates to b
    the coordinator + Store. Tests, 100% cov.
 4. **Panel registration + static serving.** Register the sidebar panel; serve a placeholder bundle; confirm
    it loads with the `hass` socket available.
-5. **Build the frontend.** The SPA + tabs against the API — read-only surfaces first, then the editors with
-   write-back + reset-to-seed.
-6. **Polish.** Curve/visualizer, auth/admin gating (`require_admin`), mobile layout.
+5. **Build the frontend.** The SPA + tabs against the API — read-only surfaces first, then the editors
+   (room relationships, curve library, sweep builder) with write-back + reset-to-seed.
+6. **Polish.** Curve/visualizer, the live linter, auth/admin gating (`require_admin`), mobile layout.
 
 ## Open decisions (resolve at build time)
 
