@@ -21,9 +21,14 @@ This checklist is not optional. "Resume directly" does not skip it.
 
 | Path | Role |
 |------|------|
-| `custom_components/light_man/__init__.py` | Entry setup/unload, PLATFORMS, stale device cleanup |
-| `custom_components/light_man/coordinator.py` | DataUpdateCoordinator, all API calls |
-| `custom_components/light_man/config_flow.py` | ConfigFlow, OptionsFlow, reauth, reconfigure |
+| `custom_components/light_man/__init__.py` | Entry setup/unload, PLATFORMS, panel + WS wiring |
+| `custom_components/light_man/coordinator.py` | DataUpdateCoordinator, all API calls, panel read models |
+| `custom_components/light_man/config_loader.py` | Validate stored data model → derive runtime view + switch_map |
+| `custom_components/light_man/models.py` | Stored data-model TypedDicts + runtime view types |
+| `custom_components/light_man/panel.py` | Register the `panel_custom` sidebar + serve the SPA (optional) |
+| `custom_components/light_man/websocket.py` | Read-only `websocket_api` commands (config + live subscribe) |
+| `custom_components/light_man/panel/index.js` | Dependency-free vanilla SPA (read-only, 5 tabs) |
+| `custom_components/light_man/config_flow.py` | ConfigFlow (confirm-only; no options flow) |
 | `custom_components/light_man/const.py` | All constants and defaults |
 | `custom_components/light_man/strings.json` | UI strings, exception translation keys |
 | `custom_components/light_man/translations/en.json` | Mirrors strings.json (required by HA) |

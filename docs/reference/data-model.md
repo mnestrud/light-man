@@ -1,10 +1,10 @@
 # Light Man — Reconciled Data Model (dashboard design)
 
-**Status:** design, sign-off pending (added 2026-06-11; simplified after review). This is the target
-topology model the web control panel (`docs/DASHBOARD-PLAN.md`) sits on. It supersedes the source-centric
-shape in `custom_components/light_man/light_man_config.json` / `models.py`. **No code/schema change lands
-until this design is signed off** (the design-first gate in `DASHBOARD-PLAN.md`); this doc is the artifact
-being reviewed.
+**Status:** ✅ **implemented** (`v0.6.0`, 2026-06-11). This is the topology model the web control panel
+(`docs/DASHBOARD-PLAN.md`) sits on; it supersedes the old source-centric shape in `light_man_config.json` /
+`models.py`, which now hold this shape. The stored schema + the byte-identical runtime derivation shipped in
+the Phase 1 schema migration (see "Staged work" below); the read-only panel that renders it shipped in Phase 2
+(`v0.7.0`). This doc is now the **reference** for the stored shape, not a pending design.
 
 Guiding principle: **complexity only where it buys functionality; preserve current behavior.** The review
 that produced this revision removed the heaviest new complexity (per-light curve addressing) on exactly that

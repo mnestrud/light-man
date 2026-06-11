@@ -320,8 +320,19 @@ because the UI + data model are signed off in Phase 0.
   panel without blocking the Python gate.
 - **Auth — `require_admin`** on the panel registration + all write views.
 
+## Current status (2026-06-11)
+
+**Paused after Phase 2.** Phases 0 (design), 1 (schema, `v0.6.0`) and 2 (read-only panel, `v0.7.0`) are
+shipped, deployed, and validated live on `dev`. The panel is a working **read-only** dashboard; it does not
+yet write config. **Phase 3 (editing + persistence) is the next executable step** and has not started — see
+the phase list above. Day-to-day tuning still goes through the git-bundled `light_man_config.json` until the
+write API lands.
+
 ## Still open (deferred by design)
 
-- **API endpoints** — the concrete HTTP views + WS commands are *derived* from the confirmed UI in Phase 2
-  (after sign-off), not invented now.
-- **Per-tab wireframes/mockups** — the remaining Phase-1 design deliverable.
+- **Read API endpoints** — *resolved in Phase 2*: `light_man/config` (WS request/response) + `light_man/subscribe`
+  (WS subscription). The **write** endpoints are still deferred to Phase 3 (derived from the editor screens).
+- **Per-tab wireframes/mockups** — *resolved*: the 5 read-only tabs are built (`panel/index.js`); the editor
+  surfaces (curve editor, sweep builder, per-group curve assignment) are designed in the wireframes above and
+  built in Phase 3.
+- **Lit migration + npm/Vite build pipeline** — deferred to Polish (v0.7.0 shipped dependency-free vanilla JS).

@@ -52,8 +52,10 @@ it seeds its topology from the bundled `light_man_config.json`.
 
 ## Configuration
 
-There is no UI panel yet (in progress — see `docs/DASHBOARD-PLAN.md`). The topology loads from a
-Store-seeded JSON (`custom_components/light_man/light_man_config.json`) in the reconciled data model
+A **read-only sidebar panel** ships (Phase 2 — "Light Man" in the HA left sidebar) for inspecting live
+targets, rooms, curves, occupancy zones, and recent publishes; **editing config from the panel is still in
+progress** (Phase 3 — see `docs/DASHBOARD-PLAN.md`). For now the topology loads from a Store-seeded JSON
+(`custom_components/light_man/light_man_config.json`) in the reconciled data model
 (`docs/reference/data-model.md`): a named **curve library**, curve-bearing **source groups**, first-class
 **rooms** (lights/switches/sensors), cross-room **occupancy zones**, and a **sleep** block.
 
