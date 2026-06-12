@@ -368,19 +368,14 @@ class LightManPanel extends HTMLElement {
   // --- Activity -------------------------------------------------------------
 
   _activity(st) {
-    const pubs = Object.entries(st.last_publish || {});
-    const inv = Object.entries(st.inovelli || {});
-    const rows = [
-      ...pubs.map(([t, p]) => ({ kind: "set", topic: t, payload: p })),
-      ...inv.map(([t, p]) => ({ kind: "switch", topic: t, payload: p })),
-    ]
+    const rows = Object.entries(st.last_publish || {})
       .map(
-        (r) =>
-          `<tr><td><span class="pill">${r.kind}</span></td><td class="mono">${short(r.topic)}</td><td class="mono small">${esc(JSON.stringify(r.payload))}</td></tr>`,
+        ([t, p]) =>
+          `<tr><td class="mono">${short(t)}</td><td class="mono small">${esc(JSON.stringify(p))}</td></tr>`,
       )
       .join("");
     return `<div class="muted">Latest publish per topic (live snapshot · ${st.dedup_skips || 0} dedup skips)</div>
-      ${rows ? `<table><thead><tr><th>kind</th><th>topic</th><th>payload</th></tr></thead><tbody>${rows}</tbody></table>` : empty("nothing published yet")}`;
+      ${rows ? `<table><thead><tr><th>topic</th><th>payload</th></tr></thead><tbody>${rows}</tbody></table>` : empty("nothing published yet")}`;
   }
 }
 

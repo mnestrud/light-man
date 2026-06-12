@@ -26,8 +26,9 @@ bindings, `hue_native_control`, and the Inovelli Smart Bulb Mode bindings.
 - **mmwave occupancy.** Subscribes to each Inovelli Blue mmwave sensor's `occupancy` over MQTT and runs a
   per-sensor **directional sweep** (staggered stages, e.g. hallway east→center→west) at the live engine
   value; turns the zone off when all its sensors clear.
-- **Inovelli prestage.** Pushes each switch's `defaultLevelLocal/Remote` to the live adaptive brightness
-  (so a tap-on comes up at the right level) plus the LED-bar brightness while the paddle is on.
+- **Switches are read-only.** Light Man never publishes to an Inovelli switch — paddle/config actions and
+  on/off state are inputs only. A tap-on comes up at the right level because the bulbs themselves are
+  staged while off by the adaptive flood (Hue native control), not by any switch-side level.
 - **One master toggle** turns Light Man on or off — ON runs the adaptive push, OFF makes it inert. It
   defaults ON and restores across restarts, so Light Man is the house default.
 

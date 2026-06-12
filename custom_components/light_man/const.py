@@ -88,9 +88,6 @@ DEFAULT_SAT: Final = 0.5
 DEFAULT_EDGE_TRANSITION_S: Final = 1800.0  # 30 min ramp into the live curve
 DEFAULT_WIND_DOWN_S: Final = 5400.0  # 90 min wind-down to the night floor
 
-# --- MQTT topic suffixes ----------------------------------------------------
-ACTION_SUFFIX: Final = "/action"
-SET_SUFFIX: Final = "/set"
 
 # --- Room modes -------------------------------------------------------------
 # A room is either `adaptive` (the default — no hold) or held at a look.

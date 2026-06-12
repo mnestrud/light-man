@@ -30,6 +30,7 @@ from .conftest import (
     HALL_OFF,
     HALL_UP,
     KIT_SET,
+    KIT_SWITCH,
     LR_SET,
     LR_SWITCH,
     MMWAVE_EAST,
@@ -338,12 +339,25 @@ async def test_inert_when_disabled(
     assert published(mqtt_mock) == {}
 
 
-async def test_action_topic_variant(hass: HomeAssistant, coordinator: Coord) -> None:
-    """A dedicated .../action topic (raw string) also holds."""
+async def test_stale_bundled_state_ignored(
+    hass: HomeAssistant, coordinator: Coord, mqtt_mock: Any
+) -> None:
+    """An action message's bundled (cached) `state` field is never processed.
+
+    Z2M attaches the pre-tap cached attributes to the action publish; reading
+    `{"action": "up_single", "state": "OFF"}` as a paddle-off staged the room
+    OFF right after the user turned it on (live office bug, 2026-06-12).
+    """
     await coordinator.async_set_push_enabled(enabled=True)
-    _fire(hass, LR_SWITCH + "/action", "config_single")
+    _fire(hass, LR_SWITCH, {"action": "down_single", "state": "ON"})
     await hass.async_block_till_done()
-    assert coordinator.data["held_count"] == 1
+    mqtt_mock.async_publish.reset_mock()
+    # The up tap arrives with the stale OFF still cached in the payload.
+    _fire(hass, LR_SWITCH, {"action": "up_single", "state": "OFF"})
+    await hass.async_block_till_done()
+    pubs = published(mqtt_mock)
+    assert OVERHEAD_ALL in pubs  # the turn-on flood happened
+    assert LR_SET not in pubs  # no stage-off fired against the fresh turn-on
 
 
 async def test_malformed_payload_ignored(
@@ -747,64 +761,51 @@ def test_truthy_coercions() -> None:
     assert _truthy(["x"]) is False
 
 
-# --- Inovelli defaultLevel/LED (absorb tick a1-a15) ------------------------
+# --- switches are never written (v0.7.6) ------------------------------------
 
-LR_SET_TOPIC = "zigbee2mqtt/Living Room Switch/set"
+SWITCH_BASES = (LR_SWITCH, KIT_SWITCH)
 
 
-async def test_inovelli_defaultlevel_published(
+def _assert_no_switch_writes(mqtt_mock: Any) -> None:
+    """No published topic may target an Inovelli switch.
+
+    On a Smart-Bulb-Mode VZM31 any level-type write — `brightness` or even the
+    "passive" `defaultLevelLocal/Remote` prestage — can drive the local Zigbee
+    bind and turn the bound bulb on. Switch topics are read-only inputs.
+    """
+    hit = [t for t in published(mqtt_mock) if t.startswith(SWITCH_BASES)]
+    assert not hit, f"published to switch topics: {hit}"
+
+
+async def test_no_switch_writes_on_push_and_force(
     hass: HomeAssistant, coordinator: Coord, mqtt_mock: Any
 ) -> None:
-    """Each room's switch gets the room's target brightness as defaultLevel."""
+    """Neither the enable flood nor a force push writes to any switch."""
     await coordinator.async_set_push_enabled(enabled=True)
     await hass.async_block_till_done()
-    # living_room is adaptive -> DAY brightness 229; paddle state unknown -> no LED bar.
-    assert published(mqtt_mock)[LR_SET_TOPIC] == {
-        "defaultLevelLocal": 229,
-        "defaultLevelRemote": 229,
-    }
-
-
-async def test_inovelli_led_bar_when_paddle_on(
-    hass: HomeAssistant, coordinator: Coord, mqtt_mock: Any
-) -> None:
-    """While the paddle is on, the LED-bar brightness is included."""
-    await coordinator.async_set_push_enabled(enabled=True)
-    _fire(hass, LR_SWITCH, {"state": "ON"})
-    await hass.async_block_till_done()
-    mqtt_mock.async_publish.reset_mock()
     await coordinator.async_force_push()
     await hass.async_block_till_done()
-    assert published(mqtt_mock)[LR_SET_TOPIC] == {
-        "defaultLevelLocal": 229,
-        "defaultLevelRemote": 229,
-        "brightness": 229,
-    }
+    _assert_no_switch_writes(mqtt_mock)
+    assert published(mqtt_mock)[OVERHEAD_ALL] == DAY  # bulbs still flooded
 
 
-async def test_inovelli_skips_manually_frozen_room(
+async def test_no_switch_writes_on_paddle_and_holds(
     hass: HomeAssistant, coordinator: Coord, mqtt_mock: Any
 ) -> None:
-    """A held-manual room leaves its switch's defaultLevel untouched."""
+    """Paddle on/off, config-tap holds, and release never write to a switch."""
     await coordinator.async_set_push_enabled(enabled=True)
-    _fire(hass, LR_SWITCH, {"action": "up_held"})  # -> HELD_MANUAL
-    await hass.async_block_till_done()
-    mqtt_mock.async_publish.reset_mock()
-    await coordinator.async_force_push()
-    await hass.async_block_till_done()
-    assert LR_SET_TOPIC not in published(mqtt_mock)
-
-
-async def test_inovelli_dedup_skips_unchanged(
-    hass: HomeAssistant, coordinator: Coord, mqtt_mock: Any
-) -> None:
-    """An unchanged defaultLevel is not re-published next cycle."""
-    await coordinator.async_set_push_enabled(enabled=True)
-    await hass.async_block_till_done()
-    mqtt_mock.async_publish.reset_mock()
-    await coordinator.async_refresh()
-    await hass.async_block_till_done()
-    assert LR_SET_TOPIC not in published(mqtt_mock)
+    for event in (
+        {"state": "ON"},
+        {"action": "config_single"},  # -> held night
+        {"action": "config_double"},  # -> held day
+        {"action": "up_held"},  # -> held manual
+        {"action": "up_single"},  # release -> on
+        {"action": "down_single"},  # release -> off (stage_off path)
+        {"state": "OFF"},
+    ):
+        _fire(hass, LR_SWITCH, event)
+        await hass.async_block_till_done()
+    _assert_no_switch_writes(mqtt_mock)
 
 
 # --- curve previews (panel time-of-day visualization) ----------------------

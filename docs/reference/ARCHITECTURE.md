@@ -214,6 +214,30 @@ stale bulb NVRAM groups; the **runtime** integration just never uses it. See §8
 > they never natively staged the consolidated flood (it turned them on); re-binding them to the Coordinator
 > (the state every healthy bulb has) restores stage-while-off.
 
+> **Switches are read-only — no writes at all (v0.7.6, 2026-06-12).** v0.7.5 kept the `defaultLevelLocal/
+> Remote` prestage on the theory it was passive, but the race persisted: with `bindingOffToOnSyncLevel:
+> Enabled` the switch replays its default level to the bound bulbs as `Move_To_Level_With_On_Off` ("send
+> default level with on/off"), so a freshly-written default level could still drive a bulb. Two-sided fix:
+> **(a)** Light Man no longer publishes to any Inovelli switch topic under any condition — `_inovelli_plan` /
+> `_publish_inovelli` and the `inovelli` diagnostics/panel feed were deleted; switch topics are pure inputs
+> (`action` + `state`). The dedup is also write-side only: `_last_published` compares Light Man's own
+> outgoing payloads and never reads switch-reported brightness. **(b)** `bindingOffToOnSyncLevel` was set to
+> `Disabled` on all 11 switches (validated by device read-back, 2026-06-12), so a tap-on sends a plain `On`
+> and the bulb wakes at its **own staged value** (hue-native staging from the flood), which is fresher than
+> any switch-side level could be. Trade-off: the switch's local default-level/LED-bar no longer tracks the
+> adaptive brightness — acceptable, since the bulb staging is the single source of the turn-on look.
+
+> **Action messages carry stale cached state — never read it (v0.7.7, 2026-06-12).** Z2M's device JSON
+> publish bundles the *cached* attribute snapshot with a tap's `action` — so the message for an up-tap right
+> after a turn-off arrives as `{"action": "up_single", "state": "OFF"}`. Reading that bundled `state` as a
+> fresh paddle-off ran `_stage_off` and **turned off the light the user had just turned on** (live office
+> capture, 15:11:30: up-tap → flood → `{state:OFF}` to the room one message later). Inversely, a down-tap
+> bundling stale `state: ON` force-flooded the group mid-turn-off. Fix: an action-bearing message is handled
+> as the action **only**; paddle state is tracked solely from action-less attribute reports (which carry the
+> real reported state, and arrive as no-edge no-ops when the action already handled the edge). The redundant
+> `<base>/action` topic subscription was dropped too — it duplicated every tap's handling (observed as double
+> force-floods per tap).
+
 ### 5.4 Write-on-change dedup
 Keep last-published per (source, target) in memory only; skip unchanged. Replaces
 `input_text.al_last_published`; `always_update=False` on the coordinator. Fold the color-mode
@@ -291,8 +315,9 @@ are transient.
   verification; color HA-state can be an optimistic echo. Mixed-bulb groups clamp HA color range to the
   narrowest member, but the MQTT path clamps per-bulb.
 - **Inovelli SBM binding:** VZM31-SN binds from EP1; VZM32-SN (mmWave) binds from **EP2**.
-  `BindingOffToOnSyncLevel: Enabled` on all switches → tap-on uses `defaultLevelLocal` written each
-  tick.
+  `bindingOffToOnSyncLevel` is **Disabled** on all switches since v0.7.6 (it was Enabled under the old
+  tick stack, where tap-on replayed a `defaultLevelLocal` written each tick) — tap-on now sends a plain
+  `On` and the bulb wakes at its own hue-native-staged value. Light Man never writes to a switch.
 - **Zigbee RF:** multicast lost in two waves; the existing tick stack traded per-tick implicit retries
   for fewer floods, mitigated by its drift-check reconcile loop. Light Man's push is level-triggered
   (re-asserts every cycle), which provides the same self-healing without a separate reconciler.

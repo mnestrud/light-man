@@ -28,7 +28,6 @@ from homeassistant.util import dt as dt_util
 
 from .adaptive import compute_target, day_look, night_look, sleep_ramp
 from .const import (
-    ACTION_SUFFIX,
     COLOR_MODE_COLOR_TEMP,
     COLOR_MODE_RGB,
     CONF_CONSOLIDATED_TOPIC,
@@ -55,13 +54,12 @@ from .const import (
     DEFAULT_TRANSITION_S,
     INTER_PUBLISH_DELAY_S,
     MODE_ADAPTIVE,
-    SET_SUFFIX,
     SOLAR_MIDNIGHT_EVENT,
     STATE_OFF,
     STATE_ON,
 )
 from .modes import action_to_mode
-from .push import _room_target, build_payload, plan_publishes
+from .push import build_payload, plan_publishes
 from .solar import day_profile, solar_inputs
 
 if TYPE_CHECKING:
@@ -140,7 +138,6 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
             for room in source.get(CONF_ROOMS, {})
         }
         self._last_published: dict[tuple[str, str], PushPayload] = {}
-        self._last_inovelli: dict[str, dict[str, Any]] = {}
         self._paddle_on: dict[str, bool] = {}
         self._unsubs: list[Any] = []
         self.push_enabled = False
@@ -182,7 +179,6 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
             "engine": {},
             "sleep": {"on": False, "s": 0.0},
             "occupancy": {},
-            "inovelli": {},
         }
 
     # --- lifecycle ----------------------------------------------------------
@@ -193,14 +189,13 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         pruned = await self._modes.prune(set(self._room_source))
         if pruned:
             _LOGGER.info("pruned orphaned holds: %s", ", ".join(sorted(pruned)))
+        # One subscription per switch: the device's JSON publish. It always
+        # carries `action` on a tap (Z2M output: json), so the separate
+        # `<base>/action` topic would only duplicate every tap's handling
+        # (observed live as double force-floods per tap).
         for base in self._switch_map:
             self._unsubs.append(
                 await mqtt.async_subscribe(self.hass, base, self._handle_message)
-            )
-            self._unsubs.append(
-                await mqtt.async_subscribe(
-                    self.hass, base + ACTION_SUFFIX, self._handle_message
-                )
             )
         for topic in self._bindings_by_topic:
             self._unsubs.append(
@@ -325,7 +320,6 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
             "engine": self.diagnostics.get("engine", {}),
             "addressing": self.diagnostics.get("addressing", {}),
             "last_publish": self.diagnostics.get("last_publish", {}),
-            "inovelli": self.diagnostics.get("inovelli", {}),
             "occupancy": self.diagnostics.get("occupancy", {}),
             "issues": self.diagnostics.get("issues", []),
             "dedup_skips": self.diagnostics.get("dedup_skips", 0),
@@ -352,6 +346,13 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         edge) the cycle is skipped rather than publishing a bad value. Group
         commands are Zigbee multicasts — a short inter-send gap keeps them from
         all landing in the same instant.
+
+        Light Man never publishes to an Inovelli switch topic — switches are
+        read-only inputs (actions + paddle state). On a Smart-Bulb-Mode VZM31
+        any level-type write (``brightness``, even the "passive"
+        ``defaultLevelLocal/Remote`` prestage) proved able to drive the local
+        Zigbee bind and turn the bound bulb on; all switch writes were removed
+        in v0.7.6. See ARCHITECTURE.md §5.
         """
         if not self.push_enabled:
             return
@@ -366,17 +367,13 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         sleep_s = self._compute_sleep_s(now)
         self.diagnostics["sleep"] = {"on": self.sleep_on, "s": round(sleep_s, 3)}
         plan: list[tuple[str, str, PushPayload]] = []
-        inovelli: list[tuple[str, dict[str, Any]]] = []
         for key, source in self._config[CONF_SOURCES].items():
             if only_source is not None and key != only_source:
                 continue
-            bulb, switches = self._plan_source(
-                key, source, elevation, noon, now_minutes, sleep_s
+            plan.extend(
+                self._plan_source(key, source, elevation, noon, now_minutes, sleep_s)
             )
-            plan.extend(bulb)
-            inovelli.extend(switches)
         await self._publish_spaced(plan, force=force)
-        await self._publish_inovelli(inovelli, force=force)
 
     def _plan_source(
         self,
@@ -386,8 +383,8 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         noon: float,
         now_minutes: float,
         sleep_s: float,
-    ) -> tuple[list[tuple[str, str, PushPayload]], list[tuple[str, dict[str, Any]]]]:
-        """Plan a source's bulb publishes + its rooms' Inovelli switch publishes."""
+    ) -> list[tuple[str, str, PushPayload]]:
+        """Plan a source's bulb publishes (switch topics are never written)."""
         transition = float(source.get(CONF_TRANSITION, DEFAULT_TRANSITION_S))
         adaptive_payload = self._adaptive_payload(
             key, source, elevation, noon, now_minutes, sleep_s, transition
@@ -403,52 +400,7 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
             modes=modes,
         )
         self.diagnostics["addressing"][key] = [topic for topic, _ in plan]
-        bulb = [(key, topic, payload) for topic, payload in plan]
-        switches = self._inovelli_plan(
-            source, adaptive_payload, day_payload, night_payload, modes
-        )
-        return bulb, switches
-
-    def _inovelli_plan(
-        self,
-        source: SourceConfig,
-        adaptive_payload: PushPayload,
-        day_payload: PushPayload,
-        night_payload: PushPayload,
-        modes: dict[str, str],
-    ) -> list[tuple[str, dict[str, Any]]]:
-        """Plan per-room Inovelli switch writes (absorbs the tick's a1-a15).
-
-        Each room's switch gets the room's target brightness as ``defaultLevel``
-        (the tap-on prestage — a passive config that only takes effect on the next
-        local/remote tap, never driving the bulb). A manually-frozen room is
-        skipped (its switch is left as-is).
-
-        It must **never** send ``brightness`` to the switch: on a Smart-Bulb-Mode
-        VZM31 ``brightness`` is a live dimmer-level command the local Zigbee bind
-        relays to the bound bulb, turning it **on** even when off (the switch's
-        relay reads ON in SBM while the bulb is off). That re-on'd lights every
-        cycle and made them impossible to turn off — see ARCHITECTURE.md §5.
-        """
-        plan: list[tuple[str, dict[str, Any]]] = []
-        for room, room_cfg in source.get(CONF_ROOMS, {}).items():
-            target = _room_target(
-                modes.get(room, MODE_ADAPTIVE),
-                adaptive_payload=adaptive_payload,
-                day_payload=day_payload,
-                night_payload=night_payload,
-            )
-            if target is None:
-                continue
-            bri = target["brightness"]  # build_payload always sets it
-            for base in room_cfg.get("switches", []):
-                plan.append(
-                    (
-                        base + SET_SUFFIX,
-                        {"defaultLevelLocal": bri, "defaultLevelRemote": bri},
-                    )
-                )
-        return plan
+        return [(key, topic, payload) for topic, payload in plan]
 
     def _source_payload(
         self,
@@ -519,20 +471,6 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
             if awaiting_gap:
                 await asyncio.sleep(INTER_PUBLISH_DELAY_S)
             awaiting_gap = await self._publish(source_key, topic, payload, force=force)
-
-    async def _publish_inovelli(
-        self, plan: list[tuple[str, dict[str, Any]]], *, force: bool
-    ) -> None:
-        """Publish per-room Inovelli switch writes with write-on-change dedup.
-
-        These are unicasts to individual switches (no mesh-multicast spacing).
-        """
-        for topic, payload in plan:
-            if not force and self._last_inovelli.get(topic) == payload:
-                continue
-            if await self._raw_publish(topic, payload):
-                self._last_inovelli[topic] = payload
-                self.diagnostics["inovelli"][topic] = payload
 
     async def _publish(
         self, source_key: str, topic: str, payload: PushPayload, *, force: bool
@@ -770,21 +708,26 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
     # --- MQTT message handling ---------------------------------------------
 
     async def _handle_message(self, msg: mqtt.ReceiveMessage) -> None:
-        """Route an incoming switch message to action/state handling."""
-        topic = msg.topic
-        payload = str(msg.payload)
-        if topic.endswith(ACTION_SUFFIX):
-            await self._on_action(topic[: -len(ACTION_SUFFIX)], payload)
-            return
-        data = _parse_json(payload)
+        """Route an incoming switch message to action OR state handling.
+
+        An action-bearing message is handled as the action **only**: Z2M bundles
+        the device's *cached* attributes with the action, so its ``state`` field
+        is the pre-tap value (observed live: ``{"action": "up_single",
+        "state": "OFF"}`` right after a turn-off — reading that ``OFF`` as a
+        fresh paddle-off staged the room OFF and killed the light the user just
+        turned on). Paddle state is tracked solely from action-less attribute
+        reports, which carry the switch's real reported state.
+        """
+        data = _parse_json(str(msg.payload))
         if data is None:
             return
         action = data.get("action")
         if isinstance(action, str) and action:
-            await self._on_action(topic, action)
+            await self._on_action(msg.topic, action)
+            return
         state = data.get("state")
         if isinstance(state, str):
-            await self._on_state(topic, state)
+            await self._on_state(msg.topic, state)
 
     async def _on_action(self, base: str, action: str) -> None:
         """Apply a tap: a config hold, or a release whose direction is on/off.

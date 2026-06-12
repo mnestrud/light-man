@@ -44,8 +44,20 @@ status boxes as items are picked up. Last reviewed: **2026-06-11**.
   an SBM VZM31 a `brightness` write is a live dimmer level the local bind relays to the bulb, turning it on
   (the switch's relay reads ON in SBM while the bulb is off), so the flood re-on'd lights every cycle.
   Companion device fix: 15 Hue bulbs were missing the `manuSpecificPhilips2 → Coordinator` bind (so they never
-  natively staged the flood); re-bound to the Coordinator. `zgb_hallwayf` set to `hue_native_control` (needs a
-  Z2M restart to apply). See `ARCHITECTURE.md` §5.3.
+  natively staged the flood); re-bound to the Coordinator. `zgb_hallwayf` set to `hue_native_control`
+  (applied — Z2M restarted with HA). See `ARCHITECTURE.md` §5.3.
+- [x] **Ignore the stale bundled `state` in action messages.** *(Done 2026-06-12, v0.7.7.)* Z2M bundles the
+  cached (pre-tap) attributes with a tap's `action`; reading that stale `state` as a fresh edge turned a
+  light back off right after an up-tap (and force-flooded mid-turn-off). Action-bearing messages now drive
+  the action only; paddle state comes solely from action-less reports. Also dropped the duplicate
+  `<base>/action` subscription (double force-floods per tap). See `ARCHITECTURE.md` §5.3.
+- [x] **Switches fully read-only + `bindingOffToOnSyncLevel` disabled.** *(Done 2026-06-12, v0.7.6.)*
+  The v0.7.5 `defaultLevel` prestage was NOT passive: with `bindingOffToOnSyncLevel: Enabled` the switch
+  replays its default level to the bound bulbs on tap-on ("send default level with on/off"), so the race
+  persisted. Removed **all** writes to Inovelli switches under every condition (`_inovelli_plan` /
+  `_publish_inovelli` deleted; `inovelli` panel feed dropped) and set `bindingOffToOnSyncLevel: Disabled`
+  on all 11 switches (validated by device read-back). Turn-on level now comes solely from the bulb's
+  hue-native staged value. See `ARCHITECTURE.md` §5.3.
 - [x] **Paddle-off `state:OFF` staging.** *(Done 2026-06-11, v0.7.4.)* On a switch-off, the room is staged
   with an explicit `{state:"OFF", <adaptive>}` (`coordinator._stage_off`) instead of the state-less
   consolidated flood — the flood's MQTT round-trip beat the local Zigbee binding's OFF and re-brightened the

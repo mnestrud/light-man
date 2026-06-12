@@ -190,8 +190,8 @@ unit a curve is assigned to (S1). The four recognizable groups remain visible in
 - `lights[]` — each `{ id, set_topic, source }`; its curve = `sources[source].curve_ref`. A room may hold
   lights from several source groups (kitchen overhead + island).
 - `switches[]` — each `{ topic, governs }` where `governs` is `"<room>.<light_id>"` — the **light group it is
-  SBM-bound to and holds** (S2). Switch writes are brightness-only (`defaultLevel` + LED bar), the brightness
-  coming from the governed light's source-group curve.
+  SBM-bound to and holds** (S2). Switch topics are **read-only inputs** (`action` + `state`); since v0.7.6
+  Light Man never writes to a switch (ARCHITECTURE §5.3).
 - `sensors{}` — the mmwave devices **mounted in this room** (`{topic, occupancy_key}`), defined once.
 
 ### Holds
