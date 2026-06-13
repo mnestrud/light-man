@@ -238,6 +238,21 @@ stale bulb NVRAM groups; the **runtime** integration just never uses it. See §8
 > `<base>/action` topic subscription was dropped too — it duplicated every tap's handling (observed as double
 > force-floods per tap).
 
+> **Hold-dim is a `Move` binding — the switch register need not track adaptive (investigated 2026-06-13).**
+> Concern: the adaptive flood moves the *bulb* over the day but not the *switch's* internal level register
+> (the switch isn't in the bulb group; it's bound separately on its dimming endpoint → the room group). If
+> the hardware hold-dim ramped from the switch register, a register drifted from the bulb would make a
+> press-hold *snap* the bulbs to the stale value first. **It doesn't** — the VZM31 hold-dim binding emits a
+> bare Level-Control `Move` (rate-based), which ramps the bound bulbs **from their own current level**,
+> independent of the switch register. Proven by a live divergence test: forced switch register 254 / bulb 40
+> (flood `zgb_office_overhead` to 40, switch untouched), then a press-hold-down rode the bulb **down from 40**
+> (`GROUP 40→38→…→2`) — it never jumped to 254. So **no switch-register sync is needed**, and reintroducing a
+> switch write (the pre-v0.7.5 `brightness`/`defaultLevel` path) is both unnecessary and unsafe. The "jump"
+> seen before 2026-06-12 was those old switch writes (now removed), not the binding. A passive bulb→switch
+> reporting bind was also ruled out: Zigbee attribute *reports* don't change the receiver's own
+> `currentLevel` (only `Move-to-Level` *commands* do, and bulbs don't command), and the bulbs report
+> `genLevelCtrl` to the coordinator only.
+
 ### 5.4 Write-on-change dedup
 Keep last-published per (source, target) in memory only; skip unchanged. Replaces
 `input_text.al_last_published`; `always_update=False` on the coordinator. Fold the color-mode
@@ -314,10 +329,16 @@ are transient.
   via the `multiColor` bitmask (write-only Philips cluster). Trust **brightness** reports for
   verification; color HA-state can be an optimistic echo. Mixed-bulb groups clamp HA color range to the
   narrowest member, but the MQTT path clamps per-bulb.
-- **Inovelli SBM binding:** VZM31-SN binds from EP1; VZM32-SN (mmWave) binds from **EP2**.
-  `bindingOffToOnSyncLevel` is **Disabled** on all switches since v0.7.6 (it was Enabled under the old
-  tick stack, where tap-on replayed a `defaultLevelLocal` written each tick) — tap-on now sends a plain
-  `On` and the bulb wakes at its own hue-native-staged value. Light Man never writes to a switch.
+- **Inovelli SBM binding:** the switch's bulb-control binding (`genOnOff` + `genLevelCtrl` → the room
+  group) lives on its dimming endpoint; `EP1` carries the reporting binding to the coordinator. (Live read
+  of the office VZM31: `EP2 → group 7` for control, `EP1 → coordinator` for reporting; the older note's
+  "VZM31 binds from EP1" referred to the reporting endpoint.) `bindingOffToOnSyncLevel` is **Disabled** on
+  all switches since v0.7.6 (it was Enabled under the old tick stack, where tap-on replayed a
+  `defaultLevelLocal` written each tick) — tap-on now sends a plain `On` and the bulb wakes at its own
+  hue-native-staged value. Light Man never writes to a switch.
+- **Hold-dim emits `Move`, not `Move-to-Level`:** press-hold ramps the bound bulbs from their **own current
+  level** (rate-based), so the switch's internal level register drifting from the adaptively-flooded bulb
+  does **not** cause a jump — no register sync is needed (verified by divergence test 2026-06-13; see §5.3).
 - **Zigbee RF:** multicast lost in two waves; the existing tick stack traded per-tick implicit retries
   for fewer floods, mitigated by its drift-check reconcile loop. Light Man's push is level-triggered
   (re-asserts every cycle), which provides the same self-healing without a separate reconciler.
