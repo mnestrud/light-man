@@ -4,8 +4,8 @@
 
 Run ALL of these before responding to any user message.
 
-1. `git -C "C:\Users\micha\code\light-man" status`
-2. `git -C "C:\Users\micha\code\light-man" log --oneline -5`
+1. `git -C /home/ataraxia/code/light-man status`
+2. `git -C /home/ataraxia/code/light-man log --oneline -5`
 3. Read `custom_components/light_man/manifest.json` → note version
 4. Read memory file `light_man_audit.md` → note quality tier and any unverified items
 
@@ -46,42 +46,29 @@ Platforms: `sensor, switch` | Min HA: `2026.1` | Repo: `https://github.com/mnest
 
 ## Running Tests Locally
 
-**Working directory: `C:\Users\micha\code\light-man`**
+**Working directory: `/home/ataraxia/code/light-man`**
 
-### Windows Prerequisites (one-time, before creating the venv)
-
-1. **C++ Build Tools** — required to build the `lru-dict` C extension that PHCC depends on.
-   Via Visual Studio Installer → "Build Tools for Visual Studio 2022" → workload **"Desktop development with C++"** (includes MSVC compiler + Windows 11 SDK). If SDK is missing, `pip install` will fail even with Build Tools present.
-
-2. **sitecustomize.py** — stubs Unix-only modules (fcntl, grp, pwd, resource, termios, tty) and patches asyncio/pytest-socket for Windows. After creating the venv, copy from an existing working venv:
-   ```
-   copy "C:\Users\micha\code\particle-man\.venv\Lib\site-packages\sitecustomize.py" ".venv\Lib\site-packages\sitecustomize.py"
-   ```
-   Without it: `ModuleNotFoundError: No module named 'fcntl'` at test collection.
-
-3. **Pin PHCC and mypy versions** in `requirements_test.txt`:
-   ```
-   pytest-homeassistant-custom-component==0.13.316
-   mypy==1.20.2
-   ```
+PHCC and mypy versions are pinned in `requirements_test.txt`
+(`pytest-homeassistant-custom-component==0.13.316`, `mypy==1.20.2`).
+(The old Windows-only prerequisites — MSVC build tools and the `sitecustomize.py` Unix-module
+shims — are not needed on Linux.)
 
 ```bash
 # First time — create venv
-python -m venv .venv
-.venv/Scripts/pip install -r requirements_test.txt
-# Windows: copy sitecustomize.py as described above
+uv venv .venv
+uv pip install -p .venv/bin/python -r requirements_test.txt
 
 # Type check (strict — flags come from pyproject.toml [tool.mypy])
-.venv/Scripts/mypy custom_components/light_man
+.venv/bin/mypy custom_components/light_man
 
 # All tests
-.venv/Scripts/pytest tests/ -q
+.venv/bin/pytest tests/ -q
 
 # With coverage
-.venv/Scripts/pytest tests/ --cov=custom_components/light_man --cov-report=term-missing -q
+.venv/bin/pytest tests/ --cov=custom_components/light_man --cov-report=term-missing -q
 
 # Stop on first failure
-.venv/Scripts/pytest tests/ -x --tb=short -q
+.venv/bin/pytest tests/ -x --tb=short -q
 ```
 
 Target: ≥95% coverage overall; 100% on config_flow. Any PR to main must hit this.
@@ -212,7 +199,7 @@ Target progression: Silver before first release → Gold code-complete before v1
 4. Write coordinator tests for success, HTTP error (4xx/5xx), and quota-block paths
 
 ### Fix a mypy error
-- Run: `.venv/Scripts/mypy custom_components/light_man`
+- Run: `.venv/bin/mypy custom_components/light_man`
 - Do not add `# type: ignore` without an explanatory comment
 - Common causes: dict access without guard, missing `| None`, no `from __future__ import annotations`
 
@@ -224,7 +211,7 @@ Target progression: Silver before first release → Gold code-complete before v1
 |------|-----|
 | HA entity API signatures, coordinator/flow patterns, HA breaking changes | `ha-dev` agent |
 | External API schemas, field names, quota details | integration-specific agent or direct research |
-| After robocopy deploy + restart confirmed | `ha-integration-validator` agent |
+| After rsync deploy + restart confirmed | `ha-integration-validator` agent |
 | General Python/testing questions | Answer directly — no agent |
 
 Invoke agents with the Agent tool (`subagent_type: ha-dev`). Don't answer HA API questions from training data — HA APIs change frequently.
@@ -233,16 +220,16 @@ Invoke agents with the Agent tool (`subagent_type: ha-dev`). Don't answer HA API
 
 ## Development and Deploy Workflow
 
-**Source of truth: git repo. Test target: live HA via Samba. These are two separate steps.**
+**Source of truth: git repo. Test target: live HA via the /mnt/ha-config mount. These are two separate steps.**
 
 ### Step 1 — Edit and test locally
-1. Edit files in `C:\Users\micha\code\light-man/custom_components/light_man/`
+1. Edit files in `/home/ataraxia/code/light-man/custom_components/light_man/`
 2. Run `pytest tests/ -q --tb=short` to catch regressions
 
 ### Step 2 — Deploy to live HA for integration testing
 ```bash
 # Mirror integration source to live HA
-robocopy "C:\Users\micha\code\light-man\custom_components\light_man" "\\botworth\config\custom_components\light_man" /MIR /NFL /NDL
+rsync -a --delete /home/ataraxia/code/light-man/custom_components/light_man/ /mnt/ha-config/custom_components/light_man/
 ```
 - **Config ownership:** today the git-bundled `light_man_config.json` is the source of truth, so `/MIR`
   deploys it normally. **Once the web panel owns device config** (writes the Store + a device config file),
@@ -268,7 +255,7 @@ git push origin dev
 Never commit to main directly. Open a PR (dev → main) when ready for release.
 
 ### What NOT to do
-- Do not edit Samba directly — git repo is source of truth; Samba is deploy target only
+- Do not edit /mnt/ha-config directly — git repo is source of truth; the mount is deploy target only
 - No `ha_write_file`, no patch subagents, no MCP file writes
 
 ---
