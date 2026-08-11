@@ -176,12 +176,23 @@ def auto_enable_custom_integrations(
 def socket_enabled() -> Iterator[None]:
     """Satisfy ``hass_ws_client``'s ``socket_enabled`` dependency.
 
-    ``pyproject.toml`` disables pytest-socket (``-p no:socket``) so missed MQTT
-    mocks surface — but that also drops the ``socket_enabled`` fixture the HA
-    websocket test client requires. Sockets aren't blocked (the plugin is off),
-    so a no-op shim is all the client needs.
+    ``pyproject.toml`` disables the pytest-socket plugin (``-p no:socket``) so
+    missed MQTT mocks surface — but that also drops the ``socket_enabled``
+    fixture the HA websocket test client requires. On Linux, PHCC still blocks
+    sockets directly (on Windows a sitecustomize shim used to mask this), so
+    the fixture must genuinely re-enable them for the websocket tests rather
+    than being a no-op.
     """
-    yield
+    try:
+        from pytest_socket import disable_socket, enable_socket
+    except ImportError:
+        yield
+        return
+    enable_socket()
+    try:
+        yield
+    finally:
+        disable_socket(allow_unix_socket=True)
 
 
 @pytest.fixture(scope="session")
