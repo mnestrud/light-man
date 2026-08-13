@@ -19,13 +19,25 @@ from typing import TYPE_CHECKING, TypedDict
 from astral.sun import elevation as solar_elevation
 from astral.sun import noon as solar_noon
 from astral.sun import sun as solar_sun
-from homeassistant.helpers.sun import get_astral_location
 from homeassistant.util import dt as dt_util
 
 if TYPE_CHECKING:
     from datetime import datetime
 
+    from astral import Observer
     from homeassistant.core import HomeAssistant
+
+try:
+    # HA 2026.x+ — get_astral_location is deprecated (removed 2027.7).
+    # type-ignore: the pinned test-env HA predates this helper; drop the ignore
+    # (and this whole shim) when requirements_test.txt moves past it.
+    from homeassistant.helpers.sun import get_astral_observer  # type: ignore[attr-defined]
+except ImportError:
+    from homeassistant.helpers.sun import get_astral_location
+
+    def get_astral_observer(hass: HomeAssistant) -> Observer:
+        """Fallback for cores that predate get_astral_observer."""
+        return get_astral_location(hass)[0].observer
 
 # Events labelled on the curve viz's time axis (clock minutes since midnight).
 _SUN_EVENTS = ("dawn", "sunrise", "noon", "sunset", "dusk")
@@ -46,8 +58,7 @@ def solar_inputs(hass: HomeAssistant, now: datetime) -> tuple[float, float]:
     today's solar noon at the house lat/long — the daily maximum the engine
     normalizes brightness against.
     """
-    location, _observer_elevation = get_astral_location(hass)
-    observer = location.observer
+    observer = get_astral_observer(hass)
     current = solar_elevation(observer, now)
     noon_when = solar_noon(observer, dt_util.as_local(now).date())
     noon_elevation = solar_elevation(observer, noon_when)
@@ -64,8 +75,7 @@ def day_profile(
     curve's brightness over the *whole* day (rise → peak → sunset wind-down) with
     real time-of-day labels. Pure read of HA's bundled ``astral``.
     """
-    location, _observer_elevation = get_astral_location(hass)
-    observer = location.observer
+    observer = get_astral_observer(hass)
     local = dt_util.as_local(when)
     date = local.date()
     midnight = local.replace(hour=0, minute=0, second=0, microsecond=0)
