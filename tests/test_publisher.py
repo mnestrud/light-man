@@ -346,12 +346,24 @@ async def test_planner_errors_are_logged_and_skipped(
     assert "planning a publish unit failed" in caplog.text
 
 
-async def test_oversized_tick_unit_waits_for_an_empty_window() -> None:
-    """A tick unit bigger than the tick budget never uses the interactive reserve."""
+async def test_oversized_tick_unit_waits_for_ticks_not_taps() -> None:
+    """N3: a tick unit over the tick budget waits for earlier tick sends only.
+
+    A tap in the window does not hold it back (no starvation under steady
+    taps); an earlier tick send does.
+    """
     h = Harness()
     h.pub.enqueue([_s("g/i0")], priority=PRIORITY_INTERACTIVE)
     await _drain(h)
     h.pub.enqueue([_s(f"g/{i}") for i in range(7)], priority=PRIORITY_TICK)
     await _drain(h)
     first_big = min(t for t, topic in h.sent if topic == "g/0")
-    assert first_big - h.sent[0][0] >= 10.0
+    assert first_big - h.sent[0][0] < 1.0  # the tap does not block it
+
+    h2 = Harness()
+    h2.pub.enqueue([_s("g/t0")], priority=PRIORITY_TICK)
+    await _drain(h2)
+    h2.pub.enqueue([_s(f"g/{i}") for i in range(7)], priority=PRIORITY_TICK)
+    await _drain(h2)
+    first_big = min(t for t, topic in h2.sent if topic == "g/0")
+    assert first_big - h2.sent[0][0] >= 10.0  # an earlier tick send does

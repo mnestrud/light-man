@@ -18,6 +18,7 @@ import json
 import logging
 import time
 from datetime import datetime, timedelta
+from functools import partial
 from typing import TYPE_CHECKING, Any, NamedTuple, TypedDict, cast
 
 from homeassistant.components import mqtt
@@ -193,6 +194,11 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         self._group_topics: set[str] | None = None
         self._group_members: dict[str, list[str]] = {}
         self._device_names: dict[str, str] = {}
+        self._groups_loaded = False
+        self._devices_loaded = False
+        self._state_resend: set[str] = set()  # topics whose OFF a retry keeps
+        self._force_pending: set[str] = set()  # sources with a forced unit queued
+        self._replanned_at: dict[str, float] = {}  # source -> last BUSY re-plan
         self._publisher = PacedPublisher(
             self._send,
             lambda coro: hass.async_create_task(coro, "lm_publisher", eager_start=True),
@@ -496,11 +502,15 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         the held-room re-asserts with the flood (review blockers 2 and 3).
         """
         source = self._config[CONF_SOURCES][key]
+        if force:
+            # A later unforced unit replaces this one by key; the force survives.
+            self._force_pending.add(key)
 
         def planner() -> list[Send]:
             t_end = dt_util.utcnow() + timedelta(seconds=self._interval)
             self._glide_end[key] = t_end
-            sends = self._plan_source(key, source, t_end, force=force)
+            forced = key in self._force_pending
+            sends = self._plan_source(key, source, t_end, force=forced)
             self._note_planned(sends, PRIORITY_TICK)
             return sends
 
@@ -508,6 +518,15 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
             f"source:{key}", planner, priority=PRIORITY_TICK
         )
         future.add_done_callback(self._on_sent)
+        future.add_done_callback(partial(self._on_source_sent, key))
+
+    def _on_source_sent(self, key: str, future: asyncio.Future[list[Send]]) -> None:
+        """Keep a source forced until one of its units is actually sent.
+
+        Re-planning on every pick and replacement by key must not drop it.
+        """
+        if future.result():
+            self._force_pending.discard(key)
 
     def _next_slot(self, key: str, clock: float) -> float:
         """Next due time on this source's own slot (A7 stagger).
@@ -541,7 +560,7 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
             self.diagnostics["addressing"][key] = {"mode": "deferred", "topics": []}
             return []  # a manual level is being read; this source waits one tick
         addressing, planned = plan_source(
-            source, adaptive_payload=adaptive, looks=looks
+            source, adaptive_payload=adaptive, looks=looks, max_unit=TICK_BUDGET
         )
         self.diagnostics["addressing"][key] = {
             "mode": addressing,
@@ -683,8 +702,8 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
             self._planned_at[send.topic] = now
             if self._outage:
                 self._outage_topics.add(send.topic)
-            if priority == PRIORITY_INTERACTIVE:
-                self._interactive_recent[send.topic] = (now, 0)
+            self._interactive_recent[send.topic] = (now, 0)  # retries per plan
+            self._state_resend.discard(send.topic)
 
     def _on_sent(self, future: asyncio.Future[list[Send]]) -> None:
         """Mark exactly what the broker acked (coalesced sends are not marked).
@@ -884,6 +903,7 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         sends = [Send(topic, off) for topic in zone.get(CONF_OFF_LIGHTS, [])]
         if sends:
             self._enqueue(sends, priority=PRIORITY_INTERACTIVE)
+            self._state_resend.update(send.topic for send in sends)
 
     async def _stage_off(self, source_key: str, light_ref: str) -> None:
         """Turn a room off + stage its adaptive value in one deterministic command.
@@ -1100,6 +1120,7 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
 
     async def _capture_manual_look(self, room: str, bulbs: list[str]) -> None:
         """Ask each bulb in turn until one replies with its composite state."""
+        self._forget_capture(room)
         await _pace_sleep(MANUAL_CAPTURE_DELAY_S)
         for bulb in bulbs[:MANUAL_CAPTURE_TRIES]:
             if self._closed or self._modes.mode_of(room) != HELD_MANUAL:
@@ -1116,6 +1137,7 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
                 self.hass, f"{self._z2m_base}/{bulb}/get", json.dumps({"state": ""})
             )
             await _pace_sleep(MANUAL_CAPTURE_REPLY_S)
+        self._forget_capture(room)
         self._capture_started.pop(room, None)
         if (
             self._modes.mode_of(room) == HELD_MANUAL
@@ -1124,6 +1146,12 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
             _LOGGER.warning(
                 "could not read the dimmed level for %s; it stays per-room", room
             )
+
+    def _forget_capture(self, room: str) -> None:
+        """Drop every unanswered ``/get`` for ``room`` (no stale reply later)."""
+        for bulb in [b for b, r in self._capture_room.items() if r == room]:
+            self._capture_room.pop(bulb, None)
+            self._capture_asked.pop(bulb, None)
 
     async def _handle_bulb_state(self, msg: mqtt.ReceiveMessage) -> None:
         """Turn the reply to our ``/get`` into the room's persisted manual look.
@@ -1165,7 +1193,13 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         return [self._device_names[i] for i in members if self._device_names.get(i)]
 
     def _capture_restored_manual_holds(self) -> None:
-        """At startup, read the level of manual holds restored without a look."""
+        """At startup, read the level of manual holds restored without a look.
+
+        Waits for both ``bridge/groups`` and ``bridge/devices``: without the
+        group list a group name would be mistaken for a bulb.
+        """
+        if not (self._groups_loaded and self._devices_loaded):
+            return
         for room in self._modes.held_rooms():
             if (
                 self._modes.mode_of(room) == HELD_MANUAL
@@ -1206,11 +1240,17 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         - A source's consolidated topic: re-plan the whole source (flood plus
           held-room re-asserts) as one unit — never the flood alone.
         - Any other topic: only if Light Man itself published it in the last
-          ``INTERACTIVE_RETRY_WINDOW_S`` and only once; never re-sending ``state``
-          (a stale paddle-off must not turn a room off later).
+          ``INTERACTIVE_RETRY_WINDOW_S`` and only once per plan. A zone-clear
+          OFF is re-sent as an OFF; a paddle-off's staging without ``state``
+          (the paddle may already be back on).
         """
         source_key = self._consolidated_source.get(topic)
         if source_key is not None:
+            now = self._clock()
+            last = self._replanned_at.get(source_key)
+            if last is not None and now - last < self._interval:
+                return  # mark cleared; the next due tick re-sends the source
+            self._replanned_at[source_key] = now
             self._enqueue_source(source_key, force=True)
             return
         payload = self._last_planned.get(topic)
@@ -1226,9 +1266,9 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         await _pace_sleep(INTERACTIVE_RETRY_DELAY_S)
         if self._closed:
             return
-        body = {k: v for k, v in payload.items() if k != "state"}
-        if "state" in payload and payload["state"] == STATE_ON:
-            body["state"] = STATE_ON  # an occupancy turn-on is still wanted
+        body = dict(payload)
+        if body.get("state") == STATE_OFF and topic not in self._state_resend:
+            body.pop("state")  # a paddle-off's staging: the paddle owns on/off
         future = self._publisher.enqueue(
             [Send(topic, body)], priority=PRIORITY_INTERACTIVE
         )
@@ -1311,6 +1351,8 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
                 ]
         self._group_members = members
         self._group_topics = {set_topic_for(self._z2m_base, name) for name in members}
+        self._groups_loaded = True
+        self._capture_restored_manual_holds()
 
     async def _handle_bridge_devices(self, msg: mqtt.ReceiveMessage) -> None:
         """IEEE → friendly name (manual-hold capture addresses a member bulb)."""
@@ -1324,6 +1366,7 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
                 for d in devices
                 if isinstance(d, dict) and "ieee_address" in d
             }
+            self._devices_loaded = True
             self._capture_restored_manual_holds()
 
     def _is_group(self, topic: str) -> bool:

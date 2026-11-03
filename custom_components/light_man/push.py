@@ -91,6 +91,7 @@ def plan_source(
     *,
     adaptive_payload: PushPayload,
     looks: dict[str, PushPayload | None],
+    max_unit: int | None = None,
 ) -> tuple[str, list[PlannedSend]]:
     """Plan one source's unit for this tick: ``(addressing, sends)``.
 
@@ -101,15 +102,18 @@ def plan_source(
     - Holds with known looks: the consolidated flood **then** a re-assert of each
       held room's look, sent as one unit (verified live 2026-11-03: a lit held
       bulb moves at most 1 point / 1 mired between the two frames).
-    - Any manual hold with an unknown level: per-room for this source — every
-      other room gets its own target and the unknown room is left untouched.
+    - Any manual hold with an unknown level, or more re-asserts than fit one
+      unit (``1 + held > max_unit``): per-room for this source — every unheld
+      room gets its own target, a held room its look (deduped, so a constant
+      look costs nothing), and an unknown room is left untouched.
     """
     consolidated = source["consolidated_topic"]
     rooms = source.get("rooms", {})
     held = {room: look for room, look in looks.items() if room in rooms}
     if not held:
         return "consolidated", [PlannedSend(consolidated, adaptive_payload)]
-    if all(look is not None for look in held.values()):
+    fits = max_unit is None or 1 + len(held) <= max_unit
+    if fits and all(look is not None for look in held.values()):
         reasserts = [
             PlannedSend(
                 rooms[room]["set_topic"], cast("PushPayload", look), dedup=False

@@ -288,11 +288,12 @@ class PacedPublisher:
         if need and unit.priority == PRIORITY_TICK:
             ticks = sum(1 for _t, p in self._group_sends if p == PRIORITY_TICK)
             if need > self._tick_budget:
-                # An oversized tick unit may only go into an empty window, so it
-                # never eats the slots reserved for taps.
-                if total:
+                # An oversized tick unit waits for earlier tick sends to leave the
+                # window (taps do not hold it back; the cap rule above still
+                # applies). The coordinator keeps tick units within the budget.
+                if ticks:
                     wait = max(
-                        wait, self._wait_until_free(now, total, any_priority=True)
+                        wait, self._wait_until_free(now, ticks, any_priority=False)
                     )
             elif ticks + need > self._tick_budget:
                 wait = max(

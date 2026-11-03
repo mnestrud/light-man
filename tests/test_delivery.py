@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import itertools
 import json
 import logging
@@ -13,6 +14,7 @@ from homeassistant.util import dt as dt_util
 from pytest_homeassistant_custom_component.common import async_fire_mqtt_message
 
 from custom_components.light_man import hue_frame
+from custom_components.light_man.const import MANUAL_CAPTURE_REPLY_S
 from custom_components.light_man.coordinator import (
     _frame_to_payload,
     interactive_transition,
@@ -390,6 +392,16 @@ async def test_restored_manual_hold_is_read_at_startup_and_defers_its_source(
     hass: HomeAssistant, coordinator: Coord, mqtt_mock: Any, clock: FakeClock
 ) -> None:
     """Review item 6: a manual hold restored without a look is read, not fanned out."""
+    replied = asyncio.Event()
+
+    async def gated_sleep(seconds: float) -> None:
+        if seconds == MANUAL_CAPTURE_REPLY_S:
+            await replied.wait()  # the bulb's reply lands inside the 3 s wait
+        else:
+            await clock.sleep(seconds)
+
+    patcher = patch("custom_components.light_man.coordinator._pace_sleep", gated_sleep)
+    patcher.start()
     await coordinator._modes.set_held(
         "living_room.overhead",
         kind="manual",
@@ -418,6 +430,8 @@ async def test_restored_manual_hold_is_read_at_startup_and_defers_its_source(
     frame = hue_frame.encode(hue_frame.HueFrame(on=True, brightness=40, mirek=420))
     _fire(hass, "zigbee2mqtt/LR Bulb", {"philips_raw": frame.hex()})
     await hass.async_block_till_done()
+    replied.set()
+    patcher.stop()
     assert coordinator._modes.look_of("living_room.overhead") == {
         "brightness": 40,
         "color_temp": 420,
@@ -683,3 +697,116 @@ async def test_capture_stops_when_the_hold_ends_or_a_look_arrives(
     gets = [c.args[0] for c in mqtt_mock.async_publish.call_args_list]
     assert "zigbee2mqtt/A/get" not in gets
     assert await coordinator._modes.set_look("ghost", {"brightness": 1}) is False
+
+
+# --- gate re-review (N1-N7) ---------------------------------------------------
+
+
+async def test_reassert_busy_retries_again_after_a_new_plan(
+    hass: HomeAssistant, coordinator: Coord, mqtt_mock: Any, clock: FakeClock
+) -> None:
+    """N1: the one-retry limit is per plan, not once per topic for ever."""
+    await _enabled(hass, coordinator, mqtt_mock)
+    await coordinator.async_hold("kitchen.overhead", "night")
+    await hass.async_block_till_done()
+    for _ in range(2):
+        coordinator._invalidate_source("overhead")
+        await tick(hass, coordinator, clock)  # a new plan re-asserts the kitchen
+        mqtt_mock.async_publish.reset_mock()
+        _fire(
+            hass,
+            "zigbee2mqtt/bridge/logging",
+            {**_failure("zgb_kitchen", "x"), "message": BUSY_KITCHEN},
+        )
+        await hass.async_block_till_done()
+        assert KIT_SET in published(mqtt_mock)
+
+
+async def test_zone_clear_off_is_retried_as_off(
+    hass: HomeAssistant, coordinator: Coord, mqtt_mock: Any
+) -> None:
+    """N2: a BUSY zone-clear OFF is re-sent with its OFF."""
+    from .conftest import HALL_OFF, MMWAVE_EAST
+
+    await _enabled(hass, coordinator, mqtt_mock)
+    _fire(hass, MMWAVE_EAST, {"occupancy": True})
+    await hass.async_block_till_done()
+    _fire(hass, MMWAVE_EAST, {"occupancy": False})
+    await hass.async_block_till_done()
+    mqtt_mock.async_publish.reset_mock()
+    _fire(hass, "zigbee2mqtt/bridge/logging", _failure("zgb_hallwayf", "status=BUSY"))
+    await hass.async_block_till_done()
+    assert published(mqtt_mock)[HALL_OFF]["state"] == "OFF"
+
+
+async def test_force_survives_replacement_by_an_unforced_unit(
+    hass: HomeAssistant, coordinator: Coord, mqtt_mock: Any
+) -> None:
+    """N4: an unforced tick replacing a queued forced unit stays forced."""
+    await _enabled(hass, coordinator, mqtt_mock)
+    coordinator._force_pending.add("overhead")  # a forced unit is waiting
+    mqtt_mock.async_publish.reset_mock()
+    coordinator._enqueue_source("overhead", force=False)  # the timer's replacement
+    await hass.async_block_till_done()
+    assert OVERHEAD_ALL in published(mqtt_mock)  # unchanged curve, still sent
+    assert "overhead" not in coordinator._force_pending
+
+
+async def test_busy_replans_of_a_flood_are_capped_per_interval(
+    hass: HomeAssistant, coordinator: Coord, mqtt_mock: Any, clock: FakeClock
+) -> None:
+    """N5: at most one forced re-plan of a source per interval."""
+    await _enabled(hass, coordinator, mqtt_mock)
+    busy = _failure("zgb_overhead_all", "status=BUSY")
+    mqtt_mock.async_publish.reset_mock()
+    for _ in range(3):
+        _fire(hass, "zigbee2mqtt/bridge/logging", busy)
+        await hass.async_block_till_done()
+    sends = [
+        c for c in mqtt_mock.async_publish.call_args_list if c.args[0] == OVERHEAD_ALL
+    ]
+    assert len(sends) == 1
+    clock.advance(coordinator._interval)
+    _fire(hass, "zigbee2mqtt/bridge/logging", busy)
+    await hass.async_block_till_done()
+    sends = [
+        c for c in mqtt_mock.async_publish.call_args_list if c.args[0] == OVERHEAD_ALL
+    ]
+    assert len(sends) == 2
+
+
+async def test_restored_capture_waits_for_the_group_list(
+    hass: HomeAssistant, coordinator: Coord
+) -> None:
+    """N6: bridge/devices before bridge/groups does not start a capture yet."""
+    await coordinator._modes.set_held(
+        "living_room.overhead",
+        kind="manual",
+        armed_at=dt_util.utcnow(),
+        expires_at=dt_util.utcnow() + timedelta(hours=4),
+    )
+    _fire(
+        hass,
+        "zigbee2mqtt/bridge/devices",
+        [{"ieee_address": "0x1", "friendly_name": "LR Bulb"}],
+    )
+    await hass.async_block_till_done()
+    assert "living_room.overhead" not in coordinator._capture_started
+    _fire(
+        hass,
+        "zigbee2mqtt/bridge/groups",
+        [{"friendly_name": "zgb_living_room", "members": [{"ieee_address": "0x1"}]}],
+    )
+    await hass.async_block_till_done()
+    assert "living_room.overhead" in coordinator._capture_started
+
+
+async def test_unanswered_gets_are_forgotten(coordinator: Coord) -> None:
+    """N7: a bulb that never answered cannot supply a look later."""
+    coordinator._capture_room["Slow Bulb"] = "living_room.overhead"
+    coordinator._capture_asked["Slow Bulb"] = 0.0
+    coordinator._capture_room["Other Bulb"] = "kitchen.overhead"
+    coordinator._forget_capture("living_room.overhead")
+    assert "Slow Bulb" not in coordinator._capture_room
+    assert "Slow Bulb" not in coordinator._capture_asked
+    assert coordinator._capture_room == {"Other Bulb": "kitchen.overhead"}

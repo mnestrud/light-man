@@ -187,3 +187,17 @@ def test_build_payload_xy() -> None:
     )
     assert xy["color"] == {"x": 0.3123, "y": 0.25}
     assert "color_temp" not in xy
+
+
+def test_plan_too_many_reasserts_for_one_unit_falls_back_to_per_room() -> None:
+    """N3: 1 flood + held re-asserts over ``max_unit`` → per-room, held deduped."""
+    looks = {"living_room": NIGHT, "kitchen": DAY_HOLD}
+    addressing, sends = plan_source(
+        OVERHEAD, adaptive_payload=DAY, looks=looks, max_unit=2
+    )
+    assert addressing == "per_room"
+    assert all(s.dedup for s in sends)
+    assert {s.topic for s in sends} == {
+        "zigbee2mqtt/zgb_living_room/set",
+        "zigbee2mqtt/zgb_kitchen/set",
+    }
