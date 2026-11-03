@@ -7,8 +7,8 @@
 # pytest(+coverage>=95) — runs from the venv via `scripts/check.sh` (mypy/pytest need
 # the HA-aware venv, which pre-commit's isolated envs can't provide cheaply).
 #
-# Install once (after the venv exists — see CLAUDE.md):  .venv/Scripts/pre-commit install
-# Run on demand:                                          .venv/Scripts/pre-commit run --all-files
+# Install once (after the venv exists — see CLAUDE.md):  .venv/bin/pre-commit install
+# Run on demand:                                          .venv/bin/pre-commit run --all-files
 # Before pushing (full gate):                             ./scripts/check.sh
 minimum_pre_commit_version: "3.5.0"
 repos:
