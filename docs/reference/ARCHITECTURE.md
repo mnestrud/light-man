@@ -144,9 +144,14 @@ device-level option (see §5.5).
 
 ### 5.2 What this deletes vs. the membership draft
 No `bridge/request/group/members/{add,remove}` primitive, no unique-per-attempt `transaction`
-correlation, no 3-attempt retry state machine, no membership reconciler, no bind churn. Reliability is
-recovered for free: the push is **level-triggered** (re-asserts every cycle), so a dropped flood
-self-heals on the next cycle exactly as the tick does today. (Group-membership mutation isn't gone from
+correlation, no 3-attempt retry state machine, no membership reconciler, no bind churn.
+
+> **Corrected in 0.8.0:** "a dropped flood self-heals on the next cycle" was false once write-on-change
+> dedup existed — a groupcast rejected `BUSY` was still marked published, and a constant hold look was
+> never re-sent (515 BUSY lines Jul–Nov 2026). Recovery is now explicit: a dedup mark is set only on
+> broker ack; Z2M's `bridge/logging` failure for a topic clears its mark and re-sends it (interactive
+> sends once after 1 s, tick sends immediately); after a Z2M restart or an HA MQTT reconnect, the topics
+> published during the outage are replayed. (Group-membership mutation isn't gone from
 the *toolkit* — it's a sanctioned **out-of-band maintenance** op, e.g. `remove_all`+re-add to clear
 stale bulb NVRAM groups; the **runtime** integration just never uses it. See §8 and
 `docs/reference/bulb-split-investigation.md`.)
@@ -254,6 +259,8 @@ stale bulb NVRAM groups; the **runtime** integration just never uses it. See §8
 > `genLevelCtrl` to the coordinator only.
 
 ### 5.4 Write-on-change dedup
+*(0.8.0: keyed per topic on colour + brightness only, never transition; marked on broker ack; cleared by
+Z2M delivery failures and outages — see the §5.2 correction.)*
 Keep last-published per (source, target) in memory only; skip unchanged. Replaces
 `input_text.al_last_published`; `always_update=False` on the coordinator. Fold the color-mode
 (rgb vs color_temp) into the dedup key so a mode flip always publishes. No `Store`: the push is
@@ -277,12 +284,18 @@ Michael Closet Overhead Light, Primary Bath Under Vanity Lights — addressed du
 `/set` topic (no group-of-one). Front Door Overhead Light 2 is a router kept always-off (excluded from
 targeting; rides the stateless flood, never turns on). No orphan groups needed.
 
-### 5.6 RF during holds
-While a source has a held room, that source addresses per-room, so on each AL step the unheld rooms
-get individual floods instead of one consolidated flood (~9 vs 1 for overhead). This is a transient
-increase, bounded by hold lifetime; steady state (no holds) is unchanged at 4 consolidated floods
-(now emitted ~0.15 s apart, not simultaneously — `INTER_PUBLISH_DELAY_S`, §5.1). **Accepted** — holds
-are transient.
+### 5.6 RF during holds (replaced in 0.8.0)
+The original design addressed a source per-room while any room was held (~9 groupcasts per step) and
+accepted it as transient. It was not: the burst overflowed the coordinator's broadcast table on every
+step, tap and boot. 0.8.0 replaces it:
+
+- **Addressing:** the source's consolidated flood, then a re-assert of each held room's look, sent as one
+  unit (verified live: a held bulb moves ≤ 1 point / 1 mired between the two frames because the flood is
+  a long glide). Per-room addressing remains only while a manual hold's level is still unknown.
+- **Pacing** (`publisher.py`): every send goes through one queue; tick traffic ≤ 6 and all traffic ≤ 8
+  group sends per 10 s; interactive sends first; units contiguous.
+- **Glide + stagger:** each tick sends `target(t + interval)` with `transition = interval`, sources on
+  staggered slots; taps, releases and sleep toggles no longer force floods.
 
 ---
 
