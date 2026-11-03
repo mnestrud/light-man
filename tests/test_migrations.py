@@ -27,7 +27,7 @@ def _seed_v8() -> dict:
 
 def test_v8_fixture_migrates_to_the_shipped_bundle() -> None:
     migrated, steps = migrate(_seed_v8())
-    assert steps == [8]
+    assert steps == [8, 9]
     assert migrated == json.loads(BUNDLE.read_text())
     assert migrated["seed_version"] == BUNDLED_SEED_VERSION
 
@@ -40,9 +40,23 @@ def test_v8_to_v9_makes_day_window_defaults_explicit() -> None:
         assert curve["day_window"]["wind_down_s"] == 5400.0
 
 
+def test_v9_fixture_migrates_to_the_shipped_bundle() -> None:
+    raw = json.loads((FIXTURES / "seed_v9.json").read_text())
+    migrated, steps = migrate(raw)
+    assert steps == [9]
+    assert migrated == json.loads(BUNDLE.read_text())
+    assert migrated["push_interval_s"] == 120
+
+
+def test_v9_to_v10_keeps_an_edited_interval() -> None:
+    raw = json.loads((FIXTURES / "seed_v9.json").read_text())
+    raw["push_interval_s"] = 45
+    assert migrate(raw)[0]["push_interval_s"] == 45
+
+
 def test_migration_is_engine_identical() -> None:
     old = validate_config(_seed_v8())
-    new = validate_config(migrate(_seed_v8())[0])
+    new = validate_config(migrate(_seed_v8(), target=9)[0])
     for key, source in old.config["sources"].items():
         new_profile = new.config["sources"][key]["profile"]
         for minutes in range(0, 24 * 60, 7):

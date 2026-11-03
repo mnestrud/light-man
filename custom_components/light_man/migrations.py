@@ -8,6 +8,8 @@ function ``vN -> vN+1`` on a deep copy; the loader backs up the old Store first.
 Versions:
   v8 -> v9  make implicit curve defaults explicit (``sat``, day-window
             ``edge_transition_s`` / ``wind_down_s``). Engine output is identical.
+  v9 -> v10 ``push_interval_s`` 30 -> 120 (bulb-side glide makes the longer
+            interval invisible; a value other than the old default is kept).
 """
 
 from __future__ import annotations
@@ -46,8 +48,19 @@ def _v8_to_v9(raw: dict[str, Any]) -> dict[str, Any]:
     return raw
 
 
+V9_PUSH_INTERVAL_S = 30
+V10_PUSH_INTERVAL_S = 120
+
+
+def _v9_to_v10(raw: dict[str, Any]) -> dict[str, Any]:
+    if raw.get("push_interval_s") == V9_PUSH_INTERVAL_S:
+        raw["push_interval_s"] = V10_PUSH_INTERVAL_S
+    return raw
+
+
 MIGRATIONS: dict[int, Callable[[dict[str, Any]], dict[str, Any]]] = {
     8: _v8_to_v9,
+    9: _v9_to_v10,
 }
 
 
