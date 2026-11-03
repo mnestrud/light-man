@@ -44,9 +44,12 @@ Full design: [`docs/reference/adaptive-algorithm.md`](docs/reference/adaptive-al
 
 ## Installation
 
-- **HACS (custom repository):** add `https://github.com/mnestrud/light-man` as an *Integration*
-  repository, install **Light Man**, restart HA.
-- **Manual:** copy `custom_components/light_man/` into your HA `config/custom_components/`, restart HA.
+Light Man is a personal integration and is not published (no HACS). Requires Home Assistant 2026.10 or
+newer.
+
+- Copy `custom_components/light_man/` into your HA `config/custom_components/`, restart HA
+  (this repo's deploy step: `rsync -a --delete --exclude __pycache__ custom_components/light_man/
+  /mnt/ha-config/custom_components/light_man/`).
 
 Then **Settings → Devices & Services → Add Integration → Light Man**. It is a single-instance
 integration and the setup step is a **confirm only** — there are no parameters to enter. On first run

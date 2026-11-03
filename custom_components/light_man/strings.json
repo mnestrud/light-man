@@ -30,7 +30,7 @@
       "message": "Light Man is not set up."
     },
     "unknown_room": {
-      "message": "Unknown room '{room}'."
+      "message": "Unknown room: {room}."
     }
   },
   "services": {

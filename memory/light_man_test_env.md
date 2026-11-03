@@ -26,7 +26,7 @@ pytest-asyncio 1.4.0, pytest-socket 0.8.1), `mypy==1.20.2`, `ruff==0.15.16`, `pr
 ## Gotchas hit on the 2026.10 upgrade (2026-11-03)
 
 - HA 2026.9 moved schemas to **probatio**: `websocket_command` and `async_register(schema=...)` type-check
-  only against `probatio` markers. Use `import probatio as vol`. hacs.json minimum raised to 2026.10.0.
+  only against `probatio` markers. Use `import probatio as vol`. Minimum HA is now 2026.10 (README).
 - `StaticPathConfig` is re-exported from `homeassistant.components.http` without `__all__`; strict mypy
   needs a commented `type: ignore[attr-defined]` (core imports the same path).
 - PHCC 0.13.375 fails every MQTT test with "Lingering timer ... `_async_start_misc_periodic`": HA's MQTT

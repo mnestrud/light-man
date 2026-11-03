@@ -57,7 +57,7 @@ The per-change gate is **local** (GHA `validate.yml` is only a redundant backsto
 | `docs-conditions` | 🚫 | Integration provides no conditions (added to Bronze 2026). |
 | `docs-triggers` | 🚫 | Integration provides no triggers (added to Bronze 2026). |
 | `docs-high-level-description` | ✅ | `README.md` overview ("What it does"). |
-| `docs-installation-instructions` | ✅ | `README.md` Installation (HACS/manual + requirements). |
+| `docs-installation-instructions` | ✅ | `README.md` Installation (manual copy + requirements; never published to HACS). |
 | `docs-removal-instructions` | ✅ | `README.md` Removal section. |
 | `entity-event-setup` | ✅ | MQTT subs are coordinator-owned (`_async_setup`), not entity-level; torn down in `async_unload_entry` via `shutdown_subscriptions()`. Entities are `CoordinatorEntity` (no direct event subs). |
 | `entity-unique-id` | ✅ | `{entry_id}_{kind}` in `entity.py` (the `{room\|source}` slot is unused for the singletons). |

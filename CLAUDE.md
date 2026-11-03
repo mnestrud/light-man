@@ -74,10 +74,9 @@ Raw endpoints behind the script: `GET /api/hassio/core/logs/boots/0`, `/api/hass
 | `scripts/ha_logs.sh` | Fetch HA core / Z2M / Mosquitto logs from the Supervisor (journald) |
 | `scripts/ha_ws.py` | Dependency-free HA websocket client (system_log, supervisor/api, registry) |
 | `scripts/mqtt_dump.py` | Zigbee/MQTT ground truth: caps, retained state, validated `/set`, group options |
-| `.github/workflows/validate.yml` | CI: HACS, hassfest, ruff, mypy, pytest |
+| `.github/workflows/validate.yml` | CI: hassfest, ruff, ruff format, mypy, pytest |
 | `.github/workflows/claude-code-review.yml` | Auto PR review on open/sync |
 | `.github/workflows/claude.yml` | @claude mentions in issues/PRs |
-| `.github/workflows/docs.yml` | Deploy docs to GitHub Pages on dev push |
 
 Platforms: `sensor, switch` | Min HA: `2026.10` | Repo: `https://github.com/mnestrud/light-man`
 
@@ -185,16 +184,16 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 ## CI/CD Workflows
 
+CI checks code quality only. Light Man is never published (no HACS, no docs site).
+
 | Workflow | Trigger | What it checks |
 |----------|---------|----------------|
-| `validate.yml` | Every push + PR | HACS → hassfest → ruff → mypy → pytest |
+| `validate.yml` | Every push + PR | hassfest → ruff (+format) → mypy → pytest |
 | `claude-code-review.yml` | PR open/sync | Automated Claude review comment |
 | `claude.yml` | @claude in issues/PRs | Responds to @claude mentions |
-| `docs.yml` | Push to dev (docs/** or mkdocs.yml) | Deploys GitHub Pages |
 
 **Common CI failures:**
 - `hassfest`: manifest.json version format wrong, or missing required field
-- `HACS`: missing `hacs.json`, brand assets in wrong path, or missing README
 - `mypy`: untyped dict access, missing `from __future__ import annotations`, wrong return type
 - `pytest passes locally, fails CI`: PHCC version drift — pin `requirements_test.txt` to a specific version
 
