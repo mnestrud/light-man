@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "defaultMode": "auto",
+    "allow": [
+      "Read(/mnt/ha-config/**)",
+      "Bash(.venv/bin/ruff *)",
+      "Bash(python3 *)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:developers.home-assistant.io)",
+      "WebFetch(domain:www.home-assistant.io)",
+      "WebFetch(domain:raw.githubusercontent.com)"
+    ]
+  },
+  "enabledMcpjsonServers": ["home-assistant"]
+}

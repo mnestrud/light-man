@@ -11,7 +11,7 @@ Run ALL of these before responding to any user message.
 
 **Output before anything else:**
 ```
-STARTUP OK | branch: <name> | version: <x.y.z> | quality: silver-code-complete (docs+tag pending) | audit: <YYYY-MM-DD>
+STARTUP OK | branch: <name> | version: <x.y.z> | quality: silver (tagged in manifest) | audit: <YYYY-MM-DD>
 ```
 This checklist is not optional. "Resume directly" does not skip it.
 
@@ -163,10 +163,9 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 ## Quality Scale
 
-**Current tier: Silver code-complete** — every Bronze + Silver *code* rule is ✅ or justified N/A in
-`memory/light_man_audit.md`. The remaining gap is **documentation** (4 Bronze + 2 Silver docs items:
-README / install / removal / config-params / etc.) plus tagging `manifest.json` with
-`"quality_scale": "silver"` once those docs land. Not yet formally claimed in the manifest.
+**Current tier: Silver — code-complete, docs done, tagged** (`manifest.json` `"quality_scale": "silver"`,
+2026-06-09). Every Bronze + Silver rule is ✅ or justified N/A in `memory/light_man_audit.md`. Gold and
+Platinum are tracked there but not yet gated.
 
 Full audit checklist (56 rules, 4 tiers): read `memory/light_man_audit.md`
 Quality scale rules: https://developers.home-assistant.io/docs/core/integration-quality-scale/rules
@@ -236,7 +235,7 @@ rsync -a --delete /home/ataraxia/code/light-man/custom_components/light_man/ /mn
   add `/XF light_man_config.json` to this mirror so a code deploy never clobbers panel edits — and the
   loader must then **migrate the Store in place** on a `seed_version` bump, not overwrite it. See
   `docs/reference/data-model.md` → "Config persistence & files".
-- **Python changes** (any `.py` file): full HA restart required — use `ha_restart` MCP call; do NOT poll after, tell user to confirm when ready
+- **Python changes** (any `.py` file): full HA restart required — use `ha_restart` MCP call; after ~60–90s one or two quick checks are fine, but no prolonged polling loops — hand off to the user if HA isn't back after that
 - **Non-Python changes** (strings.json, translations, icons): reload only — `ha_reload_config component=core`
 
 ### Step 2b — Validate on live HA (after user confirms restart complete)

@@ -27,3 +27,6 @@ Thumbs.db
 
 # Local MCP config — contains the HA long-lived token; never commit
 .mcp.json
+
+# Local scratch
+test_output.txt
