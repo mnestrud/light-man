@@ -22,7 +22,9 @@ Modes:
 
 Credentials come from HA's MQTT config entry at runtime (override with
 --host/--port/--user/--password). The in-container broker host (core-mosquitto) is
-rewritten to the HA host (--external-host, default 'botworth').
+rewritten to the HA host (--external-host, default 192.168.113.3 = meddle).
+Run with .venv/bin/python (needs paho-mqtt); --ha-config defaults to the
+/mnt/ha-config CIFS mount.
 """
 
 from __future__ import annotations
@@ -37,8 +39,8 @@ from typing import Any
 
 import paho.mqtt.client as mqtt
 
-DEFAULT_HA_CONFIG = "//botworth/config"
-DEFAULT_EXTERNAL_HOST = "botworth"
+DEFAULT_HA_CONFIG = "/mnt/ha-config"
+DEFAULT_EXTERNAL_HOST = "192.168.113.3"  # meddle (HA OS, Mosquitto add-on)
 INTERNAL_HOSTS = {"core-mosquitto", "localhost", "127.0.0.1", "homeassistant"}
 
 ACCESS_SET = 0b010  # Z2M access bitmask: 1=published, 2=set, 4=get

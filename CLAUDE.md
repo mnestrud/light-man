@@ -8,12 +8,48 @@ Run ALL of these before responding to any user message.
 2. `git -C /home/ataraxia/code/light-man log --oneline -5`
 3. Read `custom_components/light_man/manifest.json` → note version
 4. Read memory file `light_man_audit.md` → note quality tier and any unverified items
+5. `scripts/ha_logs.sh lm 20000 | tail -5` and `scripts/ha_logs.sh z2m-errors 3000 | head -5` → note anything new
 
 **Output before anything else:**
 ```
-STARTUP OK | branch: <name> | version: <x.y.z> | quality: silver (tagged in manifest) | audit: <YYYY-MM-DD>
+STARTUP OK | branch: <name> | version: <x.y.z> | quality: silver (tagged in manifest) | audit: <YYYY-MM-DD> | logs: <clean | N light_man lines, N z2m errors>
 ```
 This checklist is not optional. "Resume directly" does not skip it.
+
+---
+
+## Live System Map & Logs — READ BEFORE ANY HA WORK
+
+**Hosts**
+
+| Name | Address | Role |
+|---|---|---|
+| **meddle** | `192.168.113.3` (`meddle.local`) | Home Assistant OS. Runs HA core, Supervisor, and the add-ons: **Mosquitto** (`core_mosquitto`, host network :1883), **Zigbee2MQTT** (`45df7312_zigbee2mqtt`), **Samba** (`core_samba`). The **Terminal & SSH add-on is stopped** with no keys — do not probe port 22. |
+| **patgod** | `192.168.113.31` | This box. Dev checkout, venv, CIFS mount of HA's `/config`. |
+
+**Access paths (all from patgod)**
+
+- **HA REST + websocket:** `https://meddle.home.botworth.net` with the token in `~/.ha-token`. Plain `http://192.168.113.3/api/*` returns 404 — always use the HTTPS name. Websocket client with no deps: `scripts/ha_ws.py '{"type":"system_log/list"}'`.
+- **HA config files:** `/mnt/ha-config` (autofs CIFS of the Samba share; read-only by policy — deploy target only, see Development and Deploy Workflow).
+- **MQTT / Zigbee ground truth:** `scripts/mqtt_dump.py` (reads broker creds from `/mnt/ha-config/.storage`, connects to Mosquitto on meddle). See Device I/O below.
+- **Supervisor API** (add-on state, versions, logs): over HA's proxy at `/api/hassio/...` with the same token, or `scripts/ha_ws.py '{"type":"supervisor/api","endpoint":"/addons","method":"get"}'`.
+
+**Logs — there is NO log file on the config share.** HA OS logs to journald; the Supervisor serves it. These two sources are the ground truth for whether Light Man and the Zigbee network are healthy, and both are checked at every development cycle (before a change, after a deploy, and when validating).
+
+```bash
+scripts/ha_logs.sh lm            # HA core log, current boot, light_man lines only
+scripts/ha_logs.sh core 20000    # full HA core log (last N entries, ANSI stripped)
+scripts/ha_logs.sh z2m-errors    # Zigbee2MQTT errors, deduped with counts (delivery failures, BUSY, MQTT drops)
+scripts/ha_logs.sh z2m 5000      # raw Zigbee2MQTT add-on log
+scripts/ha_logs.sh mqtt          # Mosquitto add-on log
+```
+
+Raw endpoints behind the script: `GET /api/hassio/core/logs/boots/0`, `/api/hassio/addons/<slug>/logs`, `/api/hassio/host/logs`, with header `Range: entries=:-N:`. The HA websocket command `system_log/list` gives the in-memory warning/error summary with counts. The Z2M add-on's `log_level` is `warning`, so its journal carries errors only; the same content is also in `/mnt/ha-config/zigbee2mqtt/log/<latest>/log.log`. REST `/api/error_log` no longer exists.
+
+**What to look for**
+
+- HA core: anything from `custom_components.light_man` other than the "custom integration not tested" loader notice; `homeassistant.components.mqtt.client` connection losses; deprecation warnings naming light_man.
+- Z2M: `Publish 'set' ... failed` lines name the Light Man publish that did not reach the device. `timed out after 10000ms` on a device name = unicast to an unreachable/weak bulb. `[ZCL GROUP groupId=N] Failed to send with status=BUSY` = coordinator broadcast table full — too many group multicasts in too short a window (Light Man's per-room fan-out). Group id → name map is the `groups:` section of `/mnt/ha-config/zigbee2mqtt/configuration.yaml`.
 
 ---
 
@@ -35,6 +71,9 @@ This checklist is not optional. "Resume directly" does not skip it.
 | `custom_components/light_man/icons.json` | Icon translations — never use _attr_icon on translated entities |
 | `tests/conftest.py` | Mock payloads, PHCC fixtures |
 | `tests/test_*.py` | One file per source module |
+| `scripts/ha_logs.sh` | Fetch HA core / Z2M / Mosquitto logs from the Supervisor (journald) |
+| `scripts/ha_ws.py` | Dependency-free HA websocket client (system_log, supervisor/api, registry) |
+| `scripts/mqtt_dump.py` | Zigbee/MQTT ground truth: caps, retained state, validated `/set`, group options |
 | `.github/workflows/validate.yml` | CI: HACS, hassfest, ruff, mypy, pytest |
 | `.github/workflows/claude-code-review.yml` | Auto PR review on open/sync |
 | `.github/workflows/claude.yml` | @claude mentions in issues/PRs |
@@ -235,11 +274,13 @@ rsync -a --delete /home/ataraxia/code/light-man/custom_components/light_man/ /mn
   add `/XF light_man_config.json` to this mirror so a code deploy never clobbers panel edits — and the
   loader must then **migrate the Store in place** on a `seed_version` bump, not overwrite it. See
   `docs/reference/data-model.md` → "Config persistence & files".
-- **Python changes** (any `.py` file): full HA restart required — use `ha_restart` MCP call; after ~60–90s one or two quick checks are fine, but no prolonged polling loops — hand off to the user if HA isn't back after that
+- **Python changes** (any `.py` file): full HA restart required — `ha_restart` MCP call, or `curl -X POST -H "Authorization: Bearer $(cat ~/.ha-token)" https://meddle.home.botworth.net/api/services/homeassistant/restart`; after ~60–90s one or two quick checks are fine, but no prolonged polling loops — hand off to the user if HA isn't back after that
 - **Non-Python changes** (strings.json, translations, icons): reload only — `ha_reload_config component=core`
 
-### Step 2b — Validate on live HA (after user confirms restart complete)
-Invoke `ha-integration-validator` agent: "Validate light_man on live HA"
+### Step 2b — Validate on live HA (after restart completes)
+1. `scripts/ha_logs.sh lm 5000` — must show a clean setup, no warnings/errors from light_man
+2. `scripts/ha_logs.sh z2m-errors 1000` — no new delivery failures attributable to the change
+3. Invoke `ha-integration-validator` agent: "Validate light_man on live HA" (if the agent type is available; otherwise check entities via `scripts/ha_ws.py`)
 
 - PASS → proceed to commit
 - WARN → confirm with user whether unavailable entities are expected, then commit
@@ -268,7 +309,7 @@ truth. (HA-internal entities — Adaptive Lighting *dummy* switches, `input_bool
 entities — aren't Zigbee; use HA/MCP for those.)
 
 Use **`scripts/mqtt_dump.py`** (validated against the live converter data; reads read-only, writes need
-`--commit`). **Never hand-type raw `/set` payloads** — the helper only allows commands the device's own
+`--commit`; run it with `.venv/bin/python` — it needs `paho-mqtt`; defaults point at `/mnt/ha-config` and meddle). **Never hand-type raw `/set` payloads** — the helper only allows commands the device's own
 exposes/options declare. Canonical command language: `docs/reference/z2m-mqtt-commands.md`.
 
 Two layers (see the reference): **state** (`exposes` → `zigbee2mqtt/<name>/set`) and **options**
