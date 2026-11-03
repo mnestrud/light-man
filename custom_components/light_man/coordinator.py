@@ -197,10 +197,17 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         self._groups_loaded = False
         self._devices_loaded = False
         self._state_resend: set[str] = set()  # topics whose OFF a retry keeps
-        self._force_pending: set[str] = set()  # sources with a forced unit queued
+        # source -> generation of the latest force request (cleared when a unit
+        # planned with that generation is actually sent)
+        self._force_pending: dict[str, int] = {}
+        self._force_seq = 0
+        self._failed_at: dict[str, float] = {}  # topic -> last Z2M failure
+        self._capture_tasks: dict[str, asyncio.Task[None]] = {}
+        self._plan_diag: dict[str, tuple[dict[str, Any], int]] = {}
         self._replanned_at: dict[str, float] = {}  # source -> last BUSY re-plan
         self._publisher = PacedPublisher(
             self._send,
+            # A tracked task: exits when its queue is empty; unload cancels it.
             lambda coro: hass.async_create_task(coro, "lm_publisher", eager_start=True),
             is_group=self._is_group,
             min_gap_s=INTER_PUBLISH_DELAY_S,
@@ -321,7 +328,17 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         """Push once HA is fully up — unless the first refresh already did."""
         if self.push_enabled and not self._pushed_once:
             await self._run_push(force=True)
-        self.async_set_updated_data(self._snapshot())
+        self._publish_snapshot()
+
+    @callback
+    def _publish_snapshot(self) -> None:
+        """Refresh entities without restarting the tick timer.
+
+        ``async_set_updated_data`` reschedules the refresh, so a stream of taps or
+        occupancy messages would keep postponing the periodic ticks.
+        """
+        self.data = self._snapshot()
+        self.async_update_listeners()
 
     def shutdown_subscriptions(self) -> None:
         """Unsubscribe all MQTT subscriptions and stop the publisher (unload)."""
@@ -331,6 +348,9 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         while self._bulb_unsubs:
             _bulb, unsub = self._bulb_unsubs.popitem()
             unsub()
+        for task in self._capture_tasks.values():
+            task.cancel()
+        self._capture_tasks.clear()
         self._publisher.cancel()
 
     def is_known_room(self, room: str) -> bool:
@@ -487,10 +507,16 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
                 self.diagnostics.get("forced_floods", 0) + 1
             )
         del now
+        # HA rounds the timer to whole seconds, so it fires up to a second either
+        # side of a slot; a source due within half a timer period goes now
+        # rather than one whole period late (review nit 12).
+        slack = self._interval / max(1, len(self._config[CONF_SOURCES])) / 2
         for key in self._config[CONF_SOURCES]:
-            if due_only and clock < self._next_due.get(key, 0.0):
-                continue
-            self._next_due[key] = self._next_slot(key, clock)
+            due = self._next_due.get(key, 0.0)
+            if clock >= due - slack:  # this send is the source's slot
+                self._next_due[key] = self._next_slot(key, max(clock, due))
+            elif due_only:
+                continue  # not due yet; a forced push leaves the slot unchanged
             self._enqueue_source(key, force=force)
         self._pushed_once = True
 
@@ -504,13 +530,15 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         source = self._config[CONF_SOURCES][key]
         if force:
             # A later unforced unit replaces this one by key; the force survives.
-            self._force_pending.add(key)
+            self._force_seq += 1
+            self._force_pending[key] = self._force_seq
+        used: list[int | None] = [None]  # the force generation this unit planned with
 
         def planner() -> list[Send]:
             t_end = dt_util.utcnow() + timedelta(seconds=self._interval)
             self._glide_end[key] = t_end
-            forced = key in self._force_pending
-            sends = self._plan_source(key, source, t_end, force=forced)
+            used[0] = self._force_pending.get(key)
+            sends = self._plan_source(key, source, t_end, force=used[0] is not None)
             self._note_planned(sends, PRIORITY_TICK)
             return sends
 
@@ -518,15 +546,28 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
             f"source:{key}", planner, priority=PRIORITY_TICK
         )
         future.add_done_callback(self._on_sent)
-        future.add_done_callback(partial(self._on_source_sent, key))
+        future.add_done_callback(partial(self._on_source_sent, key, used))
 
-    def _on_source_sent(self, key: str, future: asyncio.Future[list[Send]]) -> None:
-        """Keep a source forced until one of its units is actually sent.
+    def _on_source_sent(
+        self, key: str, used: list[int | None], future: asyncio.Future[list[Send]]
+    ) -> None:
+        """Record the unit's plan diagnostics; clear the force it was planned with.
 
-        Re-planning on every pick and replacement by key must not drop it.
+        A force stays pending until a unit planned with *that* request is sent,
+        so neither re-planning, replacement by key nor an unrelated unit already
+        on the air can drop it. Diagnostics count once per sent/resolved unit,
+        not once per re-plan.
         """
-        if future.result():
-            self._force_pending.discard(key)
+        diag = self._plan_diag.pop(key, None)
+        if diag is not None:
+            self.diagnostics["addressing"][key] = diag[0]
+            self.diagnostics["dedup_skips"] += diag[1]
+        if (
+            future.result()
+            and used[0] is not None
+            and self._force_pending.get(key) == used[0]
+        ):
+            del self._force_pending[key]
 
     def _next_slot(self, key: str, clock: float) -> float:
         """Next due time on this source's own slot (A7 stagger).
@@ -557,32 +598,31 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         if any(
             looks.get(room) is None and self._capture_pending(room) for room in looks
         ):
-            self.diagnostics["addressing"][key] = {"mode": "deferred", "topics": []}
+            self._plan_diag[key] = ({"mode": "deferred", "topics": []}, 0)
             return []  # a manual level is being read; this source waits one tick
         addressing, planned = plan_source(
             source, adaptive_payload=adaptive, looks=looks, max_unit=TICK_BUDGET
         )
-        self.diagnostics["addressing"][key] = {
-            "mode": addressing,
-            "topics": [p.topic for p in planned],
-        }
+        diag = {"mode": addressing, "topics": [p.topic for p in planned]}
         consolidated = source[CONF_CONSOLIDATED_TOPIC]
         if (
             addressing == "reassert"
             and not force
             and self._unchanged(consolidated, adaptive)
         ):
-            self.diagnostics["dedup_skips"] += 1
+            self._plan_diag[key] = (diag, 1)
             return []
+        skips = 0
         sends: list[Send] = []
         for item in planned:
             if item.dedup and not force and self._unchanged(item.topic, item.payload):
-                self.diagnostics["dedup_skips"] += 1
+                skips += 1
                 continue
             transition = self._tick_transition(
                 item.topic, item.payload, item.dedup, force=force
             )
             sends.append(Send(item.topic, {**item.payload, "transition": transition}))
+        self._plan_diag[key] = (diag, skips)
         if addressing == "per_room":
             sends = self._chunk_per_room(sends)
         return sends
@@ -654,8 +694,12 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         return looks
 
     def _unchanged(self, topic: str, payload: PushPayload) -> bool:
-        """Return True when ``topic`` was last acked with this colour and brightness."""
-        return self._last_published.get(topic) == _strip(payload)
+        """Return True when ``topic`` already shows this colour and brightness.
+
+        A room topic is compared with what it last showed — its own mark or a
+        newer flood of its source — never with an hours-old room mark alone.
+        """
+        return self._shown(topic) == _strip(payload)
 
     def _tick_transition(
         self, topic: str, payload: PushPayload, dedup: bool, *, force: bool = False
@@ -668,7 +712,7 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         """
         if not dedup:
             return TRANSITION_REASSERT
-        last = self._last_published.get(topic)
+        last = self._shown(topic)
         if last is None:
             return TRANSITION_CATCHUP_UNKNOWN_S
         if force:
@@ -712,6 +756,9 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         """
         now = self._clock()
         for send in future.result():
+            failed = self._failed_at.get(send.topic)
+            if failed is not None and failed >= self._planned_at.get(send.topic, 0.0):
+                continue  # Z2M reported this send failed before its unit resolved
             payload = cast("PushPayload", send.payload)
             self._last_published[send.topic] = _strip(payload)
             self._marked_at[send.topic] = now
@@ -825,7 +872,7 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         else:
             self._sleep_changed_at = None  # snap straight to the target
         self.sleep_on = enabled
-        self.async_set_updated_data(self._snapshot())
+        self._publish_snapshot()
 
     # --- occupancy (mmwave presence -> directional sweep, MQTT-driven) ------
 
@@ -976,7 +1023,7 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
             payload = look.get(room)
             if payload is not None and self.push_enabled:
                 self._interactive_send(topic, payload, origin_at=origin_at)
-        self.async_set_updated_data(self._snapshot())
+        self._publish_snapshot()
 
     async def async_release_hold(
         self, room: str, *, origin_at: float | None = None
@@ -985,7 +1032,7 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         if not await self._modes.release(room):
             return
         self._release_room(room, origin_at=origin_at)
-        self.async_set_updated_data(self._snapshot())
+        self._publish_snapshot()
 
     def _release_room(self, room: str, *, origin_at: float | None = None) -> None:
         source_key = self._room_source.get(room)
@@ -1000,7 +1047,7 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         """Resume adaptive everywhere: one release send per held room (#5)."""
         for room in await self._modes.clear():
             self._release_room(room)
-        self.async_set_updated_data(self._snapshot())
+        self._publish_snapshot()
 
     async def async_force_push(self) -> None:
         """Re-publish every source now, bypassing dedup (operator action)."""
@@ -1013,7 +1060,7 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         self.push_enabled = enabled
         if enabled:
             await self._run_push(force=True)
-        self.async_set_updated_data(self._snapshot())
+        self._publish_snapshot()
 
     # --- MQTT message handling ---------------------------------------------
 
@@ -1071,7 +1118,7 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
             await self._stage_off(source_key, light_ref)
         elif released:
             self._release_room(light_ref, origin_at=origin_at)
-        self.async_set_updated_data(self._snapshot())
+        self._publish_snapshot()
 
     async def _on_state(self, base: str, state: str) -> None:
         """Track the paddle: on invalidates the source; off stages the room off.
@@ -1085,12 +1132,21 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         if mapping is None:
             return
         on = state == STATE_ON
-        if self._paddle_on.get(base) == on:
+        previous = self._paddle_on.get(base)
+        if previous == on:
             return  # unchanged, or the matching action already handled it
         self._paddle_on[base] = on
         if not self.push_enabled:
             return
         source_key, light_ref = mapping
+        if previous is None:
+            # The first report after startup (retained): record it only. The
+            # boot flood already staged every bulb, so re-staging each switched
+            # off room would be a burst of sends for nothing.
+            if not on and await self._modes.release(light_ref):
+                _LOGGER.info("hold released by switch-off for %s", light_ref)
+                self._publish_snapshot()
+            return
         if on:
             if await self._modes.release(light_ref):
                 self._release_room(light_ref)
@@ -1098,7 +1154,7 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
             if await self._modes.release(light_ref):
                 _LOGGER.info("hold released by switch-off for %s", light_ref)
             await self._stage_off(source_key, light_ref)
-        self.async_set_updated_data(self._snapshot())
+        self._publish_snapshot()
 
     # --- manual holds: read the level the user dimmed to --------------------
 
@@ -1108,7 +1164,10 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         if not bulbs:
             return
         self._capture_started[room] = self._clock()
-        self._entry.async_create_background_task(
+        previous = self._capture_tasks.pop(room, None)
+        if previous is not None and not previous.done():
+            previous.cancel()  # a newer dim of the same room supersedes it
+        self._capture_tasks[room] = self._entry.async_create_background_task(
             self.hass, self._capture_manual_look(room, bulbs), name=f"lm_capture_{room}"
         )
 
@@ -1128,9 +1187,13 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
             if self._modes.look_of(room) is not None:
                 break
             if bulb not in self._bulb_unsubs:
-                self._bulb_unsubs[bulb] = await mqtt.async_subscribe(
+                unsub = await mqtt.async_subscribe(
                     self.hass, f"{self._z2m_base}/{bulb}", self._handle_bulb_state
                 )
+                if self._closed:
+                    unsub()  # unloaded while subscribing
+                    return
+                self._bulb_unsubs[bulb] = unsub
             self._capture_room[bulb] = room
             self._capture_asked[bulb] = self._clock()
             await mqtt.async_publish(
@@ -1230,6 +1293,7 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         stats["last"] = {"topic": topic, "kind": failure.kind, "error": failure.error}
         if failure.kind not in RESEND_KINDS:
             return
+        self._failed_at[topic] = self._clock()
         self._last_published.pop(topic, None)
         self._warn_failure(topic, failure.kind)
         await self._resend(topic)

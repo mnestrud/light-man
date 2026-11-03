@@ -127,6 +127,8 @@ async def test_busy_on_a_room_topic_is_resent_once_without_state(
     hass: HomeAssistant, coordinator: Coord, mqtt_mock: Any
 ) -> None:
     await _enabled(hass, coordinator, mqtt_mock)
+    _fire(hass, LR_SWITCH, {"state": "ON"})  # first report after start: recorded
+    await hass.async_block_till_done()
     _fire(hass, LR_SWITCH, {"state": "OFF"})  # stage-off carries state: OFF
     await hass.async_block_till_done()
     mqtt_mock.async_publish.reset_mock()
@@ -744,7 +746,7 @@ async def test_force_survives_replacement_by_an_unforced_unit(
 ) -> None:
     """N4: an unforced tick replacing a queued forced unit stays forced."""
     await _enabled(hass, coordinator, mqtt_mock)
-    coordinator._force_pending.add("overhead")  # a forced unit is waiting
+    coordinator._force_pending["overhead"] = 99  # a forced unit is waiting
     mqtt_mock.async_publish.reset_mock()
     coordinator._enqueue_source("overhead", force=False)  # the timer's replacement
     await hass.async_block_till_done()
@@ -810,3 +812,173 @@ async def test_unanswered_gets_are_forgotten(coordinator: Coord) -> None:
     assert "Slow Bulb" not in coordinator._capture_room
     assert "Slow Bulb" not in coordinator._capture_asked
     assert coordinator._capture_room == {"Other Bulb": "kitchen.overhead"}
+
+
+# --- 0.8.1 ------------------------------------------------------------------
+
+
+async def test_first_switch_report_after_start_sends_nothing(
+    hass: HomeAssistant, coordinator: Coord, mqtt_mock: Any
+) -> None:
+    """The retained switch states at startup must not re-stage every room."""
+    await _enabled(hass, coordinator, mqtt_mock)
+    await coordinator.async_hold("living_room.overhead", "night")
+    await hass.async_block_till_done()
+    mqtt_mock.async_publish.reset_mock()
+    _fire(hass, LR_SWITCH, {"state": "OFF"})  # first report: recorded only
+    _fire(hass, "zigbee2mqtt/Kitchen Switch", {"state": "ON"})
+    await hass.async_block_till_done()
+    assert published(mqtt_mock) == {}
+    assert not coordinator._modes.is_held("living_room.overhead")  # off releases
+
+
+async def test_switch_off_after_the_first_report_releases_and_stages(
+    hass: HomeAssistant, coordinator: Coord, mqtt_mock: Any
+) -> None:
+    await _enabled(hass, coordinator, mqtt_mock)
+    _fire(hass, LR_SWITCH, {"state": "ON"})
+    await hass.async_block_till_done()
+    await coordinator.async_hold("living_room.overhead", "night")
+    await hass.async_block_till_done()
+    mqtt_mock.async_publish.reset_mock()
+    _fire(hass, LR_SWITCH, {"state": "OFF"})
+    await hass.async_block_till_done()
+    assert published(mqtt_mock)[LR_SET]["state"] == "OFF"
+    assert not coordinator._modes.is_held("living_room.overhead")
+
+
+async def test_state_updates_do_not_postpone_the_tick_timer(
+    hass: HomeAssistant, coordinator: Coord, mqtt_mock: Any
+) -> None:
+    """A tap refreshes entities without rescheduling the periodic refresh."""
+    await _enabled(hass, coordinator, mqtt_mock)
+    with patch.object(coordinator, "_schedule_refresh") as reschedule:
+        await coordinator.async_hold("living_room.overhead", "night")
+        await coordinator.async_release_hold("living_room.overhead")
+        await hass.async_block_till_done()
+    reschedule.assert_not_called()
+    assert coordinator.data["held"] == {}
+
+
+async def test_a_newer_capture_cancels_the_older_one(
+    hass: HomeAssistant, coordinator: Coord, mqtt_mock: Any
+) -> None:
+    gate = asyncio.Event()
+
+    async def blocked(_seconds: float) -> None:
+        await gate.wait()
+
+    _fire(
+        hass,
+        "zigbee2mqtt/bridge/groups",
+        [{"friendly_name": "zgb_living_room", "members": [{"ieee_address": "0x1"}]}],
+    )
+    _fire(
+        hass,
+        "zigbee2mqtt/bridge/devices",
+        [{"ieee_address": "0x1", "friendly_name": "LR Bulb"}],
+    )
+    await hass.async_block_till_done()
+    with patch("custom_components.light_man.coordinator._pace_sleep", blocked):
+        coordinator._schedule_manual_capture("living_room.overhead")
+        first = coordinator._capture_tasks["living_room.overhead"]
+        coordinator._schedule_manual_capture("living_room.overhead")
+        second = coordinator._capture_tasks["living_room.overhead"]
+        await asyncio.sleep(0)
+        assert first.cancelled() or first.cancelling()
+        assert second is not first
+        coordinator.shutdown_subscriptions()  # unload cancels the running one
+        await asyncio.sleep(0)
+        assert second.cancelled() or second.cancelling()
+        assert coordinator._capture_tasks == {}
+        gate.set()
+
+
+async def test_capture_unloaded_while_subscribing_drops_its_subscription(
+    hass: HomeAssistant, coordinator: Coord
+) -> None:
+    calls: list[str] = []
+
+    async def subscribe(*_a: Any, **_k: Any) -> Any:
+        coordinator._closed = True  # unload lands during the subscribe
+        return lambda: calls.append("unsub")
+
+    await coordinator._modes.set_held(
+        "living_room.overhead",
+        kind="manual",
+        armed_at=dt_util.utcnow(),
+        expires_at=dt_util.utcnow() + timedelta(hours=4),
+    )
+    with patch(
+        "custom_components.light_man.coordinator.mqtt.async_subscribe", subscribe
+    ):
+        await coordinator._capture_manual_look("living_room.overhead", ["LR Bulb"])
+    assert calls == ["unsub"]
+    assert "LR Bulb" not in coordinator._bulb_unsubs
+
+
+async def test_an_older_unit_does_not_clear_a_newer_force(
+    hass: HomeAssistant, coordinator: Coord, mqtt_mock: Any
+) -> None:
+    await _enabled(hass, coordinator, mqtt_mock)
+    used: list[int | None] = [1]
+    coordinator._force_pending["overhead"] = 2  # a newer force request
+    done: asyncio.Future[list[Send]] = hass.loop.create_future()
+    done.set_result([Send(OVERHEAD_ALL, {"brightness": 1})])
+    coordinator._on_source_sent("overhead", used, done)
+    assert coordinator._force_pending["overhead"] == 2
+
+
+async def test_a_send_reported_failed_is_not_marked_by_its_late_ack(
+    hass: HomeAssistant, coordinator: Coord, mqtt_mock: Any, clock: FakeClock
+) -> None:
+    await _enabled(hass, coordinator, mqtt_mock)
+    coordinator._planned_at[KIT_SET] = clock.now
+    coordinator._last_published.pop(KIT_SET, None)
+    clock.advance(0.2)
+    coordinator._failed_at[KIT_SET] = clock.now  # BUSY before the unit resolved
+    done: asyncio.Future[list[Send]] = hass.loop.create_future()
+    done.set_result([Send(KIT_SET, {"brightness": 9, "transition": 0.4})])
+    coordinator._on_sent(done)
+    assert KIT_SET not in coordinator._last_published
+
+
+async def test_per_room_dedup_compares_with_what_the_room_shows(
+    coordinator: Coord, clock: FakeClock
+) -> None:
+    """An old room mark equal to the target is not "unchanged" after a newer flood."""
+    payload = {"brightness": 100, "color_temp": 300}
+    coordinator._last_published[KIT_SET] = dict(payload)
+    coordinator._marked_at[KIT_SET] = clock.now
+    clock.advance(60)
+    coordinator._last_published[OVERHEAD_ALL] = {"brightness": 200, "color_temp": 250}
+    coordinator._marked_at[OVERHEAD_ALL] = clock.now
+    assert not coordinator._unchanged(KIT_SET, payload)
+
+
+async def test_plan_diagnostics_count_once_per_unit(
+    hass: HomeAssistant, coordinator: Coord, mqtt_mock: Any, clock: FakeClock
+) -> None:
+    await _enabled(hass, coordinator, mqtt_mock)
+    before = coordinator.diagnostics["dedup_skips"]
+    await tick(hass, coordinator, clock)  # nothing changed at a frozen sun
+    skips = coordinator.diagnostics["dedup_skips"] - before
+    assert skips == len(coordinator._next_due)  # one per source, not per re-plan
+
+
+async def test_a_source_due_within_the_timer_slack_goes_now(
+    hass: HomeAssistant, coordinator: Coord, mqtt_mock: Any, clock: FakeClock
+) -> None:
+    await _enabled(hass, coordinator, mqtt_mock)
+    key, due = min(coordinator._next_due.items(), key=lambda kv: kv[1])
+    clock.now = due - 0.9  # HA's whole-second timer fired a little early
+    sent: list[str] = []
+    with patch.object(
+        coordinator,
+        "_plan_source",
+        side_effect=lambda k, *_a, **_k: sent.append(k) or [],
+    ):
+        await coordinator.async_refresh()
+        await hass.async_block_till_done()
+    assert sent == [key]
+    assert coordinator._next_due[key] == due + coordinator._interval

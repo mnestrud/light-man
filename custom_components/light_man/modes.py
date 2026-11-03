@@ -62,17 +62,27 @@ class ModeManager:
             )
 
     async def _save(self) -> None:
-        await self._store.async_save(
-            {
-                room: {
-                    "kind": rec.kind,
-                    "armed_at": rec.armed_at.isoformat(),
-                    "expires_at": rec.expires_at.isoformat(),
-                    **({"look": rec.look} if rec.look is not None else {}),
-                }
-                for room, rec in self._held.items()
+        """Persist without delaying the caller's send (review item 14).
+
+        HA's ``Store.async_delay_save`` schedules the write (and flushes it at
+        shutdown), so a tap's frame leaves before the disk write.
+        """
+        delay_save = getattr(self._store, "async_delay_save", None)
+        if delay_save is not None:
+            delay_save(self._data, 0)
+            return
+        await self._store.async_save(self._data())
+
+    def _data(self) -> dict[str, Any]:
+        return {
+            room: {
+                "kind": rec.kind,
+                "armed_at": rec.armed_at.isoformat(),
+                "expires_at": rec.expires_at.isoformat(),
+                **({"look": rec.look} if rec.look is not None else {}),
             }
-        )
+            for room, rec in self._held.items()
+        }
 
     def mode_of(self, room: str) -> str:
         """Return the room's current mode (a held kind, or ``adaptive``)."""

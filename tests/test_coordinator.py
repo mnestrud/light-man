@@ -213,6 +213,8 @@ async def test_paddle_off_stages_room_off(
     """
     await coordinator.async_set_push_enabled(enabled=True)
     await hass.async_block_till_done()
+    _fire(hass, LR_SWITCH, {"state": "ON"})  # first report after start: recorded
+    await hass.async_block_till_done()
     mqtt_mock.async_publish.reset_mock()
 
     _fire(hass, LR_SWITCH, {"state": "OFF"})

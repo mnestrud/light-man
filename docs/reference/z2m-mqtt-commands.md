@@ -171,6 +171,11 @@ unnecessary.
   orange-red first (x 0.48 → 0.53) before curving to the target, 0.098 off the straight line — the same
   whether the start was given as mirek or as xy. The bulb chooses its own path; a straight path needs the
   engine to send short xy segments.
+- **CT → xy hand-off** (2026-11-03, read-only `/get` of `color` + `color_temp` on six bulbs in CT mode at
+  298–302 mired): the reported xy equals Light Man's `kelvin_to_xy` (Kang 2002) within 0.0004 (LCD005, LCA007,
+  LCD007, LCO003, 929003736601/701). The first xy segment of a cross-mode blend therefore starts where the CT
+  value was — no visible step at the mode switch. (Z2M may derive the CT-mode xy itself; either way it is
+  the same locus the converter uses to send.)
 
 ### Consolidated flood + held-room re-assert
 

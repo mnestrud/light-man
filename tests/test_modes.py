@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import timedelta
+from typing import Any
 
 from homeassistant.util import dt as dt_util
 
@@ -124,3 +125,25 @@ async def test_prune_drops_orphaned_keys() -> None:
     assert modes.held_rooms() == {"kitchen.overhead"}
     # Idempotent: nothing left to prune.
     assert await modes.prune({"kitchen.overhead"}) == []
+
+
+async def test_save_uses_delayed_write_when_the_store_offers_it() -> None:
+    """A real HA Store writes after the caller's send (review item 14)."""
+    scheduled: list[Any] = []
+
+    class DelayStore:
+        async def async_load(self) -> Any:
+            return None
+
+        async def async_save(self, _data: Any) -> None:  # pragma: no cover
+            raise AssertionError("must not block on the write")
+
+        def async_delay_save(self, data_func: Any, delay: float) -> None:
+            scheduled.append((data_func(), delay))
+
+    modes = ModeManager(DelayStore())
+    await modes.async_load()
+    now = dt_util.utcnow()
+    await modes.set_held("kitchen", kind="night", armed_at=now, expires_at=now)
+    assert scheduled[0][1] == 0
+    assert scheduled[0][0]["kitchen"]["kind"] == "night"
