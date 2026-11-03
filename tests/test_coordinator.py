@@ -29,7 +29,6 @@ from .conftest import (
     HALL_CENTER_SET,
     HALL_OFF,
     HALL_UP,
-    KIT_SET,
     KIT_SWITCH,
     LR_SET,
     LR_SWITCH,
@@ -41,8 +40,10 @@ from .conftest import (
     PORCH_A2_SET,
     PORCH_OFF,
     SEED,
+    FakeClock,
     FakeStore,
     published,
+    tick,
 )
 
 if TYPE_CHECKING:
@@ -57,9 +58,12 @@ if TYPE_CHECKING:
 # NIGHT: the forced night look (config_single) = engine night/sleep target,
 # 30% / 2700K -> 76 / 370 mired.
 # DAY_LOOK: the forced day look (config_double) = peak sun, 90% / 6500K -> 229 / 154.
-DAY = {"brightness": 229, "transition": 1.0, "color_temp": 234}
-NIGHT = {"brightness": 76, "transition": 1.0, "color_temp": 370}
-DAY_LOOK = {"brightness": 229, "transition": 1.0, "color_temp": 154}
+# Transitions (0.8.0): the first send to a topic is a 5 s catch-up, later ticks
+# glide over the interval (30 s in the test seed), interactive sends scale with
+# the change (0.4-2.0 s).
+DAY = {"brightness": 229, "transition": 5.0, "color_temp": 234}
+NIGHT = {"brightness": 76, "transition": 0.4, "color_temp": 370}
+DAY_LOOK = {"brightness": 229, "transition": 0.4, "color_temp": 154}
 
 
 def _fire(hass: HomeAssistant, topic: str, payload: Any) -> None:
@@ -101,7 +105,7 @@ async def test_start_hook_takes_over_when_enabled(
 
 
 async def test_sleep_snap_applies_engine_sleep_target(
-    hass: HomeAssistant, coordinator: Coord, mqtt_mock: Any
+    hass: HomeAssistant, coordinator: Coord, mqtt_mock: Any, clock: FakeClock
 ) -> None:
     """Snapping sleep on drives every source to its profile's sleep target."""
     await coordinator.async_set_push_enabled(enabled=True)
@@ -109,12 +113,14 @@ async def test_sleep_snap_applies_engine_sleep_target(
     mqtt_mock.async_publish.reset_mock()
     await coordinator.async_set_sleep(enabled=True, ramp=False)
     await hass.async_block_till_done()
+    assert published(mqtt_mock) == {}  # no forced flood on a sleep toggle
+    await tick(hass, coordinator, clock)
     pubs = published(mqtt_mock)
     assert pubs[HALL_UP]["color"] == {"r": 255, "g": 126, "b": 30}  # hallway sleep rgb
-    # overhead sleep target: 30% -> 76, 2700K -> 370 mired.
+    # overhead sleep target: 30% -> 76, 2700K -> 370 mired; glides over 30 s.
     assert pubs[OVERHEAD_ALL] == {
         "brightness": 76,
-        "transition": 1.0,
+        "transition": 30.0,
         "color_temp": 370,
     }
     assert coordinator.diagnostics["sleep"] == {"on": True, "s": 1.0}
@@ -145,9 +151,7 @@ async def test_config_single_holds_night_per_room(
     assert coordinator.data["held"]["living_room.overhead"]["mode"] == "night"
 
     pubs = published(mqtt_mock)
-    assert pubs[LR_SET] == NIGHT
-    assert pubs[KIT_SET] == DAY
-    assert OVERHEAD_ALL not in pubs
+    assert pubs == {LR_SET: NIGHT}  # one interactive send; nothing else floods
 
 
 async def test_config_double_holds_day_per_room(
@@ -163,15 +167,13 @@ async def test_config_double_holds_day_per_room(
     assert coordinator.data["held"]["living_room.overhead"]["mode"] == "day"
 
     pubs = published(mqtt_mock)
-    assert pubs[LR_SET] == DAY_LOOK  # forced peak-day look, distinct from adaptive
-    assert pubs[KIT_SET] == DAY
-    assert OVERHEAD_ALL not in pubs
+    assert pubs == {LR_SET: DAY_LOOK}  # forced peak-day look, one send
 
 
 async def test_up_single_releases(
     hass: HomeAssistant, coordinator: Coord, mqtt_mock: Any
 ) -> None:
-    """up_single resumes adaptive and re-floods consolidated."""
+    """up_single resumes adaptive: one send of the curve to that room."""
     await coordinator.async_set_push_enabled(enabled=True)
     _fire(hass, LR_SWITCH, {"action": "config_single"})
     await hass.async_block_till_done()
@@ -180,7 +182,10 @@ async def test_up_single_releases(
     _fire(hass, LR_SWITCH, {"action": "up_single"})
     await hass.async_block_till_done()
     assert coordinator.data["held_count"] == 0
-    assert OVERHEAD_ALL in published(mqtt_mock)
+    pubs = published(mqtt_mock)
+    assert set(pubs) == {LR_SET}
+    assert pubs[LR_SET]["brightness"] == 229
+    assert 0.4 <= pubs[LR_SET]["transition"] <= 2.0  # scaled by the change
 
 
 async def test_down_single_also_releases(
@@ -282,17 +287,35 @@ async def test_paddle_off_releases_hold(
     assert coordinator.data["held_count"] == 0  # off cleared the hold
 
 
-async def test_paddle_on_repushes_room(
-    hass: HomeAssistant, coordinator: Coord, mqtt_mock: Any
+async def test_paddle_on_publishes_nothing_and_invalidates(
+    hass: HomeAssistant, coordinator: Coord, mqtt_mock: Any, clock: FakeClock
 ) -> None:
-    """Turning the paddle back on returns the source to the consolidated flood."""
+    """Paddle-on sends nothing (bulbs wake at the staged value); next tick re-sends."""
     await coordinator.async_set_push_enabled(enabled=True)
     _fire(hass, LR_SWITCH, {"state": "OFF"})
     await hass.async_block_till_done()
     mqtt_mock.async_publish.reset_mock()
     _fire(hass, LR_SWITCH, {"state": "ON"})
     await hass.async_block_till_done()
+    assert published(mqtt_mock) == {}
+    await tick(hass, coordinator, clock)
     assert OVERHEAD_ALL in published(mqtt_mock)
+
+
+async def test_paddle_on_after_hold_releases_the_room(
+    hass: HomeAssistant, coordinator: Coord, mqtt_mock: Any
+) -> None:
+    """A paddle-on that releases a hold sends the room back to the curve."""
+    await coordinator.async_set_push_enabled(enabled=True)
+    _fire(hass, LR_SWITCH, {"state": "OFF"})
+    await hass.async_block_till_done()
+    await coordinator.async_hold("living_room.overhead", "night")
+    await hass.async_block_till_done()
+    mqtt_mock.async_publish.reset_mock()
+    _fire(hass, LR_SWITCH, {"state": "ON"})
+    await hass.async_block_till_done()
+    assert coordinator.data["held_count"] == 0
+    assert set(published(mqtt_mock)) == {LR_SET}
 
 
 async def test_paddle_state_unchanged_is_noop(
@@ -356,8 +379,8 @@ async def test_stale_bundled_state_ignored(
     _fire(hass, LR_SWITCH, {"action": "up_single", "state": "OFF"})
     await hass.async_block_till_done()
     pubs = published(mqtt_mock)
-    assert OVERHEAD_ALL in pubs  # the turn-on flood happened
     assert LR_SET not in pubs  # no stage-off fired against the fresh turn-on
+    assert OVERHEAD_ALL not in pubs  # paddle-on publishes nothing (0.8.0)
 
 
 async def test_malformed_payload_ignored(
@@ -379,9 +402,9 @@ async def test_unknown_base_guards(hass: HomeAssistant, coordinator: Coord) -> N
 
 
 async def test_ttl_sweep_clears_expired(
-    hass: HomeAssistant, coordinator: Coord, mqtt_mock: Any
+    hass: HomeAssistant, coordinator: Coord, mqtt_mock: Any, clock: FakeClock
 ) -> None:
-    """An expired held mode is swept and the source re-floods consolidated."""
+    """An expired hold is swept without a forced flood; the due tick re-sends."""
     now = dt_util.utcnow()
     await coordinator._modes.set_held(
         "living_room.overhead",
@@ -392,21 +415,19 @@ async def test_ttl_sweep_clears_expired(
     await coordinator.async_set_push_enabled(enabled=True)
     await hass.async_block_till_done()
     mqtt_mock.async_publish.reset_mock()
-    await coordinator.async_refresh()
-    await hass.async_block_till_done()
+    await tick(hass, coordinator, clock)
     assert coordinator.data["held_count"] == 0
     assert OVERHEAD_ALL in published(mqtt_mock)
 
 
 async def test_dedup_skips_unchanged(
-    hass: HomeAssistant, coordinator: Coord, mqtt_mock: Any
+    hass: HomeAssistant, coordinator: Coord, mqtt_mock: Any, clock: FakeClock
 ) -> None:
     """A second cycle with unchanged values publishes nothing."""
     await coordinator.async_set_push_enabled(enabled=True)
     await hass.async_block_till_done()
     mqtt_mock.async_publish.reset_mock()
-    await coordinator.async_refresh()
-    await hass.async_block_till_done()
+    await tick(hass, coordinator, clock)
     assert published(mqtt_mock) == {}
     assert coordinator.diagnostics["dedup_skips"] > 0
 
@@ -786,7 +807,8 @@ async def test_no_switch_writes_on_push_and_force(
     await coordinator.async_force_push()
     await hass.async_block_till_done()
     _assert_no_switch_writes(mqtt_mock)
-    assert published(mqtt_mock)[OVERHEAD_ALL] == DAY  # bulbs still flooded
+    # bulbs still flooded; an unchanged forced re-send uses the 2 s catch-up floor
+    assert published(mqtt_mock)[OVERHEAD_ALL] == {**DAY, "transition": 2.0}
 
 
 async def test_no_switch_writes_on_paddle_and_holds(

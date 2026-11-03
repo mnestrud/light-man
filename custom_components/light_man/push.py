@@ -6,17 +6,15 @@ directly. The coordinator supplies live values and performs the MQTT publish.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
 
 from .const import (
     BRIGHTNESS_MAX,
     COLOR_MODE_RGB,
-    HELD_DAY,
-    HELD_MANUAL,
-    HELD_NIGHT,
+    COLOR_MODE_XY,
     MIRED_MAX,
     MIRED_MIN,
-    MODE_ADAPTIVE,
 )
 
 if TYPE_CHECKING:
@@ -56,17 +54,21 @@ def build_payload(
     rgb_color: object,
     mode: str,
     transition: float,
+    xy: tuple[float, float] | None = None,
 ) -> PushPayload:
     """Build a stateless group ``/set`` payload.
 
-    Emits ``color`` only when ``mode`` is rgb *and* ``rgb_color`` is valid;
-    otherwise falls back to ``color_temp`` so a missing RGB never breaks the push.
+    Emits ``color`` as xy when ``mode`` is xy, as rgb when ``mode`` is rgb *and*
+    ``rgb_color`` is valid; otherwise falls back to ``color_temp`` so a missing
+    colour never breaks the push.
     """
     payload: PushPayload = {
         "brightness": pct_to_brightness(brightness_pct),
         "transition": transition,
     }
-    if mode == COLOR_MODE_RGB and valid_rgb(rgb_color):
+    if mode == COLOR_MODE_XY and xy is not None:
+        payload["color"] = {"x": round(xy[0], 4), "y": round(xy[1], 4)}
+    elif mode == COLOR_MODE_RGB and valid_rgb(rgb_color):
         seq = cast("tuple[int, int, int]", rgb_color)  # valid_rgb checked the shape
         color: RGB = {"r": int(seq[0]), "g": int(seq[1]), "b": int(seq[2])}
         payload["color"] = color
@@ -75,59 +77,54 @@ def build_payload(
     return payload
 
 
-def _room_target(
-    mode: str,
-    *,
-    adaptive_payload: PushPayload,
-    day_payload: PushPayload,
-    night_payload: PushPayload,
-) -> PushPayload | None:
-    """Return a room's payload, or None to leave it untouched (manually frozen).
+@dataclass(frozen=True)
+class PlannedSend:
+    """One send in a source's unit; ``dedup`` False for held-room re-asserts."""
 
-    Off rooms are still sent the value: ``hue_native_control`` stages it
-    color-while-off so the bulbs adapt while off and turn on uniform.
-    """
-    if mode == HELD_MANUAL:
-        return None
-    if mode == HELD_NIGHT:
-        return night_payload
-    if mode == HELD_DAY:
-        return day_payload  # a distinct forced day look, not the live value
-    return adaptive_payload
+    topic: str
+    payload: PushPayload
+    dedup: bool = True
 
 
-def plan_publishes(
+def plan_source(
     source: SourceConfig,
     *,
     adaptive_payload: PushPayload,
-    day_payload: PushPayload,
-    night_payload: PushPayload,
-    modes: dict[str, str],
-) -> list[tuple[str, PushPayload]]:
-    """Plan ``(topic, payload)`` publishes for a source this cycle.
+    looks: dict[str, PushPayload | None],
+) -> tuple[str, list[PlannedSend]]:
+    """Plan one source's unit for this tick: ``(addressing, sends)``.
 
-    Use the **consolidated** flood when every room wants the live adaptive value
-    (the cheap, uniform case — including off rooms, which stage color-while-off).
-    Otherwise address **per-room**: held rooms get their own target (day/night
-    look) and manually-frozen rooms are skipped. Sources with no rooms (hallway)
-    always push their single consolidated group.
+    ``looks`` maps each held room to the look it must show, or ``None`` for a
+    manual hold whose level is not known yet.
+
+    - No holds (or no rooms): the consolidated topic alone.
+    - Holds with known looks: the consolidated flood **then** a re-assert of each
+      held room's look, sent as one unit (verified live 2026-11-03: a lit held
+      bulb moves at most 1 point / 1 mired between the two frames).
+    - Any manual hold with an unknown level: per-room for this source — every
+      other room gets its own target and the unknown room is left untouched.
     """
+    consolidated = source["consolidated_topic"]
     rooms = source.get("rooms", {})
-    if not rooms:
-        return [(source["consolidated_topic"], adaptive_payload)]
-    targets = {
-        room: _room_target(
-            modes.get(room, MODE_ADAPTIVE),
-            adaptive_payload=adaptive_payload,
-            day_payload=day_payload,
-            night_payload=night_payload,
-        )
-        for room in rooms
-    }
-    if all(target == adaptive_payload for target in targets.values()):
-        return [(source["consolidated_topic"], adaptive_payload)]
-    return [
-        (rooms[room]["set_topic"], target)
-        for room, target in targets.items()
-        if target is not None
-    ]
+    held = {room: look for room, look in looks.items() if room in rooms}
+    if not held:
+        return "consolidated", [PlannedSend(consolidated, adaptive_payload)]
+    if all(look is not None for look in held.values()):
+        reasserts = [
+            PlannedSend(
+                rooms[room]["set_topic"], cast("PushPayload", look), dedup=False
+            )
+            for room, look in held.items()
+            if rooms[room].get("set_topic")
+        ]
+        return "reassert", [PlannedSend(consolidated, adaptive_payload), *reasserts]
+    sends = []
+    for room, room_cfg in rooms.items():
+        topic = room_cfg.get("set_topic")
+        if not topic:
+            continue
+        if room not in held:
+            sends.append(PlannedSend(topic, adaptive_payload))
+        elif held[room] is not None:
+            sends.append(PlannedSend(topic, cast("PushPayload", held[room])))
+    return "per_room", sends

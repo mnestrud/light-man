@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import json
 from typing import TYPE_CHECKING, Any
@@ -210,6 +211,43 @@ async def mqtt_mock(hass: HomeAssistant, mqtt_mock: Any) -> AsyncIterator[Any]:
     if timer is not None:
         timer.cancel()
         client._misc_timer = None
+
+
+class FakeClock:
+    """Monotonic clock for the coordinator's pacing and due-times (A7)."""
+
+    def __init__(self) -> None:
+        self.now = 10_000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+    async def sleep(self, seconds: float) -> None:
+        self.now += max(seconds, 0.0)
+        await asyncio.sleep(0)
+
+
+@pytest.fixture(autouse=True)
+def clock() -> Iterator[FakeClock]:
+    """Patch the coordinator's pacing clock and sleep so tests never wait."""
+    fake = FakeClock()
+    with (
+        patch("custom_components.light_man.coordinator._monotonic", fake),
+        patch("custom_components.light_man.coordinator._pace_sleep", fake.sleep),
+    ):
+        yield fake
+
+
+async def tick(
+    hass: HomeAssistant, coordinator: LightManCoordinator, clock: FakeClock
+) -> None:
+    """Advance one full push interval and run the periodic refresh."""
+    clock.advance(coordinator._interval)
+    await coordinator.async_refresh()
+    await hass.async_block_till_done()
 
 
 @pytest.fixture(autouse=True)

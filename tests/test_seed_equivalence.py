@@ -3,8 +3,8 @@
 The v8 data-model migration reorganizes the *stored* shape but must not change a
 single ``/set`` publish. The runtime addressing is derived (config_loader), so
 this test pins the derived push plan: steady state = exactly the four consolidated
-floods, and a hold on a light group drops *only* that group to per-light
-addressing (data-model.md S1 — "4 floods, byte-identical").
+floods, and a hold adds one re-assert of the held light group to its own source's
+flood only (0.8.0 addressing; verified live 2026-11-03).
 """
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ from typing import Any
 
 from custom_components.light_man import _read_bundled_seed
 from custom_components.light_man.config_loader import validate_config
-from custom_components.light_man.push import plan_publishes
+from custom_components.light_man.push import plan_source
 
 # Synthetic looks — addressing is payload-agnostic, so distinct sentinels are
 # enough to tell the flood / per-light / skip paths apart.
@@ -29,14 +29,16 @@ CONSOLIDATED = {
 }
 
 
+LOOKS = {"night": NIGHT, "day": DAY}
+
+
 def _plan(source: Any, modes: dict[str, str]) -> list[tuple[str, Any]]:
-    return plan_publishes(
+    _addressing, sends = plan_source(
         source,
         adaptive_payload=ADAPTIVE,
-        day_payload=DAY,
-        night_payload=NIGHT,
-        modes=modes,
+        looks={room: LOOKS[mode] for room, mode in modes.items()},
     )
+    return [(s.topic, s.payload) for s in sends]
 
 
 def test_steady_state_is_four_consolidated_floods() -> None:
@@ -52,28 +54,15 @@ def test_steady_state_is_four_consolidated_floods() -> None:
     assert len(floods) == 4
 
 
-def test_hold_drops_only_its_light_group_to_per_room() -> None:
-    """A night hold on one light group skips the flood for *that* group only.
-
-    The held light group publishes its night look; every other member of the same
-    source group publishes the adaptive value; the consolidated topic is not used.
-    """
+def test_hold_adds_one_reassert_to_its_source_flood() -> None:
+    """A night hold on one light group: the source floods, then re-asserts it."""
     config = validate_config(_read_bundled_seed()).config
     overhead = config["sources"]["overhead"]
-    plan = dict(_plan(overhead, modes={"kitchen.overhead": "night"}))
-
-    assert plan["zigbee2mqtt/zgb_kitchen/set"] == NIGHT
-    assert CONSOLIDATED["overhead"] not in plan
-    # Every other overhead member is addressed at the adaptive value.
-    others = {
-        room["set_topic"]
-        for ref, room in overhead["rooms"].items()
-        if ref != "kitchen.overhead"
-    }
-    for topic in others:
-        assert plan[topic] == ADAPTIVE
-    # Per-light addressing covers exactly the source group's members.
-    assert set(plan) == others | {"zigbee2mqtt/zgb_kitchen/set"}
+    plan = _plan(overhead, modes={"kitchen.overhead": "night"})
+    assert plan == [
+        (CONSOLIDATED["overhead"], ADAPTIVE),
+        ("zigbee2mqtt/zgb_kitchen/set", NIGHT),
+    ]
 
 
 def test_other_source_groups_unaffected_by_a_hold() -> None:

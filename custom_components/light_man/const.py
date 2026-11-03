@@ -54,6 +54,7 @@ CONF_RAMP_OUT: Final = "ramp_out_s"
 # --- Color modes ------------------------------------------------------------
 COLOR_MODE_COLOR_TEMP: Final = "color_temp"
 COLOR_MODE_RGB: Final = "rgb"
+COLOR_MODE_XY: Final = "xy"  # engine-blended chromaticity across modes
 
 # --- Defaults ---------------------------------------------------------------
 DEFAULT_PUSH_INTERVAL_S: Final = 30
@@ -162,3 +163,18 @@ PANEL_JS: Final = "index.js"
 # websocket_api command types (read-only).
 WS_CONFIG: Final = "light_man/config"  # request/response: stored topology
 WS_SUBSCRIBE: Final = "light_man/subscribe"  # subscription: live panel state
+
+# --- 0.8.0 delivery: publisher, glide, feedback --------------------------------
+TRANSITION_REASSERT: Final = 0.4  # held-room re-assert right after a flood
+TRANSITION_CATCHUP_UNKNOWN_S: Final = 5.0  # re-send/replay, last value unknown
+INTERACTIVE_TRANSITION_MIN_S: Final = 0.4
+INTERACTIVE_TRANSITION_MAX_S: Final = 2.0
+INTERACTIVE_MODE_CHANGE_MIRED: Final = 100  # ct <-> colour counts as this many mired
+INTERACTIVE_RETRY_DELAY_S: Final = 1.0
+INTERACTIVE_RETRY_WINDOW_S: Final = 15.0
+MANUAL_CAPTURE_DELAY_S: Final = 1.0  # read the bulb this long after a held dim ends
+FAILURE_LOG_INTERVAL_S: Final = 600.0
+MQTT_SLOW_PUBLISH_S: Final = 10.0
+RELEASE_ACTIONS: Final = frozenset(
+    {"up_release", "down_release", "up_released", "down_released"}
+)

@@ -138,6 +138,13 @@ Bits 0x0200+ are never set (bulbs may reject unknown flags).
 | 929003817002 LCL009 | Primary Bath Under Vanity Lights | pass | pass | pass | pass (2.4 s) | 0 |
 | 929003151601 LCO003 | Kitchen Island Light 1 | pass | pass | pass | pass (2.1 s) | 0 |
 
+**CT-only range (LTA007, Upstairs Bath Lights 1–3), measured 2026-11-03:** the bulb applies 222–454 mired
+(≈ 4500–2200 K) and clamps anything outside it in firmware — 500 → 454, 221/200/153/100 → 222 — whether
+the value arrives through Z2M's `/set` or as a raw frame. It ignores xy entirely. In the whole-house
+overhead group this means the upstairs bath stays at ≈ 4500 K while the curve asks for up to 6500 K
+(154 mired) at midday: a steady offset, never a jump; during a glide these bulbs plateau until the curve
+re-enters their range.
+
 "Binding ON" = the standard ZCL `genOnOff.on` an Inovelli switch sends over its binding, emulated from
 the coordinator. The bulb wakes at exactly the staged brightness and mirek, so a re-push after paddle-on is
 unnecessary.

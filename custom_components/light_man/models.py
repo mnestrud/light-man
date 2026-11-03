@@ -98,6 +98,13 @@ class LightManConfig(TypedDict):
     occupancy: dict[str, OccupancyZone]
 
 
+class XY(TypedDict):
+    """A CIE xy chromaticity as Z2M accepts it under the ``color`` key."""
+
+    x: float
+    y: float
+
+
 class RGB(TypedDict):
     """An RGB color as Z2M expects it under the ``color`` key."""
 
@@ -112,7 +119,7 @@ class PushPayload(TypedDict, total=False):
     brightness: int
     transition: float
     color_temp: int
-    color: RGB
+    color: RGB | XY
 
 
 # --- Adaptive-target engine -------------------------------------------------
@@ -283,9 +290,10 @@ class EngineTarget:
     """
 
     brightness_pct: float
-    color_mode: str  # const.COLOR_MODE_COLOR_TEMP | COLOR_MODE_RGB
+    color_mode: str  # const.COLOR_MODE_COLOR_TEMP | COLOR_MODE_RGB | COLOR_MODE_XY
     color_temp_kelvin: float | None
     rgb_color: tuple[int, int, int] | None
+    xy: tuple[float, float] | None = None  # set when color_mode is xy
 
 
 @dataclass(slots=True)

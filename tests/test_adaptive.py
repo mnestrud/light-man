@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from custom_components.light_man import adaptive
 from custom_components.light_man.adaptive import (
     base_target,
     compute_target,
@@ -21,11 +22,14 @@ from custom_components.light_man.adaptive import (
     perceptual_lerp,
     sleep_ramp,
 )
+from custom_components.light_man.colorspace import kelvin_to_xy, lerp_oklab, rgb_to_xy
 from custom_components.light_man.const import (
     COLOR_MODE_COLOR_TEMP,
     COLOR_MODE_RGB,
+    COLOR_MODE_XY,
     REF_ELEVATION_DEG,
 )
+from custom_components.light_man.models import EngineTarget
 
 if TYPE_CHECKING:
     from custom_components.light_man.models import SourceProfile
@@ -213,20 +217,48 @@ MIXED_RGB_BASE: SourceProfile = {
 }
 
 
-def test_mixed_ct_base_keeps_ct_then_switches_to_sleep_rgb() -> None:
+def test_mixed_ct_base_blends_to_sleep_rgb_in_xy() -> None:
+    """Across modes the colour blends in xy (short straight segments per tick)."""
+    base = compute_target(40.0, SUMMER_NOON, MIXED_CT_BASE, sleep_s=0.0)
     early = compute_target(40.0, SUMMER_NOON, MIXED_CT_BASE, sleep_s=0.3)
     late = compute_target(40.0, SUMMER_NOON, MIXED_CT_BASE, sleep_s=0.7)
-    assert early.color_mode == COLOR_MODE_COLOR_TEMP  # base color until midpoint
-    assert late.color_mode == COLOR_MODE_RGB
-    assert late.rgb_color == (120, 40, 10)
+    full = compute_target(40.0, SUMMER_NOON, MIXED_CT_BASE, sleep_s=1.0)
+    assert base.color_mode == COLOR_MODE_COLOR_TEMP
+    assert early.color_mode == COLOR_MODE_XY
+    assert late.color_mode == COLOR_MODE_XY
+    assert full.color_mode == COLOR_MODE_RGB
+    assert full.rgb_color == (120, 40, 10)
+    start = kelvin_to_xy(base.color_temp_kelvin or 0)
+    end = rgb_to_xy((120, 40, 10))
+    path = [lerp_oklab(start, end, i / 1000) for i in range(1001)]
+
+    def position(xy: tuple[float, float]) -> tuple[int, float]:
+        dists = [(xy[0] - p[0]) ** 2 + (xy[1] - p[1]) ** 2 for p in path]
+        best = min(range(len(path)), key=dists.__getitem__)
+        return best, dists[best] ** 0.5
+
+    assert early.xy is not None
+    assert late.xy is not None
+    early_pos, early_off = position(early.xy)
+    late_pos, late_off = position(late.xy)
+    assert early_off < 2e-3  # on the OKLab path
+    assert late_off < 2e-3
+    assert 0 < early_pos < late_pos < 1000  # advances toward the sleep colour
 
 
-def test_mixed_rgb_base_keeps_rgb_then_switches_to_sleep_ct() -> None:
+def test_mixed_rgb_base_blends_to_sleep_ct_in_xy() -> None:
     early = compute_target(40.0, SUMMER_NOON, MIXED_RGB_BASE, sleep_s=0.3)
-    late = compute_target(40.0, SUMMER_NOON, MIXED_RGB_BASE, sleep_s=0.7)
-    assert early.color_mode == COLOR_MODE_RGB  # base color until midpoint
-    assert late.color_mode == COLOR_MODE_COLOR_TEMP
-    assert late.color_temp_kelvin == 2200
+    full = compute_target(40.0, SUMMER_NOON, MIXED_RGB_BASE, sleep_s=1.0)
+    assert early.color_mode == COLOR_MODE_XY
+    assert full.color_mode == COLOR_MODE_COLOR_TEMP
+    assert full.color_temp_kelvin == 2200
+
+
+def test_xy_target_blends_with_ct_from_its_own_xy() -> None:
+    xy_target = EngineTarget(50.0, COLOR_MODE_XY, None, None, (0.3, 0.3))
+    ct = EngineTarget(50.0, COLOR_MODE_COLOR_TEMP, 2700, None)
+    mid = adaptive._blend_targets(xy_target, ct, 0.5)
+    assert mid.xy == lerp_oklab((0.3, 0.3), kelvin_to_xy(2700), 0.5)
 
 
 # --- optional forced day-window gate ---------------------------------------
@@ -379,3 +411,10 @@ def test_ref_elevation_is_the_fixed_color_reference() -> None:
     # At REF the daytime color hits max_ct regardless of today's noon (fixed ref).
     t = base_target(REF_ELEVATION_DEG, OVERHEAD, WINTER_NOON)
     assert t.color_temp_kelvin == pytest.approx(6500, abs=60)
+
+
+def test_blend_endpoints_return_the_targets_unchanged() -> None:
+    a = EngineTarget(10.0, COLOR_MODE_COLOR_TEMP, 2700, None)
+    b = EngineTarget(90.0, COLOR_MODE_RGB, None, (1, 2, 3))
+    assert adaptive._blend_targets(a, b, 0.0) is a
+    assert adaptive._blend_targets(a, b, 1.0) is b

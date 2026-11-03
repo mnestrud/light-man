@@ -9,7 +9,7 @@ from custom_components.light_man.push import (
     kelvin_to_mired,
     mired_to_kelvin,
     pct_to_brightness,
-    plan_publishes,
+    plan_source,
     valid_rgb,
 )
 
@@ -87,51 +87,103 @@ def test_build_payload_color_temp_and_rgb() -> None:
     assert "color_temp" not in rgb
 
 
-def _plan(modes: dict[str, str]) -> list[tuple[str, Any]]:
-    return plan_publishes(
+LOOKS = {"night": NIGHT, "day": DAY_HOLD, "manual": None}
+
+
+def _plan(modes: dict[str, str]) -> tuple[str, list[tuple[str, Any, bool]]]:
+    addressing, sends = plan_source(
         OVERHEAD,
         adaptive_payload=DAY,
-        day_payload=DAY_HOLD,
-        night_payload=NIGHT,
-        modes=modes,
+        looks={room: LOOKS[mode] for room, mode in modes.items()},
     )
+    return addressing, [(s.topic, s.payload, s.dedup) for s in sends]
 
 
 def test_plan_consolidated_when_no_holds() -> None:
-    # No held room → one consolidated flood (steady state = 4 floods house-wide).
-    assert _plan({}) == [("zigbee2mqtt/zgb_overhead_all/set", DAY)]
+    assert _plan({}) == (
+        "consolidated",
+        [("zigbee2mqtt/zgb_overhead_all/set", DAY, True)],
+    )
 
 
-def test_plan_per_room_with_a_night_hold() -> None:
-    plan = dict(_plan({"living_room": "night"}))
-    assert plan["zigbee2mqtt/zgb_living_room/set"] == NIGHT
-    assert plan["zigbee2mqtt/zgb_kitchen/set"] == DAY
-    assert "zigbee2mqtt/zgb_overhead_all/set" not in plan
+def test_plan_flood_then_reassert_for_a_night_hold() -> None:
+    addressing, sends = _plan({"living_room": "night"})
+    assert addressing == "reassert"
+    assert sends == [
+        ("zigbee2mqtt/zgb_overhead_all/set", DAY, True),
+        ("zigbee2mqtt/zgb_living_room/set", NIGHT, False),
+    ]
 
 
-def test_plan_per_room_with_a_day_hold() -> None:
-    # A day hold is a distinct look, so it forces per-room (not the flood).
-    plan = dict(_plan({"living_room": "day"}))
-    assert plan["zigbee2mqtt/zgb_living_room/set"] == DAY_HOLD
-    assert plan["zigbee2mqtt/zgb_kitchen/set"] == DAY
-    assert "zigbee2mqtt/zgb_overhead_all/set" not in plan
+def test_plan_reasserts_every_held_room_in_one_unit() -> None:
+    addressing, sends = _plan({"living_room": "day", "kitchen": "night"})
+    assert addressing == "reassert"
+    assert [t for t, _p, _d in sends] == [
+        "zigbee2mqtt/zgb_overhead_all/set",
+        "zigbee2mqtt/zgb_living_room/set",
+        "zigbee2mqtt/zgb_kitchen/set",
+    ]
 
 
-def test_plan_skips_manual_freeze() -> None:
-    topics = [t for t, _ in _plan({"living_room": "manual"})]
-    assert topics == ["zigbee2mqtt/zgb_kitchen/set"]
+def test_plan_known_manual_look_is_reasserted() -> None:
+    manual = {"brightness": 40, "color_temp": 400}
+    addressing, sends = plan_source(
+        OVERHEAD, adaptive_payload=DAY, looks={"living_room": manual}
+    )
+    assert addressing == "reassert"
+    assert sends[1].payload == manual
 
 
-def test_plan_all_manual_publishes_nothing() -> None:
-    assert _plan({"living_room": "manual", "kitchen": "manual"}) == []
+def test_plan_unknown_manual_level_falls_back_to_per_room() -> None:
+    addressing, sends = _plan({"living_room": "manual"})
+    assert addressing == "per_room"
+    assert [t for t, _p, _d in sends] == ["zigbee2mqtt/zgb_kitchen/set"]
+
+
+def test_plan_per_room_fallback_keeps_known_looks() -> None:
+    addressing, sends = _plan({"living_room": "manual", "kitchen": "night"})
+    assert addressing == "per_room"
+    assert sends == [("zigbee2mqtt/zgb_kitchen/set", NIGHT, True)]
+
+
+def test_plan_ignores_looks_for_rooms_outside_the_source() -> None:
+    assert _plan({})[0] == "consolidated"
+    addressing, _sends = plan_source(
+        OVERHEAD, adaptive_payload=DAY, looks={"not_a_room": NIGHT}
+    )
+    assert addressing == "consolidated"
+
+
+def test_plan_skips_rooms_without_a_set_topic() -> None:
+    source = {
+        "consolidated_topic": "zigbee2mqtt/zgb_x/set",
+        "rooms": {"a": {"set_topic": ""}, "b": {"set_topic": "zigbee2mqtt/b/set"}},
+    }
+    addressing, sends = plan_source(source, adaptive_payload=DAY, looks={"a": NIGHT})
+    assert addressing == "reassert"
+    assert [s.topic for s in sends] == ["zigbee2mqtt/zgb_x/set"]
+    addressing, sends = plan_source(
+        source, adaptive_payload=DAY, looks={"a": NIGHT, "b": None}
+    )
+    assert addressing == "per_room"
+    assert sends == []
 
 
 def test_plan_no_rooms_is_consolidated() -> None:
     source = {"consolidated_topic": "zigbee2mqtt/zgb_hallway_up/set", "rooms": {}}
-    assert plan_publishes(
-        source,
-        adaptive_payload=DAY,
-        day_payload=DAY_HOLD,
-        night_payload=NIGHT,
-        modes={},
-    ) == [("zigbee2mqtt/zgb_hallway_up/set", DAY)]
+    addressing, sends = plan_source(source, adaptive_payload=DAY, looks={})
+    assert addressing == "consolidated"
+    assert [s.topic for s in sends] == ["zigbee2mqtt/zgb_hallway_up/set"]
+
+
+def test_build_payload_xy() -> None:
+    xy = build_payload(
+        brightness_pct=50,
+        color_temp_kelvin=2700,
+        rgb_color=None,
+        mode="xy",
+        transition=120.0,
+        xy=(0.31234, 0.25),
+    )
+    assert xy["color"] == {"x": 0.3123, "y": 0.25}
+    assert "color_temp" not in xy

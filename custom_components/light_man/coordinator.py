@@ -14,18 +14,22 @@ push, OFF makes Light Man inert (it no longer touches any legacy stack).
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import logging
+import time
 from datetime import datetime, timedelta
-from typing import TYPE_CHECKING, Any, NamedTuple, TypedDict
+from typing import TYPE_CHECKING, Any, NamedTuple, TypedDict, cast
 
 from homeassistant.components import mqtt
+from homeassistant.core import callback
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.start import async_at_started
 from homeassistant.helpers.sun import get_astral_event_next
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.util import dt as dt_util
 
+from . import hue_frame
 from .adaptive import compute_target, day_look, night_look, sleep_ramp
 from .const import (
     COLOR_MODE_COLOR_TEMP,
@@ -46,23 +50,43 @@ from .const import (
     CONF_STAGE_DELAY,
     CONF_SWEEP,
     CONF_TOPIC,
-    CONF_TRANSITION,
     DEFAULT_OCCUPANCY_KEY,
     DEFAULT_OCCUPANCY_TRANSITION_S,
     DEFAULT_SLEEP_RAMP_IN_S,
     DEFAULT_SLEEP_RAMP_OUT_S,
     DEFAULT_TRANSITION_S,
+    FAILURE_LOG_INTERVAL_S,
+    HELD_DAY,
+    HELD_MANUAL,
+    HELD_NIGHT,
     INTER_PUBLISH_DELAY_S,
+    INTERACTIVE_MODE_CHANGE_MIRED,
+    INTERACTIVE_RETRY_DELAY_S,
+    INTERACTIVE_RETRY_WINDOW_S,
+    INTERACTIVE_TRANSITION_MAX_S,
+    INTERACTIVE_TRANSITION_MIN_S,
+    MANUAL_CAPTURE_DELAY_S,
     MODE_ADAPTIVE,
+    MQTT_SLOW_PUBLISH_S,
+    RELEASE_ACTIONS,
     SOLAR_MIDNIGHT_EVENT,
     STATE_OFF,
     STATE_ON,
+    TRANSITION_CATCHUP_UNKNOWN_S,
+    TRANSITION_REASSERT,
 )
 from .modes import action_to_mode
-from .push import build_payload, plan_publishes
+from .publisher import PRIORITY_INTERACTIVE, PRIORITY_TICK, PacedPublisher, Send
+from .push import (
+    build_payload,
+    plan_source,
+)
 from .solar import day_profile, solar_inputs
+from .z2m import RESEND_KINDS, parse_publish_failure, set_topic_for, z2m_base_topic
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from homeassistant.config_entries import ConfigEntry
     from homeassistant.core import HomeAssistant
 
@@ -78,6 +102,15 @@ if TYPE_CHECKING:
     from .modes import ModeManager
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def _monotonic() -> float:
+    """Pacing clock (patched in tests)."""
+    return time.monotonic()
+
+
+# Pacing sleep, looked up at call time so tests can patch it.
+_pace_sleep = asyncio.sleep
 
 
 class _Binding(NamedTuple):
@@ -118,14 +151,17 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         """Wire config, mode manager, and the push timer."""
         config: LightManConfig = validated.config
         interval = config[CONF_PUSH_INTERVAL]
+        n_sources = max(1, len(config[CONF_SOURCES]))
         super().__init__(
             hass,
             _LOGGER,
             name="Light Man",
             config_entry=entry,
-            update_interval=timedelta(seconds=interval),
+            # One timer, sources staggered across the interval (A7).
+            update_interval=timedelta(seconds=interval / n_sources),
             always_update=False,
         )
+        self._interval = interval
         self.entry_id = entry.entry_id
         self._entry = entry
         self._config = config
@@ -137,9 +173,40 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
             for source_key, source in config[CONF_SOURCES].items()
             for room in source.get(CONF_ROOMS, {})
         }
-        self._last_published: dict[tuple[str, str], PushPayload] = {}
+        # Dedup: what each topic last showed (colour + brightness, no transition),
+        # set only on broker ack; cleared by Z2M failures and outages.
+        self._last_published: dict[str, PushPayload] = {}
+        self._last_planned: dict[str, dict[str, Any]] = {}  # for re-sends/replay
         self._paddle_on: dict[str, bool] = {}
         self._unsubs: list[Any] = []
+        self._clock: Callable[[], float] = lambda: _monotonic()
+        topics = [s[CONF_CONSOLIDATED_TOPIC] for s in config[CONF_SOURCES].values()]
+        self._z2m_base, _disagree = z2m_base_topic(topics)
+        self._group_topics: set[str] | None = None
+        self._group_members: dict[str, list[str]] = {}
+        self._device_names: dict[str, str] = {}
+        self._publisher = PacedPublisher(
+            self._send,
+            lambda coro: hass.async_create_task(coro, "lm_publisher", eager_start=True),
+            is_group=self._is_group,
+            min_gap_s=INTER_PUBLISH_DELAY_S,
+            clock=lambda: _monotonic(),
+            sleep=lambda seconds: _pace_sleep(seconds),
+        )
+        offsets = {key: i / n_sources for i, key in enumerate(config[CONF_SOURCES])}
+        self._stagger = offsets
+        self._epoch: float | None = None
+        self._next_due: dict[str, float] = {}
+        self._glide_end: dict[str, datetime] = {}
+        self._pushed_once = False
+        self._manual_looks: dict[str, PushPayload] = {}
+        self._capture_room: dict[str, str] = {}  # bulb -> room awaiting a read
+        self._bulb_unsubs: dict[str, Any] = {}
+        self._interactive_recent: dict[str, tuple[float, int]] = {}
+        self._failure_log: dict[str, tuple[float | None, int]] = {}
+        self._z2m_online: bool | None = None
+        self._outage = False
+        self._outage_topics: set[str] = set()
         self.push_enabled = False
         self.mqtt_available = True
         # Global sleep overlay: target on/off, the ramp value held at the last
@@ -179,12 +246,14 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
             "engine": {},
             "sleep": {"on": False, "s": 0.0},
             "occupancy": {},
+            "delivery_failures": {"total": 0, "by_kind": {}, "by_topic": {}},
+            "forced_floods": 0,
         }
 
     # --- lifecycle ----------------------------------------------------------
 
     async def _async_setup(self) -> None:
-        """Prune stale holds, subscribe to switch topics, push once HA is up."""
+        """Prune stale holds, subscribe to switch, occupancy and Z2M bridge topics."""
         # Drop holds orphaned by a topology change (keys no longer addressable).
         pruned = await self._modes.prune(set(self._room_source))
         if pruned:
@@ -201,19 +270,33 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
             self._unsubs.append(
                 await mqtt.async_subscribe(self.hass, topic, self._handle_occupancy)
             )
+        bridge = f"{self._z2m_base}/bridge"
+        for suffix, handler in (
+            ("logging", self._handle_bridge_logging),
+            ("state", self._handle_bridge_state),
+            ("groups", self._handle_bridge_groups),
+            ("devices", self._handle_bridge_devices),
+        ):
+            self._unsubs.append(
+                await mqtt.async_subscribe(self.hass, f"{bridge}/{suffix}", handler)
+            )
+        self._unsubs.append(
+            mqtt.async_subscribe_connection_status(self.hass, self._on_mqtt_status)
+        )
         # Defer the first push until HA has fully started.
         self._unsubs.append(async_at_started(self.hass, self._takeover_on_start))
 
     async def _takeover_on_start(self, _hass: HomeAssistant) -> None:
-        """Run the first push once HA is fully up (if Light Man is enabled)."""
-        if self.push_enabled:
+        """Push once HA is fully up — unless the first refresh already did."""
+        if self.push_enabled and not self._pushed_once:
             await self._run_push(force=True)
-            self.async_set_updated_data(self._snapshot())
+        self.async_set_updated_data(self._snapshot())
 
     def shutdown_subscriptions(self) -> None:
-        """Unsubscribe all MQTT subscriptions (called on unload)."""
+        """Unsubscribe all MQTT subscriptions and stop the publisher (unload)."""
         while self._unsubs:
             self._unsubs.pop()()
+        self._publisher.cancel()
 
     def is_known_room(self, room: str) -> bool:
         """Return True if ``room`` exists in the seed config (service validation)."""
@@ -309,12 +392,14 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
 
         A flat snapshot of everything the read-only dashboard shows: master
         on/off, sleep ramp, hold state, the engine's per-source-group targets,
-        the latest addressing/publish/occupancy diagnostics, and config issues.
-        No secrets; never mutates anything.
+        the latest addressing/publish/occupancy diagnostics, delivery feedback
+        from Z2M, publisher pacing stats, and config issues. No secrets; never
+        mutates anything.
         """
         return {
             "push_enabled": self.push_enabled,
             "mqtt_available": self.mqtt_available,
+            "z2m_online": self._z2m_online,
             "sleep": self.diagnostics.get("sleep", {}),
             "held": self._modes.as_attributes(),
             "engine": self.diagnostics.get("engine", {}),
@@ -323,183 +408,227 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
             "occupancy": self.diagnostics.get("occupancy", {}),
             "issues": self.diagnostics.get("issues", []),
             "dedup_skips": self.diagnostics.get("dedup_skips", 0),
+            "delivery_failures": self.diagnostics.get("delivery_failures", {}),
+            "forced_floods": self.diagnostics.get("forced_floods", 0),
+            "publisher": self._publisher.stats.as_dict(),
         }
 
     async def _async_update_data(self) -> CoordinatorData:
-        """Periodic tick: sweep expired held modes, then push."""
+        """Periodic tick: sweep expired holds, then push the sources that are due.
+
+        The timer runs at ``interval / n_sources`` and each source is due once per
+        interval at its own offset (A7 stagger), so floods are spread across the
+        interval instead of landing together. Expiry only invalidates — the next
+        due tick sends what changed (no forced flood at solar midnight).
+        """
         now = dt_util.utcnow()
-        expired = await self._modes.sweep_expired(now)
-        for room in expired:
+        for room in await self._modes.sweep_expired(now):
             self._invalidate_room(room)
+            self._manual_looks.pop(room, None)
             _LOGGER.info("hold expired for room %s", room)
-        await self._run_push(force=bool(expired))
+        await self._run_push(force=False, due_only=True)
         return self._snapshot()
 
     # --- push (engine-driven adaptive value) --------------------------------
 
-    async def _run_push(self, *, force: bool, only_source: str | None = None) -> None:
-        """Plan every source (or one) and publish with a small inter-send gap.
+    async def _run_push(
+        self,
+        *,
+        force: bool,
+        due_only: bool = False,
+    ) -> None:
+        """Plan each source's unit and hand it to the paced publisher.
 
-        The adaptive value comes from the real-elevation engine (per-source
-        profile); a source with no profile falls back to its AL dummy switch.
-        Solar elevation is read once per cycle; if it is unavailable (a polar
-        edge) the cycle is skipped rather than publishing a bad value. Group
-        commands are Zigbee multicasts — a short inter-send gap keeps them from
-        all landing in the same instant.
-
-        Light Man never publishes to an Inovelli switch topic — switches are
-        read-only inputs (actions + paddle state). On a Smart-Bulb-Mode VZM31
-        any level-type write (``brightness``, even the "passive"
-        ``defaultLevelLocal/Remote`` prestage) proved able to drive the local
-        Zigbee bind and turn the bound bulb on; all switch writes were removed
-        in v0.7.6. See ARCHITECTURE.md §5.
+        Every tick publishes ``target(t_end)`` with ``transition = interval``
+        (A6 glide), where ``t_end`` is one interval ahead; the bulb fades
+        continuously between ticks. Light Man never publishes to an Inovelli
+        switch topic — switches are read-only inputs.
         """
         if not self.push_enabled:
             return
         now = dt_util.utcnow()
-        try:
-            elevation, noon = solar_inputs(self.hass, now)
-        except ValueError:
-            _LOGGER.warning("solar elevation unavailable; skipping push cycle")
-            return
-        local = dt_util.as_local(now)
-        now_minutes = local.hour * 60 + local.minute + local.second / 60
-        sleep_s = self._compute_sleep_s(now)
-        self.diagnostics["sleep"] = {"on": self.sleep_on, "s": round(sleep_s, 3)}
-        plan: list[tuple[str, str, PushPayload]] = []
-        for key, source in self._config[CONF_SOURCES].items():
-            if only_source is not None and key != only_source:
-                continue
-            plan.extend(
-                self._plan_source(key, source, elevation, noon, now_minutes, sleep_s)
+        clock = self._clock()
+        if force:
+            self.diagnostics["forced_floods"] = (
+                self.diagnostics.get("forced_floods", 0) + 1
             )
-        await self._publish_spaced(plan, force=force)
+        for key, source in self._config[CONF_SOURCES].items():
+            if due_only and clock < self._next_due.get(key, 0.0):
+                continue
+            self._next_due[key] = self._next_slot(key, clock)
+            t_end = now + timedelta(seconds=self._interval)
+            self._glide_end[key] = t_end
+            sends = self._plan_source(key, source, t_end, force=force)
+            if sends:
+                self._enqueue(sends, priority=PRIORITY_TICK)
+        self._pushed_once = True
+
+    def _next_slot(self, key: str, clock: float) -> float:
+        """Next due time on this source's own slot (A7 stagger).
+
+        Slots are ``epoch + (k + offset) * interval``, where ``offset`` is
+        ``i / n_sources``; a forced push therefore never re-synchronises the
+        sources onto the same instant.
+        """
+        if self._epoch is None:
+            self._epoch = clock
+        offset = self._stagger[key] * self._interval
+        elapsed = clock - self._epoch - offset
+        slots = int(elapsed // self._interval) + 1
+        return self._epoch + offset + slots * self._interval
 
     def _plan_source(
-        self,
-        key: str,
-        source: SourceConfig,
-        elevation: float,
-        noon: float,
-        now_minutes: float,
-        sleep_s: float,
-    ) -> list[tuple[str, str, PushPayload]]:
-        """Plan a source's bulb publishes (switch topics are never written)."""
-        transition = float(source.get(CONF_TRANSITION, DEFAULT_TRANSITION_S))
-        adaptive_payload = self._adaptive_payload(
-            key, source, elevation, noon, now_minutes, sleep_s, transition
+        self, key: str, source: SourceConfig, t_end: datetime, *, force: bool
+    ) -> list[Send]:
+        """Plan one source's unit (consolidated + re-asserts, or per-room)."""
+        try:
+            adaptive = self._engine_payload(key, source, t_end)
+        except (KeyError, TypeError, ValueError) as err:
+            _LOGGER.warning("skipping source %s this tick: %s", key, err)
+            return []
+        if adaptive is None:
+            return []
+        looks = self._held_looks(key, source)
+        addressing, planned = plan_source(
+            source, adaptive_payload=adaptive, looks=looks
         )
-        day_payload, night_payload = self._look_payloads(source, transition)
-        rooms = source.get(CONF_ROOMS, {})
-        modes = {r: self._modes.mode_of(r) for r in rooms if self._modes.is_held(r)}
-        plan = plan_publishes(
-            source,
-            adaptive_payload=adaptive_payload,
-            day_payload=day_payload,
-            night_payload=night_payload,
-            modes=modes,
-        )
-        self.diagnostics["addressing"][key] = [topic for topic, _ in plan]
-        return [(key, topic, payload) for topic, payload in plan]
+        self.diagnostics["addressing"][key] = {
+            "mode": addressing,
+            "topics": [p.topic for p in planned],
+        }
+        consolidated = source[CONF_CONSOLIDATED_TOPIC]
+        if (
+            addressing == "reassert"
+            and not force
+            and self._unchanged(consolidated, adaptive)
+        ):
+            self.diagnostics["dedup_skips"] += 1
+            return []
+        sends: list[Send] = []
+        for item in planned:
+            if item.dedup and not force and self._unchanged(item.topic, item.payload):
+                self.diagnostics["dedup_skips"] += 1
+                continue
+            transition = self._tick_transition(
+                item.topic, item.payload, item.dedup, force=force
+            )
+            sends.append(Send(item.topic, {**item.payload, "transition": transition}))
+        return sends
 
-    def _source_payload(
-        self,
-        source: SourceConfig,
-        elevation: float,
-        noon: float,
-        now_minutes: float,
-        sleep_s: float,
-        transition: float,
-    ) -> tuple[PushPayload, EngineTarget]:
-        """Return ``(payload, engine_target)`` for a source via the engine.
+    def _engine_payload(
+        self, key: str, source: SourceConfig, when: datetime
+    ) -> PushPayload | None:
+        """Return the engine's colour/brightness for ``source`` at ``when``.
 
-        The real-elevation engine is the sole value source (the loader requires a
-        ``profile`` on every source). Shared by the periodic push and occupancy
-        turn-on.
+        Every input — sun elevation, clock minutes, and the sleep ramp — is taken
+        at ``when``, so a glide aims exactly where the curve will be (U5).
         """
+        try:
+            elevation, noon = solar_inputs(self.hass, when)
+        except ValueError:
+            return None
+        local = dt_util.as_local(when)
+        minutes = local.hour * 60 + local.minute + local.second / 60
+        sleep_s = self._compute_sleep_s(when)
         target = compute_target(
-            elevation, noon, source["profile"], sleep_s=sleep_s, now_minutes=now_minutes
+            elevation, noon, source["profile"], sleep_s=sleep_s, now_minutes=minutes
         )
-        return _target_to_payload(target, transition), target
-
-    def _adaptive_payload(
-        self,
-        key: str,
-        source: SourceConfig,
-        elevation: float,
-        noon: float,
-        now_minutes: float,
-        sleep_s: float,
-        transition: float,
-    ) -> PushPayload:
-        """Return the live adaptive payload for a source, recording diagnostics."""
-        payload, target = self._source_payload(
-            source, elevation, noon, now_minutes, sleep_s, transition
-        )
+        self.diagnostics["sleep"] = {"on": self.sleep_on, "s": round(sleep_s, 3)}
         self.diagnostics["engine"][key] = {
             "elevation": round(elevation, 2),
             "brightness_pct": round(target.brightness_pct, 1),
             "color_mode": target.color_mode,
             "color_temp_kelvin": target.color_temp_kelvin,
             "rgb_color": list(target.rgb_color) if target.rgb_color else None,
+            "xy": list(target.xy) if target.xy else None,
+            "at": when.isoformat(),
         }
-        return payload
+        return _strip(_target_to_payload(target, 0.0))
 
-    def _look_payloads(
-        self, source: SourceConfig, transition: float
-    ) -> tuple[PushPayload, PushPayload]:
-        """Return the engine's ``(day, night)`` forced-hold looks for a source.
-
-        Day = the curve at peak sun; night = the curve at sun-down + sleep — both
-        distinct from the live adaptive value, so a config-tap hold is visible.
-        """
+    def _held_looks(
+        self, key: str, source: SourceConfig
+    ) -> dict[str, PushPayload | None]:
+        """Each held room's look: night/day from the curve, manual as captured."""
+        looks: dict[str, PushPayload | None] = {}
         profile = source["profile"]
-        return (
-            _target_to_payload(day_look(profile), transition),
-            _target_to_payload(night_look(profile), transition),
-        )
+        for room in source.get(CONF_ROOMS, {}):
+            if not self._modes.is_held(room):
+                continue
+            mode = self._modes.mode_of(room)
+            if mode == HELD_NIGHT:
+                looks[room] = _strip(_target_to_payload(night_look(profile), 0.0))
+            elif mode == HELD_DAY:
+                looks[room] = _strip(_target_to_payload(day_look(profile), 0.0))
+            else:
+                looks[room] = self._manual_looks.get(room)
+        del key
+        return looks
 
-    async def _publish_spaced(
-        self, plan: list[tuple[str, str, PushPayload]], *, force: bool
-    ) -> None:
-        """Publish a plan with a small gap between real sends.
+    def _unchanged(self, topic: str, payload: PushPayload) -> bool:
+        """Return True when ``topic`` was last acked with this colour and brightness."""
+        return self._last_published.get(topic) == _strip(payload)
 
-        The gap only follows a real publish — deduped no-ops don't pace.
+    def _tick_transition(
+        self, topic: str, payload: PushPayload, dedup: bool, *, force: bool = False
+    ) -> float:
+        """Glide for curve sends, short for re-asserts, catch-up when forced/unknown.
+
+        Catch-up (U7): ``0.1 s`` per brightness point of change, clamped to 2-10 s,
+        so a stale bulb converges without a visible jump; 5 s when the last value
+        is unknown (boot, after a dedup clear).
         """
-        awaiting_gap = False
-        for source_key, topic, payload in plan:
-            if awaiting_gap:
-                await asyncio.sleep(INTER_PUBLISH_DELAY_S)
-            awaiting_gap = await self._publish(source_key, topic, payload, force=force)
+        if not dedup:
+            return TRANSITION_REASSERT
+        last = self._last_published.get(topic)
+        if last is None:
+            return TRANSITION_CATCHUP_UNKNOWN_S
+        if force:
+            delta = abs(payload.get("brightness", 0) - last.get("brightness", 0))
+            delta_pct = delta * 100 / 254
+            return round(min(10.0, max(2.0, 0.1 * delta_pct)), 1)
+        return float(self._interval)
 
-    async def _publish(
-        self, source_key: str, topic: str, payload: PushPayload, *, force: bool
-    ) -> bool:
-        """Publish to a topic with write-on-change dedup; True if it published."""
-        dedup_key = (source_key, topic)
-        if not force and self._last_published.get(dedup_key) == payload:
-            self.diagnostics["dedup_skips"] += 1
-            return False
-        if await self._mqtt_publish(topic, payload):
-            self._last_published[dedup_key] = payload
-            self.diagnostics["last_publish"][topic] = payload
-            return True
-        return False
+    def _enqueue(
+        self,
+        sends: list[Send],
+        *,
+        priority: int,
+        origin_at: float | None = None,
+    ) -> None:
+        """Queue a unit; mark dedup only once the broker acked every send."""
+        for send in sends:
+            self._last_planned[send.topic] = send.payload
+            if self._outage:
+                self._outage_topics.add(send.topic)
+            if priority == PRIORITY_INTERACTIVE:
+                self._interactive_recent[send.topic] = (self._clock(), 0)
+        future = self._publisher.enqueue(sends, priority=priority, origin_at=origin_at)
+        unit = tuple(sends)
+        future.add_done_callback(functools.partial(self._on_sent, unit))
 
-    async def _mqtt_publish(self, topic: str, payload: PushPayload) -> bool:
-        """Publish a push payload (delegates to the raw publisher)."""
-        return await self._raw_publish(topic, dict(payload))
+    def _on_sent(self, sends: tuple[Send, ...], future: asyncio.Future[bool]) -> None:
+        if future.cancelled() or not future.result():
+            return
+        for send in sends:
+            payload = cast("PushPayload", send.payload)
+            self._last_published[send.topic] = _strip(payload)
+            self.diagnostics["last_publish"][send.topic] = dict(send.payload)
 
-    async def _raw_publish(self, topic: str, payload: dict[str, Any]) -> bool:
-        """Publish JSON to MQTT, guarding on broker availability."""
+    async def _send(self, topic: str, payload: dict[str, Any]) -> bool:
+        """Publish once (the publisher's send), guarded on broker availability."""
         if not mqtt.mqtt_config_entry_enabled(self.hass):
             self._set_mqtt_available(available=False)
             return False
+        started = self._clock()
         try:
             await mqtt.async_publish(self.hass, topic, json.dumps(payload))
         except HomeAssistantError:
             self._set_mqtt_available(available=False)
             return False
+        if self._clock() - started >= MQTT_SLOW_PUBLISH_S:
+            _LOGGER.warning(
+                "MQTT publish to %s took %.0f s", topic, self._clock() - started
+            )
         self._set_mqtt_available(available=True)
         return True
 
@@ -513,7 +642,44 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         else:
             _LOGGER.warning("MQTT unavailable; skipping push until reconnected")
 
-    # --- sleep overlay (Light-Man-owned global toggle + ramp) ---------------
+    # --- interactive sends (taps, holds, stage-off, occupancy) --------------
+
+    def _room_glide_target(self, source_key: str) -> PushPayload | None:
+        """Return the source's curve value at its current glide end.
+
+        One-shot sends aim where the rest of the house is gliding to, so a room
+        arrives slightly early and waits rather than stepping backwards (U3).
+        """
+        source = self._config[CONF_SOURCES][source_key]  # loader-validated
+        t_end = self._glide_end.get(source_key) or (
+            dt_util.utcnow() + timedelta(seconds=self._interval)
+        )
+        try:
+            return self._engine_payload(source_key, source, t_end)
+        except KeyError, TypeError, ValueError:
+            return None
+
+    def _interactive_send(
+        self,
+        topic: str,
+        payload: PushPayload,
+        *,
+        state: str | None = None,
+        transition: float | None = None,
+        origin_at: float | None = None,
+    ) -> None:
+        """Queue one interactive send with a change-scaled transition (U2)."""
+        body: dict[str, Any] = dict(payload)
+        if transition is None:
+            transition = interactive_transition(
+                self._last_published.get(topic), payload
+            )
+        body["transition"] = transition
+        if state is not None:
+            body["state"] = state
+        self._enqueue(
+            [Send(topic, body)], priority=PRIORITY_INTERACTIVE, origin_at=origin_at
+        )
 
     def _compute_sleep_s(self, now: datetime) -> float:
         """Return the global sleep-ramp value in [0, 1] (0 awake, 1 asleep)."""
@@ -527,7 +693,11 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         return sleep_ramp(elapsed, duration, start=self._sleep_start, target=target)
 
     async def async_set_sleep(self, *, enabled: bool, ramp: bool = True) -> None:
-        """Engage/release the sleep overlay — ramped, or snapped on restore."""
+        """Engage/release the sleep overlay — ramped, or snapped on restore.
+
+        No push here: the ramp starts at the next due tick, and every tick
+        targets the ramp at its glide end (no forced flood per toggle).
+        """
         now = dt_util.utcnow()
         if ramp:
             self._sleep_start = self._compute_sleep_s(now)
@@ -535,7 +705,6 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         else:
             self._sleep_changed_at = None  # snap straight to the target
         self.sleep_on = enabled
-        await self._run_push(force=True)
         self.async_set_updated_data(self._snapshot())
 
     # --- occupancy (mmwave presence -> directional sweep, MQTT-driven) ------
@@ -586,15 +755,19 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
             delay = stage.get(CONF_STAGE_DELAY, 0.0)
             if delay:
                 await asyncio.sleep(delay)
+            sends: list[Send] = []
             for light in stage.get(CONF_LIGHTS, []):
-                payload = self._engine_payload_for(
-                    light[CONF_SOURCE], DEFAULT_OCCUPANCY_TRANSITION_S
-                )
+                payload = self._room_glide_target(light[CONF_SOURCE])
                 if payload is None:
                     continue
-                await self._raw_publish(
-                    light[CONF_SET_TOPIC], {**payload, "state": STATE_ON}
-                )
+                body = {
+                    **payload,
+                    "transition": DEFAULT_OCCUPANCY_TRANSITION_S,
+                    "state": STATE_ON,
+                }
+                sends.append(Send(light[CONF_SET_TOPIC], body))
+            if sends:
+                self._enqueue(sends, priority=PRIORITY_INTERACTIVE)
 
     async def _maybe_clear_zone(self, zone_key: str) -> None:
         """Turn the zone's off_lights off once all its bindings report no presence."""
@@ -607,25 +780,9 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         self.diagnostics["occupancy"][zone_key] = False
         transition = zone.get(CONF_OFF_TRANSITION, DEFAULT_OCCUPANCY_TRANSITION_S)
         off = {"state": STATE_OFF, "transition": transition}
-        for topic in zone.get(CONF_OFF_LIGHTS, []):
-            await self._raw_publish(topic, off)
-
-    def _engine_payload_for(
-        self, source_key: str, transition: float
-    ) -> PushPayload | None:
-        """Return the live engine payload for a source (occupancy turn-on)."""
-        source = self._config[CONF_SOURCES][source_key]  # loader-validated
-        now = dt_util.utcnow()
-        try:
-            elevation, noon = solar_inputs(self.hass, now)
-        except ValueError:
-            return None
-        local = dt_util.as_local(now)
-        now_minutes = local.hour * 60 + local.minute + local.second / 60
-        payload, _target = self._source_payload(
-            source, elevation, noon, now_minutes, self._compute_sleep_s(now), transition
-        )
-        return payload
+        sends = [Send(topic, off) for topic in zone.get(CONF_OFF_LIGHTS, [])]
+        if sends:
+            self._enqueue(sends, priority=PRIORITY_INTERACTIVE)
 
     async def _stage_off(self, source_key: str, light_ref: str) -> None:
         """Turn a room off + stage its adaptive value in one deterministic command.
@@ -634,20 +791,22 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         round-trip beats the switch's local Zigbee binding OFF, so the brightness
         lands while the bulb is still on and re-brightens it (the multi-tap bug).
         Instead, address the room with an explicit ``state: OFF`` carrying the
-        staged adaptive value — it goes off regardless of the race and is
-        pre-loaded for the next turn-on. The periodic state-less flood keeps it
-        staged while off afterwards (no race once it is actually off). The adaptive
-        push stays state-less by default; this paddle-off path is the lone
-        exception (mirrors the occupancy all-clear, which also sends ``state``).
+        staged adaptive value (at the glide end) — it goes off regardless of the
+        race and is pre-loaded for the next turn-on.
         """
         rooms = self._config[CONF_SOURCES][source_key].get(CONF_ROOMS, {})
         room = rooms.get(light_ref)
         if room is None or not room.get(CONF_SET_TOPIC):
             return
-        payload = self._engine_payload_for(source_key, DEFAULT_TRANSITION_S)
+        payload = self._room_glide_target(source_key)
         if payload is None:
             return
-        await self._raw_publish(room[CONF_SET_TOPIC], {**payload, "state": STATE_OFF})
+        self._interactive_send(
+            room[CONF_SET_TOPIC],
+            payload,
+            state=STATE_OFF,
+            transition=DEFAULT_TRANSITION_S,
+        )
 
     # --- modes --------------------------------------------------------------
 
@@ -656,44 +815,75 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         return get_astral_event_next(self.hass, SOLAR_MIDNIGHT_EVENT, now)
 
     def _invalidate_source(self, source_key: str) -> None:
-        """Drop the dedup cache for a source (its addressing may have changed)."""
-        for dedup_key in [k for k in self._last_published if k[0] == source_key]:
-            del self._last_published[dedup_key]
+        """Forget what a source's topics last showed (next due tick re-sends)."""
+        source = self._config[CONF_SOURCES][source_key]  # keys come from the config
+        topics = {source[CONF_CONSOLIDATED_TOPIC]} | {
+            room[CONF_SET_TOPIC]
+            for room in source.get(CONF_ROOMS, {}).values()
+            if room.get(CONF_SET_TOPIC)
+        }
+        for topic in topics:
+            self._last_published.pop(topic, None)
 
     def _invalidate_room(self, room: str) -> None:
-        """Drop the dedup cache for the source that owns ``room``."""
+        """Forget the source that owns ``room`` (its addressing changed)."""
         source_key = self._room_source.get(room)
         if source_key is not None:
             self._invalidate_source(source_key)
 
-    async def async_hold(self, room: str, kind: str) -> None:
-        """Hold a room at a look (night/day/manual) and apply it now."""
+    def _room_topic(self, room: str) -> str | None:
+        source_key = self._room_source.get(room)
+        if source_key is None:
+            return None
+        room_cfg = self._config[CONF_SOURCES][source_key][CONF_ROOMS][room]
+        return room_cfg.get(CONF_SET_TOPIC) or None
+
+    async def async_hold(
+        self, room: str, kind: str, *, origin_at: float | None = None
+    ) -> None:
+        """Hold a room at a look and show it now — one interactive send (#3)."""
         now = dt_util.utcnow()
-        changed = await self._modes.set_held(
+        await self._modes.set_held(
             room, kind=kind, armed_at=now, expires_at=self._next_solar_midnight(now)
         )
-        if changed:
-            self._invalidate_room(room)
-        await self._run_push(force=True, only_source=self._room_source.get(room))
+        source_key = self._room_source.get(room)
+        topic = self._room_topic(room)
+        if kind == HELD_MANUAL:
+            self._manual_looks.pop(room, None)  # captured at the paddle release
+        elif source_key is not None and topic is not None:
+            look = self._held_looks(source_key, self._config[CONF_SOURCES][source_key])
+            payload = look.get(room)
+            if payload is not None and self.push_enabled:
+                self._interactive_send(topic, payload, origin_at=origin_at)
         self.async_set_updated_data(self._snapshot())
 
-    async def async_release_hold(self, room: str) -> None:
-        """Resume adaptive for a room and snap it back at once."""
+    async def async_release_hold(
+        self, room: str, *, origin_at: float | None = None
+    ) -> None:
+        """Resume adaptive for a room: one send to the curve at the glide end (#4)."""
         if not await self._modes.release(room):
             return
-        self._invalidate_room(room)
-        await self._run_push(force=True, only_source=self._room_source.get(room))
+        self._release_room(room, origin_at=origin_at)
         self.async_set_updated_data(self._snapshot())
 
+    def _release_room(self, room: str, *, origin_at: float | None = None) -> None:
+        self._manual_looks.pop(room, None)
+        source_key = self._room_source.get(room)
+        topic = self._room_topic(room)
+        if source_key is None or topic is None or not self.push_enabled:
+            return
+        payload = self._room_glide_target(source_key)
+        if payload is not None:
+            self._interactive_send(topic, payload, origin_at=origin_at)
+
     async def async_clear_holds(self) -> None:
-        """Resume adaptive everywhere."""
+        """Resume adaptive everywhere: one release send per held room (#5)."""
         for room in await self._modes.clear():
-            self._invalidate_room(room)
-        await self._run_push(force=True)
+            self._release_room(room)
         self.async_set_updated_data(self._snapshot())
 
     async def async_force_push(self) -> None:
-        """Re-publish every source now, bypassing dedup."""
+        """Re-publish every source now, bypassing dedup (operator action)."""
         await self._run_push(force=True)
 
     # --- master on/off switch ----------------------------------------------
@@ -730,36 +920,44 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
             await self._on_state(msg.topic, state)
 
     async def _on_action(self, base: str, action: str) -> None:
-        """Apply a tap: a config hold, or a release whose direction is on/off.
+        """Apply a tap: a config hold, a held-dim freeze, or an on/off release.
 
         On a Smart-Bulb-Mode switch a single tap is also the on/off intent
-        (up = on, down = off), so a release follows the matching push path.
+        (up = on, down = off). Paddle-on publishes nothing: the bulbs wake at the
+        value staged by the last flood (verified on every model 2026-11-03); the
+        source is invalidated so its next due tick re-sends it.
         """
         if not self.push_enabled:
             return  # inert when Light Man is off — the blueprint owns taps
         mapping = self._switch_map.get(base)
         if mapping is None:
             return
+        origin_at = self._clock()
         source_key, light_ref = mapping
+        if action in RELEASE_ACTIONS:
+            if self._modes.mode_of(light_ref) == HELD_MANUAL:
+                self._schedule_manual_capture(light_ref)
+            return
         mode = action_to_mode(action)
         if mode is None:
             return
         if mode != MODE_ADAPTIVE:
-            await self.async_hold(light_ref, mode)
+            await self.async_hold(light_ref, mode, origin_at=origin_at)
             return
-        if await self._modes.release(light_ref):
-            self._invalidate_room(light_ref)
         off = action.startswith("down")
         self._paddle_on[base] = not off
-        self._invalidate_source(source_key)
+        released = await self._modes.release(light_ref)
         if off:
+            self._manual_looks.pop(light_ref, None)
             await self._stage_off(source_key, light_ref)
+        elif released:
+            self._release_room(light_ref, origin_at=origin_at)
         else:
-            await self._run_push(force=True, only_source=source_key)
+            self._invalidate_source(source_key)
         self.async_set_updated_data(self._snapshot())
 
     async def _on_state(self, base: str, state: str) -> None:
-        """Track the paddle: on re-floods the source; off stages the room off.
+        """Track the paddle: on invalidates the source; off stages the room off.
 
         Off **releases any hold** (a look must not linger to next turn-on) and
         stages the room with an explicit ``state: OFF`` rather than the state-less
@@ -776,14 +974,220 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         if not self.push_enabled:
             return
         source_key, light_ref = mapping
-        self._invalidate_source(source_key)
         if on:
-            await self._run_push(force=True, only_source=source_key)
+            if await self._modes.release(light_ref):
+                self._release_room(light_ref)
+            else:
+                self._invalidate_source(source_key)
         else:
             if await self._modes.release(light_ref):
                 _LOGGER.info("hold released by switch-off for %s", light_ref)
+            self._manual_looks.pop(light_ref, None)
             await self._stage_off(source_key, light_ref)
         self.async_set_updated_data(self._snapshot())
+
+    # --- manual holds: read the level the user dimmed to --------------------
+
+    def _schedule_manual_capture(self, room: str) -> None:
+        """After a held dim is released, read one of the room's bulbs (A1)."""
+        bulb = self._room_bulb(room)
+        if bulb is None:
+            return
+        self._capture_room[bulb] = room
+        self._entry.async_create_background_task(
+            self.hass, self._capture_manual_look(bulb), name=f"lm_capture_{room}"
+        )
+
+    async def _capture_manual_look(self, bulb: str) -> None:
+        await _pace_sleep(MANUAL_CAPTURE_DELAY_S)
+        if bulb not in self._bulb_unsubs:
+            self._bulb_unsubs[bulb] = await mqtt.async_subscribe(
+                self.hass, f"{self._z2m_base}/{bulb}", self._handle_bulb_state
+            )
+        await mqtt.async_publish(
+            self.hass, f"{self._z2m_base}/{bulb}/get", json.dumps({"state": ""})
+        )
+
+    async def _handle_bulb_state(self, msg: mqtt.ReceiveMessage) -> None:
+        """Turn a bulb's composite-state report into the room's manual look."""
+        bulb = msg.topic.removeprefix(f"{self._z2m_base}/")
+        room = self._capture_room.get(bulb)
+        data = _parse_json(str(msg.payload))
+        if room is None or data is None or not isinstance(data.get("philips_raw"), str):
+            return
+        if self._modes.mode_of(room) != HELD_MANUAL:
+            self._capture_room.pop(bulb, None)
+            return
+        try:
+            frame = hue_frame.decode_hex(data["philips_raw"])
+        except ValueError:
+            return
+        look = _frame_to_payload(frame)
+        if look is None:
+            return
+        self._manual_looks[room] = look
+        self._capture_room.pop(bulb, None)
+        _LOGGER.debug("manual look for %s captured from %s: %s", room, bulb, look)
+
+    def _room_bulb(self, room: str) -> str | None:
+        """Return a bulb name in ``room`` (its device topic, or a group member)."""
+        topic = self._room_topic(room)
+        if topic is None:
+            return None
+        name = topic.removeprefix(f"{self._z2m_base}/").removesuffix("/set")
+        members = self._group_members.get(name)
+        if members is None:
+            return name  # the room is addressed by its device topic
+        for ieee in members:
+            friendly = self._device_names.get(ieee)
+            if friendly:
+                return friendly
+        return None
+
+    # --- Z2M feedback (A2) --------------------------------------------------
+
+    async def _handle_bridge_logging(self, msg: mqtt.ReceiveMessage) -> None:
+        """Count Z2M publish failures; re-send what really failed (A2)."""
+        data = _parse_json(str(msg.payload))
+        if data is None or data.get("level") != "error":
+            return
+        if data.get("namespace") not in (None, "z2m"):
+            return
+        failure = parse_publish_failure(str(data.get("message", "")))
+        if failure is None:
+            return
+        topic = set_topic_for(self._z2m_base, failure.name)
+        stats = self.diagnostics.setdefault(
+            "delivery_failures", {"total": 0, "by_kind": {}, "by_topic": {}}
+        )
+        stats["total"] += 1
+        stats["by_kind"][failure.kind] = stats["by_kind"].get(failure.kind, 0) + 1
+        stats["by_topic"][topic] = stats["by_topic"].get(topic, 0) + 1
+        stats["last"] = {"topic": topic, "kind": failure.kind, "error": failure.error}
+        if failure.kind not in RESEND_KINDS:
+            return
+        self._last_published.pop(topic, None)
+        self._warn_failure(topic, failure.kind)
+        await self._resend(topic)
+
+    async def _resend(self, topic: str) -> None:
+        """Re-send a failed topic: interactive once after 1 s, tick right away."""
+        payload = self._last_planned.get(topic)
+        if payload is None:
+            return
+        recent = self._interactive_recent.get(topic)
+        if (
+            recent is not None
+            and self._clock() - recent[0] <= INTERACTIVE_RETRY_WINDOW_S
+        ):
+            if recent[1] >= 1:
+                return  # already retried once
+            self._interactive_recent[topic] = (recent[0], recent[1] + 1)
+            await _pace_sleep(INTERACTIVE_RETRY_DELAY_S)
+            self._publisher.enqueue(
+                [Send(topic, payload)], priority=PRIORITY_INTERACTIVE
+            ).add_done_callback(lambda f: self._on_sent((Send(topic, payload),), f))
+            return
+        body = {**payload, "transition": TRANSITION_CATCHUP_UNKNOWN_S}
+        self._enqueue([Send(topic, body)], priority=PRIORITY_TICK)
+
+    def _warn_failure(self, topic: str, kind: str) -> None:
+        now = self._clock()
+        last, suppressed = self._failure_log.get(topic, (None, 0))
+        if last is not None and now - last < FAILURE_LOG_INTERVAL_S:
+            self._failure_log[topic] = (last, suppressed + 1)
+            return
+        _LOGGER.warning(
+            "Z2M could not deliver to %s (%s)%s",
+            topic,
+            kind,
+            f"; {suppressed} more since last report" if suppressed else "",
+        )
+        self._failure_log[topic] = (now, 0)
+
+    async def _handle_bridge_state(self, msg: mqtt.ReceiveMessage) -> None:
+        """Track Z2M online/offline; replay what was sent during an outage."""
+        data = _parse_json(str(msg.payload))
+        state = data.get("state") if data is not None else str(msg.payload)
+        online = state == "online"
+        previous = self._z2m_online
+        self._z2m_online = online
+        if previous is None:
+            return  # the retained value at startup — nothing to recover
+        if previous and not online:
+            self._begin_outage()
+        elif not previous and online:
+            self.diagnostics["z2m_restarts"] = (
+                self.diagnostics.get("z2m_restarts", 0) + 1
+            )
+            self._end_outage()
+
+    @callback
+    def _on_mqtt_status(self, connected: bool) -> None:  # HA callback signature
+        """HA's own MQTT connection: an outage window like a Z2M restart."""
+        if not connected:
+            self._begin_outage()
+        elif self._outage:
+            self.diagnostics["mqtt_reconnects"] = (
+                self.diagnostics.get("mqtt_reconnects", 0) + 1
+            )
+            self._end_outage()
+
+    def _begin_outage(self) -> None:
+        self._outage = True
+        self._outage_topics.clear()
+
+    def _end_outage(self) -> None:
+        """Replay only the topics published while Z2M or MQTT was down."""
+        self._outage = False
+        topics, self._outage_topics = self._outage_topics, set()
+        sends = []
+        for topic in sorted(topics):
+            payload = self._last_planned.get(topic)
+            if payload is None:
+                continue
+            self._last_published.pop(topic, None)
+            sends.append(
+                Send(topic, {**payload, "transition": TRANSITION_CATCHUP_UNKNOWN_S})
+            )
+        for send in sends:
+            self._enqueue([send], priority=PRIORITY_TICK)
+
+    async def _handle_bridge_groups(self, msg: mqtt.ReceiveMessage) -> None:
+        """Learn which topics are groups (broadcasts) and their members."""
+        try:
+            groups = json.loads(str(msg.payload))
+        except json.JSONDecodeError, ValueError:
+            return
+        if not isinstance(groups, list):
+            return
+        members: dict[str, list[str]] = {}
+        for group in groups:
+            if isinstance(group, dict) and "friendly_name" in group:
+                members[group["friendly_name"]] = [
+                    m.get("ieee_address", "") for m in group.get("members", [])
+                ]
+        self._group_members = members
+        self._group_topics = {set_topic_for(self._z2m_base, name) for name in members}
+
+    async def _handle_bridge_devices(self, msg: mqtt.ReceiveMessage) -> None:
+        """IEEE → friendly name (manual-hold capture addresses a member bulb)."""
+        try:
+            devices = json.loads(str(msg.payload))
+        except json.JSONDecodeError, ValueError:
+            return
+        if isinstance(devices, list):
+            self._device_names = {
+                d["ieee_address"]: d.get("friendly_name", "")
+                for d in devices
+                if isinstance(d, dict) and "ieee_address" in d
+            }
+
+    def _is_group(self, topic: str) -> bool:
+        """Return True for group (broadcast) topics; all of them until groups load."""
+        if self._group_topics is None:
+            return True
+        return topic in self._group_topics
 
     # --- snapshot -----------------------------------------------------------
 
@@ -875,7 +1279,48 @@ def _target_to_payload(target: EngineTarget, transition: float) -> PushPayload:
         rgb_color=list(target.rgb_color) if target.rgb_color else None,
         mode=target.color_mode,
         transition=transition,
+        xy=target.xy,
     )
+
+
+def _strip(payload: PushPayload) -> PushPayload:
+    """Return the payload without transition/state: the dedup key (U1)."""
+    stripped = dict(payload)
+    stripped.pop("transition", None)
+    stripped.pop("state", None)
+    return cast("PushPayload", stripped)
+
+
+def interactive_transition(last: PushPayload | None, new: PushPayload) -> float:
+    """Transition for a user-triggered change, scaled by how far it moves (U2).
+
+    ``0.4 s + 0.02 s per brightness percentage point + 0.004 s per mired``,
+    clamped to 0.4-2.0 s: a small look change feels instant, a release from a
+    dim warm look back to a bright day curve fades in about 2 s instead of
+    jumping.
+    """
+    if last is None:
+        return INTERACTIVE_TRANSITION_MIN_S
+    d_pct = abs(new.get("brightness", 0) - last.get("brightness", 0)) * 100 / 254
+    d_mired = 0
+    if "color_temp" in new and "color_temp" in last:
+        d_mired = abs(new["color_temp"] - last["color_temp"])
+    elif ("color_temp" in new) != ("color_temp" in last):
+        d_mired = INTERACTIVE_MODE_CHANGE_MIRED
+    seconds = INTERACTIVE_TRANSITION_MIN_S + 0.02 * d_pct + 0.004 * d_mired
+    return round(min(INTERACTIVE_TRANSITION_MAX_S, seconds), 2)
+
+
+def _frame_to_payload(frame: hue_frame.HueFrame) -> PushPayload | None:
+    """Convert a captured bulb state into a look payload."""
+    if frame.brightness is None:
+        return None
+    payload: dict[str, Any] = {"brightness": frame.brightness}
+    if frame.mirek is not None:
+        payload["color_temp"] = frame.mirek
+    elif frame.xy is not None:
+        payload["color"] = {"x": frame.xy[0], "y": frame.xy[1]}
+    return cast("PushPayload", payload)
 
 
 def _parse_json(payload: str) -> dict[str, Any] | None:

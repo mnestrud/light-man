@@ -21,9 +21,11 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from .colorspace import kelvin_to_xy, lerp_oklab, rgb_to_xy
 from .const import (
     COLOR_MODE_COLOR_TEMP,
     COLOR_MODE_RGB,
+    COLOR_MODE_XY,
     DEFAULT_EDGE_TRANSITION_S,
     DEFAULT_SAT,
     DEFAULT_WIND_DOWN_S,
@@ -114,15 +116,34 @@ def base_target(e: float, profile: SourceProfile, noon: float) -> EngineTarget:
     return EngineTarget(brightness, COLOR_MODE_COLOR_TEMP, mired_to_kelvin(mired), None)
 
 
+KELVIN_FALLBACK = 2700.0
+
+
+def _xy_of(target: EngineTarget) -> tuple[float, float]:
+    """Chromaticity of any target (ct, rgb, or already xy)."""
+    if target.color_mode == COLOR_MODE_XY and target.xy is not None:
+        return target.xy
+    if target.color_mode == COLOR_MODE_RGB and target.rgb_color is not None:
+        return rgb_to_xy(target.rgb_color)
+    return kelvin_to_xy(target.color_temp_kelvin or KELVIN_FALLBACK)
+
+
 def _blend_targets(a: EngineTarget, b: EngineTarget, t: float) -> EngineTarget:
     """Blend two targets by ``t`` in [0, 1] — ``a`` at 0, ``b`` at 1.
 
     Brightness blends perceptually; color blends within a matching mode (mired
-    for ct, per-channel for rgb). Mismatched modes (uncommon — real sources are
-    ct+ct or rgb+rgb) hard-switch at the midpoint. Shared by the sleep overlay
-    and the day-window gate.
+    for ct, per-channel for rgb). Across modes (e.g. a CT curve with an RGB sleep
+    look) color blends in OKLab and is sent as xy, so each tick's segment is
+    short and perceptually even instead of one long cross-hue fade, which Hue
+    bulbs render along a bowed path.
+    The endpoints keep their own mode. Shared by the sleep overlay and the
+    day-window gate.
     """
     t = _clamp(t)
+    if t <= 0:
+        return a
+    if t >= 1:
+        return b
     brightness = perceptual_lerp(a.brightness_pct, b.brightness_pct, t)
     if a.color_mode == COLOR_MODE_RGB and b.color_mode == COLOR_MODE_RGB:
         ca = a.rgb_color or (0, 0, 0)
@@ -136,10 +157,8 @@ def _blend_targets(a: EngineTarget, b: EngineTarget, t: float) -> EngineTarget:
         return EngineTarget(
             brightness, COLOR_MODE_COLOR_TEMP, mired_to_kelvin(mired), None
         )
-    src = a if t < 0.5 else b
-    return EngineTarget(
-        brightness, src.color_mode, src.color_temp_kelvin, src.rgb_color
-    )
+    xy = lerp_oklab(_xy_of(a), _xy_of(b), t)
+    return EngineTarget(brightness, COLOR_MODE_XY, None, None, xy)
 
 
 def _sleep_target(profile: SourceProfile, base: EngineTarget) -> EngineTarget:
