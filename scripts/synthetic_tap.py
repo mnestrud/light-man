@@ -215,12 +215,22 @@ def main() -> None:
     true.add_argument("room", help="Light Man room key, e.g. primary_bath.shower")
     true.add_argument("--n", type=int, default=20)
     true.add_argument("--commit", action="store_true")
+    rel = sub.add_parser("release-at")
+    rel.add_argument("time", help="local HH:MM (next occurrence)")
+    rel.add_argument("room", help="Light Man room key, e.g. office.overhead")
+    rel.add_argument("--commit", action="store_true")
     at = sub.add_parser("at")
     at.add_argument("time", help="local HH:MM (next occurrence)")
     at.add_argument("switch")
     at.add_argument("action")
     at.add_argument("--commit", action="store_true")
     args = parser.parse_args()
+    if args.mode == "release-at":
+        if not args.commit:
+            raise SystemExit("release-at calls the live service; pass --commit")
+        wait_until(args.time)
+        _release(args.room)
+        return
     _check(args.switch, getattr(args, "action", None))
     tapper = Tapper()
     if args.mode == "tap":
