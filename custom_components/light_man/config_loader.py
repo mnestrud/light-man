@@ -523,6 +523,8 @@ def validate_config(raw: object) -> ValidatedConfig:
         CONF_OCCUPANCY_ZONES: stored_zones,
         CONF_SLEEP: sleep,
     }
+    if isinstance(raw.get("seed_version"), int):
+        stored["seed_version"] = raw["seed_version"]
     return ValidatedConfig(
         config=config, stored=stored, switch_map=switch_map, issues=issues
     )

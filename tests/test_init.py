@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import logging
 from typing import TYPE_CHECKING, Any
 from unittest.mock import patch
 
@@ -13,6 +14,7 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 from custom_components.light_man import _read_bundled_seed
 from custom_components.light_man.config_loader import validate_config
 from custom_components.light_man.const import (
+    BUNDLED_SEED_VERSION,
     CONFIG_STORE_KEY,
     DOMAIN,
     SERVICE_RELEASE_HOLD,
@@ -21,6 +23,7 @@ from custom_components.light_man.const import (
 from .conftest import SEED, FakeStore, seed_states, setup_lightman
 
 if TYPE_CHECKING:
+    import pytest
     from homeassistant.core import HomeAssistant
 
 
@@ -98,23 +101,23 @@ async def test_setup_with_invalid_config_retries(
     hass: HomeAssistant, mqtt_mock: Any
 ) -> None:
     """A current-version but structurally invalid Store -> retry (not re-seeded)."""
-    entry = await setup_lightman(hass, seed={"seed_version": 8, "push_interval_s": 30})
+    entry = await setup_lightman(
+        hass, seed={"seed_version": BUNDLED_SEED_VERSION, "push_interval_s": 30}
+    )
     assert entry.state is ConfigEntryState.SETUP_RETRY
 
 
-async def test_setup_reseeds_when_stored_seed_is_old(
-    hass: HomeAssistant, mqtt_mock: Any
-) -> None:
-    """A Store predating the bundled seed_version is re-seeded from the bundle."""
+async def _setup_with_store(
+    hass: HomeAssistant, stored: Any, bundle: Any = None
+) -> tuple[MockConfigEntry, dict[str, FakeStore]]:
+    """Set up with a given stored config (and optional bundle); return the stores."""
     await seed_states(hass)
     entry = MockConfigEntry(domain=DOMAIN, unique_id=DOMAIN)
     entry.add_to_hass(hass)
-    old = copy.deepcopy(SEED)
-    old.pop("seed_version", None)  # simulate a pre-profile (pre-v2) stored config
     stores: dict[str, FakeStore] = {}
 
     def _factory(_hass: Any, _ver: int, key: str, **_kw: Any) -> FakeStore:
-        store = FakeStore(copy.deepcopy(old) if key == CONFIG_STORE_KEY else None)
+        store = FakeStore(copy.deepcopy(stored) if key == CONFIG_STORE_KEY else None)
         stores[key] = store
         return store
 
@@ -122,13 +125,72 @@ async def test_setup_reseeds_when_stored_seed_is_old(
         patch("custom_components.light_man.Store", side_effect=_factory),
         patch(
             "custom_components.light_man._read_bundled_seed",
-            return_value=copy.deepcopy(SEED),
+            return_value=copy.deepcopy(SEED if bundle is None else bundle),
         ),
     ):
         await hass.config_entries.async_setup(entry.entry_id)
         await hass.async_block_till_done()
+    return entry, stores
+
+
+async def test_setup_reseeds_when_stored_seed_is_unmigratable(
+    hass: HomeAssistant, mqtt_mock: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A Store too old to migrate is backed up, then re-seeded from the bundle."""
+    old = copy.deepcopy(SEED)
+    old.pop("seed_version", None)  # pre-v8: cannot be migrated
+    entry, stores = await _setup_with_store(hass, old)
     assert entry.state is ConfigEntryState.LOADED
-    assert stores[CONFIG_STORE_KEY]._data.get("seed_version") == 8
+    assert stores[CONFIG_STORE_KEY]._data == SEED
+    assert stores[f"{CONFIG_STORE_KEY}.bak-v0"]._data == old
+    assert "re-seeding config from the bundle" in caplog.text
+
+
+async def test_setup_migrates_v8_store_in_place(
+    hass: HomeAssistant, mqtt_mock: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A v8 Store is backed up and migrated in place; an edit in it survives."""
+    old = copy.deepcopy(SEED)
+    old["seed_version"] = 8
+    old["curves"]["standard"]["max_br"] = 77
+    caplog.set_level(logging.INFO, logger="custom_components.light_man")
+    entry, stores = await _setup_with_store(hass, old)
+    assert entry.state is ConfigEntryState.LOADED
+    saved = stores[CONFIG_STORE_KEY]._data
+    assert saved["seed_version"] == BUNDLED_SEED_VERSION
+    assert saved["curves"]["standard"]["max_br"] == 77
+    assert saved["curves"]["standard"]["day_window"]["wind_down_s"] == 5400.0
+    assert stores[f"{CONFIG_STORE_KEY}.bak-v8"]._data == old
+    assert "migrated stored config seed_version 8 -> " in caplog.text
+
+
+async def test_setup_keeps_newer_store_on_downgrade(
+    hass: HomeAssistant, mqtt_mock: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A Store from a newer release is kept as is (rollback path) with a warning."""
+    newer = copy.deepcopy(SEED)
+    newer["seed_version"] = BUNDLED_SEED_VERSION + 1
+    entry, stores = await _setup_with_store(hass, newer)
+    assert entry.state is ConfigEntryState.LOADED
+    assert stores[CONFIG_STORE_KEY]._data == newer
+    assert "newer than this release" in caplog.text
+
+
+async def test_setup_seeds_when_store_empty(
+    hass: HomeAssistant, mqtt_mock: Any
+) -> None:
+    """First run: nothing stored -> the bundle is saved as the Store."""
+    entry, stores = await _setup_with_store(hass, None)
+    assert entry.state is ConfigEntryState.LOADED
+    assert stores[CONFIG_STORE_KEY]._data == SEED
+
+
+async def test_setup_retries_when_bundle_not_a_mapping(
+    hass: HomeAssistant, mqtt_mock: Any
+) -> None:
+    """A corrupt bundle (not a mapping) -> retry rather than saving garbage."""
+    entry, _stores = await _setup_with_store(hass, None, bundle=["not", "a", "dict"])
+    assert entry.state is ConfigEntryState.SETUP_RETRY
 
 
 def test_bundled_seed_is_valid() -> None:

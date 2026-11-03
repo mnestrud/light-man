@@ -11,6 +11,7 @@ See docs/PLAN.md and docs/reference/ARCHITECTURE.md.
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -30,6 +31,7 @@ from .const import (
     PLATFORMS,
 )
 from .coordinator import LightManCoordinator
+from .migrations import MigrationError, migrate, stored_version
 from .modes import ModeManager
 from .panel import async_register_panel, async_unregister_panel
 from .services import async_register_services, async_unregister_services
@@ -49,8 +51,10 @@ class LightManData:
 type LightManConfigEntry = ConfigEntry[LightManData]
 
 # Bundled default topology, deployed with the integration (git is source of truth).
-# Seeds the Store on first run; Phase 2's OptionsFlow can override it later.
+# Seeds the Store on first run; later bumps migrate the Store in place.
 BUNDLED_SEED = "light_man_config.json"
+
+_LOGGER = logging.getLogger(__name__)
 
 
 def _read_bundled_seed() -> Any:
@@ -58,24 +62,67 @@ def _read_bundled_seed() -> Any:
     return json.loads((Path(__file__).parent / BUNDLED_SEED).read_text("utf-8"))
 
 
+async def async_load_config(hass: HomeAssistant) -> dict[str, Any]:
+    """Load the stored config, seeding or migrating it in place as needed.
+
+    - nothing stored, or not a mapping: seed from the bundled default;
+    - older ``seed_version``: back up the Store to ``<key>.bak-v<old>``, then
+      migrate in place (edits survive); if it cannot be migrated, back up and
+      re-seed from the bundle;
+    - newer ``seed_version`` (a downgrade): keep it as is and warn.
+    """
+    store: Store[Any] = Store(hass, CONFIG_STORE_VERSION, CONFIG_STORE_KEY)
+    raw = await store.async_load()
+    if not isinstance(raw, dict):
+        seed = await _bundled_seed(hass)
+        await store.async_save(seed)
+        return seed
+    version = stored_version(raw)
+    if version == BUNDLED_SEED_VERSION:
+        return raw
+    if version > BUNDLED_SEED_VERSION:
+        _LOGGER.warning(
+            "stored config is seed_version %s, newer than this release's %s; "
+            "keeping it (restore %s.bak-v%s to roll back fully)",
+            version,
+            BUNDLED_SEED_VERSION,
+            CONFIG_STORE_KEY,
+            BUNDLED_SEED_VERSION,
+        )
+        return raw
+    backup: Store[Any] = Store(
+        hass, CONFIG_STORE_VERSION, f"{CONFIG_STORE_KEY}.bak-v{version}"
+    )
+    await backup.async_save(raw)
+    try:
+        migrated, steps = migrate(raw)
+    except MigrationError as err:
+        _LOGGER.warning("re-seeding config from the bundle: %s", err)
+        migrated = await _bundled_seed(hass)
+    else:
+        _LOGGER.info(
+            "migrated stored config seed_version %s -> %s (steps %s)",
+            version,
+            BUNDLED_SEED_VERSION,
+            steps,
+        )
+    await store.async_save(migrated)
+    return migrated
+
+
+async def _bundled_seed(hass: HomeAssistant) -> dict[str, Any]:
+    try:
+        seed = await hass.async_add_executor_job(_read_bundled_seed)
+    except (OSError, ValueError) as err:
+        raise ConfigEntryNotReady(f"Light Man seed unreadable: {err}") from err
+    if not isinstance(seed, dict):
+        raise ConfigEntryNotReady("Light Man seed is not a mapping")
+    return seed
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: LightManConfigEntry) -> bool:
     """Set up Light Man from a config entry."""
-    config_store: Store[Any] = Store(hass, CONFIG_STORE_VERSION, CONFIG_STORE_KEY)
-    raw = await config_store.async_load()
-    if (
-        raw is None
-        or not isinstance(raw, dict)
-        or raw.get("seed_version", 0) < BUNDLED_SEED_VERSION
-    ):
-        # (Re-)seed the Store from the bundled default: first run, a corrupt
-        # store, or a store predating the shipped seed_version (e.g. v8 reconciled
-        # the topology to the dashboard data model). Overwriting is safe while the
-        # config is code-owned; once the panel lets users edit it, migrate instead.
-        try:
-            raw = await hass.async_add_executor_job(_read_bundled_seed)
-        except (OSError, ValueError) as err:
-            raise ConfigEntryNotReady(f"Light Man seed unreadable: {err}") from err
-        await config_store.async_save(raw)
+    raw = await async_load_config(hass)
     try:
         validated = validate_config(raw)
     except ValueError as err:

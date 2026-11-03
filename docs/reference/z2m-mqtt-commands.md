@@ -99,6 +99,99 @@ zigbee2mqtt/bridge/request/group/members/remove_all  {"device":"<d>","endpoint":
 | `tap [--seconds N]` | capture live switch `/action` messages |
 | `bridge` | group membership + device count |
 
+## Hue native frame and measured bulb behaviour (A0, 2026-11-03)
+
+Measured on the live house with Z2M 2.14.3, zigbee-herdsman 11.2.0, converters 26.125.0, EmberZNet
+8.2.2, and the external converter `philips_datura.mjs` loaded. Raw results: `captures/a0-*` (git-ignored);
+tools: `scripts/a0_bulb_test.py`, `scripts/live_probe.py`.
+
+### Frame (cluster 0xFC03, command 0x00 `multiColor`; same format as attribute 0x0002 `state`)
+
+`u16` LE flags, then fields in **wire order** (not bit order). Codec: `custom_components/light_man/hue_frame.py`.
+
+| Flag | Field | Bytes | Notes |
+|---|---|---|---|
+| 0x0001 | on/off | u8 | |
+| 0x0002 | brightness | u8 | 1..254 (Z2M clamps; 0 and 255 invalid) |
+| 0x0004 | mirek | u16 | not clamped by Z2M; sent whenever `color_temp` is present |
+| 0x0008 | xy | u16 ×2 | value / 65535 |
+| 0x0010 | fade | u16 | deciseconds (`transition × 10`); omitted → bulb default |
+| 0x0020 | effect type | u8 | not used by Light Man |
+| 0x0100 | gradient colours | len + n | not used; wire position after effect type |
+| 0x0080 | effect speed | u8 | not used |
+| 0x0040 | gradient params | u8 ×2 | not used; last on the wire |
+
+Bits 0x0200+ are never set (bulbs may reject unknown flags).
+
+### Per-model results (one bulb per model, device topic)
+
+| Model | Test bulb | Atomic set | xy ↔ CT | Staged while off | Binding ON lands on staged | Timeouts alone |
+|---|---|---|---|---|---|---|
+| 9290031345 LCD005 | Front Door Overhead Light 2 | pass | pass | pass | pass (first push 1.9 s) | 0 |
+| 9290024687 LCA007 | Michael Closet Overhead Light | pass | pass | pass | pass (2.1 s) | 0 |
+| 579573 LCD007 | Primary Bath Michael Vanity Light | pass | pass | pass | pass (2.2 s) | 0 |
+| 9290024783 LTA007 | Upstairs Bath Light 1 | pass | CT-only: ignores xy | pass | pass (2.6 s) | 0 |
+| 929003736601 `_01` | Hallway Light East Downlight | pass | pass | pass | pass (1.8 s) | 0 |
+| 929003736601 `_02` | Hallway Light East Uplight | pass | pass | pass | pass (1.8 s) | 0 |
+| 929003736701 `_01` | Office Overhead Light | pass | pass | pass | pass (1.9 s) | 0 |
+| 929003736701 `_02` | Office Overhead Backlight | pass | pass | pass | pass (1.9 s) | 0 |
+| 929003817002 LCL009 | Primary Bath Under Vanity Lights | pass | pass | pass | pass (2.4 s) | 0 |
+| 929003151601 LCO003 | Kitchen Island Light 1 | pass | pass | pass | pass (2.1 s) | 0 |
+
+"Binding ON" = the standard ZCL `genOnOff.on` an Inovelli switch sends over its binding, emulated from
+the coordinator. The bulb wakes at exactly the staged brightness and mirek, so a re-push after paddle-on is
+unnecessary.
+
+### Reporting (the measurement instrument)
+
+- Bulbs push attribute 0x0002 unprompted (Z2M → `philips_raw`). Z2M republishes the cached value on every
+  state message; a report is fresh only when the value changes.
+- First push ≤ 0.6 s after a change starts (carries the start/mid value); then **one push every ~10 s
+  while the bulb is changing**; the settled value arrives ~10 s after a short fade. Read a settled value
+  with one `/get` instead of waiting.
+- RF consequence: a continuous 120 s glide makes each bulb report ~12 times per interval, versus ~2 per
+  change with 1 s steps. These are acked unicasts (no broadcast-table cost).
+
+### Fades and interruptions
+
+- **Long fades are honoured**: 300 s, brightness 51 → 204 and mirek 400 → 300, linear within 1 point and
+  1 mired at every checkpoint (LCD005, LCA007).
+- **A new command interrupts from the current level**: 40 s into a 120 s fade (at 127), a 0.4 s command to 200
+  went 127 → 137 → 182 → 200 in 0.6 s; the next 120 s glide started from 200 without a step.
+- **Held dim** (binding `genLevelCtrl.move` / `stop`): takes over within 0.3 s, cancels the running glide, and
+  the level stays put after release; the next glide starts from the dimmed level (one 2-point dip at the start).
+- **Cross-mode / cross-hue fades are curved**: a 60 s fade from 2700 K to xy (0.30, 0.25) swung toward
+  orange-red first (x 0.48 → 0.53) before curving to the target, 0.098 off the straight line — the same
+  whether the start was given as mirek or as xy. The bulb chooses its own path; a straight path needs the
+  engine to send short xy segments.
+
+### Consolidated flood + held-room re-assert
+
+20 pairs of {`zgb_overhead_all` at `transition: 120`, then the held office group's look at 0.4 s, 0.5 s
+later}: a **lit** held bulb deviated at most 1 brightness point and 1 mired, and settled on the look after
+every pair. An **off** held bulb stages instantly, so between the flood and the re-assert it briefly holds the
+flood's staged value (invisible, but the re-assert must not be lost).
+
+### Coordinator view of broadcasts
+
+The coordinator receives its own groupcasts back (address 0, LQI 255) and Z2M answers itself with an
+`UNSUP_COMMAND` default response (local, not radio). No other device's broadcasts reach the coordinator's
+application, so switch-originated groupcasts are not observable; the broadcast budget is set from BUSY
+behaviour.
+
+### Raw frame via the generic `command` converter
+
+`/set {"command": {"cluster": "manuSpecificPhilips2", "command": "multiColor", "payload": {"data": [...]},
+"options": {"disableDefaultResponse": true}}}` on a device topic applies the frame (verified by read-back).
+Z2M publishes no optimistic state for it.
+
+### Switch state write (stairwell VZM32-SN, Workstream F)
+
+`/set {"state": "ON"|"OFF"}` on the switch topic: switch state (LED bar) changes in 0.21 s and its binding
+drives the group (bulbs start within 0.45 s, 2.5 s ramp, no jump to the switch's own level with sync-level
+disabled). Light Man sees the switch's state echo and reacts as to a paddle press, so its own writes must be
+de-duplicated.
+
 ## Sources
 
 - Converters: https://github.com/Koenkk/zigbee-herdsman-converters (`src/lib/philips.ts`,

@@ -42,7 +42,7 @@ PORCH_OFF = "zigbee2mqtt/zgb_porch/set"
 # referencing room sensors. The loader derives the runtime view (light-ref-keyed
 # source groups) — see config_loader.py.
 SEED: dict[str, Any] = {
-    "seed_version": 8,
+    "seed_version": 9,
     "push_interval_s": 30,
     "curves": {
         "standard": {

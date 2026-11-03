@@ -26,7 +26,7 @@ MODES_STORE_VERSION: Final = 1
 # top-level objects merged across groups; occupancy moved to `occupancy_zones`
 # referencing room-owned sensors; sleep ramp became a top-level block. The loader
 # derives the unchanged runtime view from this shape, so addressing is identical.
-BUNDLED_SEED_VERSION: Final = 8
+BUNDLED_SEED_VERSION: Final = 9
 
 # --- Seed-config JSON keys --------------------------------------------------
 CONF_PUSH_INTERVAL: Final = "push_interval_s"
