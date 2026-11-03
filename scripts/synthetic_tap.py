@@ -89,10 +89,16 @@ class Tapper:
         """Publish one tap as Z2M would (cached attributes + action)."""
         topic = f"{BASE}/{switch}"
         if topic not in self.state:
+            # Z2M does not retain switch state: ask the switch for it (a read).
+            # A tap without the cached attributes makes HA's MQTT entities for
+            # the switch raise on the missing keys, unlike a real tap.
             self.ready.clear()
             self.client.subscribe(topic)
+            self.client.publish(f"{topic}/get", json.dumps({"state": ""}))
             self.ready.wait(5)
-        payload = {**self.state.get(topic, {}), "action": action}
+        if topic not in self.state:
+            raise SystemExit(f"no state from {switch}; not publishing a bare tap")
+        payload = {**self.state[topic], "action": action}
         stamp = datetime.now().astimezone().strftime("%H:%M:%S.%f")[:-3]
         if not commit:
             print(f"{stamp} DRY-RUN {topic} action={action}")
