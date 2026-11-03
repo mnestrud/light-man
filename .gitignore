@@ -34,3 +34,4 @@ test_output.txt
 # Rollback snapshots of live HA/Z2M state (may contain device data)
 backups/
 .venv-py313-rollback/
+captures/

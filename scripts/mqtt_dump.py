@@ -19,6 +19,14 @@ Modes:
   caps  <device>                  canonical settable exposes + options for its model
   set   <device> <json> [--commit]      validated state /set
   options <device|group> [<json>] [--commit]   read/set options (hue_native_control)
+  raw-command <device|group> <frame> [--ddr] [--commit]
+                                  send one Hue multiColor frame through Z2M's generic
+                                  `command` converter; the frame (hex or comma bytes)
+                                  must decode cleanly and use only on/off, brightness,
+                                  mirek, xy, fade. --ddr = disableDefaultResponse.
+  netmap [<device>] [--save PATH] raw network map with routes (~5 min on this mesh;
+                                  RF-heavy, run off-peak): one node's links, or a mesh
+                                  summary
 
 Credentials come from HA's MQTT config entry at runtime (override with
 --host/--port/--user/--password). The in-container broker host (core-mosquitto) is
@@ -31,6 +39,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import importlib.util
 import json
 import sys
 import time
@@ -429,6 +438,121 @@ def read_config_options(ha_config: str, kind: str, target: str) -> dict[str, Any
     return {}
 
 
+def _load_hue_frame() -> Any:
+    """Load the integration's pure frame codec without importing the HA package."""
+    path = (
+        Path(__file__).resolve().parents[1] / "custom_components/light_man/hue_frame.py"
+    )
+    spec = importlib.util.spec_from_file_location("hue_frame", path)
+    if spec is None or spec.loader is None:
+        raise SystemExit(f"cannot load {path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["hue_frame"] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+RAW_ALLOWED_FLAGS = 0x001F  # on/off, brightness, mirek, xy, fade — nothing else
+
+
+def parse_frame(text: str) -> bytes:
+    """Parse a frame given as hex ('16004cc7010a00') or comma bytes ('22,0,76')."""
+    text = text.strip()
+    if "," in text:
+        return bytes(int(part) for part in text.split(","))
+    return bytes.fromhex(text)
+
+
+def run_raw_command(
+    client: mqtt.Client,
+    target: str,
+    frame_text: str,
+    *,
+    ddr: bool,
+    commit: bool,
+    seconds: float,
+) -> None:
+    """Validate and (with --commit) send one Hue multiColor frame."""
+    hue = _load_hue_frame()
+    data = parse_frame(frame_text)
+    try:
+        frame = hue.decode(data)
+    except ValueError as err:
+        raise SystemExit(f"REJECTED: frame does not decode: {err}") from err
+    flags = int.from_bytes(data[:2], "little")
+    if flags & ~RAW_ALLOWED_FLAGS:
+        raise SystemExit(f"REJECTED: flags 0x{flags:04x} include effect/gradient bits")
+    _feats, label = resolve_target(client, target, seconds)
+    body = json.dumps(
+        {
+            "command": {
+                "cluster": "manuSpecificPhilips2",
+                "command": "multiColor",
+                "payload": {"data": list(data)},
+                "options": {"disableDefaultResponse": ddr},
+            }
+        }
+    )
+    topic = f"zigbee2mqtt/{target}/set"
+    print(f"{target} ({label}): {frame}")
+    if not commit:
+        print(f"DRY RUN. Would publish:\n  {topic}  {body}")
+        print("Re-run with --commit to publish.")
+        return
+    client.loop_start()
+    client.publish(topic, body, qos=0)
+    time.sleep(0.5)
+    client.loop_stop()
+    print(f"PUBLISHED  {topic}  {body}")
+    print(
+        "  (no optimistic echo for `command`; read the bulb's own philips_raw report)"
+    )
+
+
+def run_netmap(
+    client: mqtt.Client, device: str | None, save: str | None, seconds: float
+) -> None:
+    """Request the raw network map with routes and summarise it."""
+    print("Requesting network map (raw, routes) — this takes several minutes ...")
+    resp = bridge_request(
+        client, "networkmap", {"type": "raw", "routes": True}, seconds=seconds
+    )
+    if resp is None or resp.get("status") != "ok":
+        raise SystemExit(f"network map failed: {resp}")
+    value = resp["data"]["value"]
+    if save:
+        Path(save).write_text(json.dumps(value), encoding="utf-8")
+        print(f"saved {save}")
+    nodes = {n["ieeeAddr"]: n for n in value["nodes"]}
+    name = {a: n.get("friendlyName") or a for a, n in nodes.items()}
+    coord = next(a for a, n in nodes.items() if n.get("type") == "Coordinator")
+    out_links: dict[str, list[tuple[str, int]]] = {a: [] for a in nodes}
+    for link in value["links"]:
+        src, dst = link["source"]["ieeeAddr"], link["target"]["ieeeAddr"]
+        out_links.setdefault(src, []).append((dst, int(link.get("lqi") or 0)))
+    print(f"nodes {len(nodes)}  links {len(value['links'])}")
+    targets = [a for a in nodes if name[a] == device] if device else []
+    if device and not targets:
+        raise SystemExit(f"{device!r} not in the map")
+    for addr in targets or [coord]:
+        links = sorted(out_links.get(addr, []), key=lambda item: -item[1])
+        lqis = [lqi for _dst, lqi in links]
+        to_coord = next((lqi for dst, lqi in links if dst == coord), None)
+        median = sorted(lqis)[len(lqis) // 2] if lqis else 0
+        print(
+            f"\n{name[addr]}: {len(links)} neighbours, median LQI {median}, "
+            f"coordinator link {to_coord}"
+        )
+        for dst, lqi in links:
+            print(f"  {lqi:3d}  {name[dst]}")
+    if not device:
+        routers = [a for a, n in nodes.items() if n.get("type") == "Router"]
+        direct = sum(
+            1 for a in routers if any(dst == coord for dst, _l in out_links.get(a, []))
+        )
+        print(f"\nrouters {len(routers)}, with a direct coordinator link {direct}")
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build the CLI parser."""
     parser = argparse.ArgumentParser(description="Light Man MQTT helper (validated).")
@@ -458,6 +582,16 @@ def build_parser() -> argparse.ArgumentParser:
     opt.add_argument("payload", nargs="?", default=None)
     opt.add_argument("--commit", action="store_true")
     opt.add_argument("--seconds", type=float, default=4.0)
+    raw = sub.add_parser("raw-command")
+    raw.add_argument("target")
+    raw.add_argument("frame")
+    raw.add_argument("--ddr", action="store_true")
+    raw.add_argument("--commit", action="store_true")
+    raw.add_argument("--seconds", type=float, default=4.0)
+    netmap = sub.add_parser("netmap")
+    netmap.add_argument("device", nargs="?", default=None)
+    netmap.add_argument("--save", default=None)
+    netmap.add_argument("--seconds", type=float, default=420.0)
     return parser
 
 
@@ -483,6 +617,17 @@ def main() -> None:
         run_caps(client, args.device, args.seconds)
     elif args.mode == "set":
         run_set(client, args.device, args.payload, args.commit, args.seconds)
+    elif args.mode == "raw-command":
+        run_raw_command(
+            client,
+            args.target,
+            args.frame,
+            ddr=args.ddr,
+            commit=args.commit,
+            seconds=args.seconds,
+        )
+    elif args.mode == "netmap":
+        run_netmap(client, args.device, args.save, args.seconds)
     else:
         run_options(
             client, args.target, args.payload, args.commit, args.ha_config, args.seconds
