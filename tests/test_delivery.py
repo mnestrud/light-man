@@ -982,3 +982,23 @@ async def test_a_source_due_within_the_timer_slack_goes_now(
         await hass.async_block_till_done()
     assert sent == [key]
     assert coordinator._next_due[key] == due + coordinator._interval
+
+
+def test_next_slot_always_moves_past_the_slot_it_is_given(coordinator: Coord) -> None:
+    """0.8.3: an early send passes the slot itself; it must get the next slot.
+
+    Float rounding of ``slot - epoch - offset`` used to return the same slot for
+    some clock values, so every source was sent twice per interval.
+    """
+    import random
+
+    import pytest
+
+    rng = random.Random(20261103)  # noqa: S311  # test data, not crypto
+    for _ in range(2000):
+        coordinator._epoch = rng.uniform(1e3, 1e7)
+        for key in coordinator._stagger:
+            due = coordinator._next_slot(key, coordinator._epoch + rng.uniform(0, 1e5))
+            assert coordinator._next_slot(key, due) == pytest.approx(
+                due + coordinator._interval
+            )

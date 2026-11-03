@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import time
 from datetime import datetime, timedelta
 from functools import partial
@@ -110,6 +111,7 @@ if TYPE_CHECKING:
     )
     from .modes import ModeManager
 
+_SLOT_EPSILON = 1e-6  # slots: a clock within 1 µs of a boundary counts as on it
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -580,7 +582,11 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
             self._epoch = clock
         offset = self._stagger[key] * self._interval
         elapsed = clock - self._epoch - offset
-        slots = int(elapsed // self._interval) + 1
+        # A clock exactly on a slot (an early send passes the slot itself) must
+        # move to the *next* slot; float rounding of ``slot - epoch - offset``
+        # can land a hair below the boundary and return the same slot, which
+        # sent every source twice per interval (live 2026-11-03).
+        slots = math.floor(elapsed / self._interval + _SLOT_EPSILON) + 1
         return self._epoch + offset + slots * self._interval
 
     def _plan_source(
