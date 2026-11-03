@@ -19,9 +19,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import subprocess
 import sys
 import threading
 import time
+import urllib.request
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -118,6 +120,67 @@ def run_cycles(tapper: Tapper, switch: str, n: int, *, commit: bool) -> None:
         time.sleep(RELEASE_TO_NEXT_S)
 
 
+HA_URL = "https://meddle.home.botworth.net"
+PADDLE_SETTLE_S = 12.0
+
+
+def _paddle(switch: str, state: str) -> None:
+    """Press the paddle for real: a validated switch state write (binding acts)."""
+    subprocess.run(  # noqa: S603  # fixed argv, validated helper
+        [
+            sys.executable,
+            str(REPO / "scripts/mqtt_dump.py"),
+            "set",
+            switch,
+            json.dumps({"state": state}),
+            "--commit",
+        ],
+        check=True,
+        capture_output=True,
+    )
+    stamp = datetime.now().astimezone().strftime("%H:%M:%S.%f")[:-3]
+    print(f"{stamp} PADDLE {switch} {state}", flush=True)
+
+
+def _release(room: str) -> None:
+    """Release a hold through Light Man's own service (no fake paddle state)."""
+    token = Path("~/.ha-token").expanduser().read_text().strip()
+    req = urllib.request.Request(  # noqa: S310  # fixed https URL
+        f"{HA_URL}/api/services/light_man/release_hold",
+        data=json.dumps({"room": room}).encode(),
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=10):  # noqa: S310
+        pass
+    stamp = datetime.now().astimezone().strftime("%H:%M:%S.%f")[:-3]
+    print(f"{stamp} RELEASE {room}", flush=True)
+
+
+def run_true_cycles(tapper: Tapper, switch: str, room: str, n: int) -> None:
+    """Arm/release ``n`` times with the switch's physical state kept true.
+
+    Every second cycle the paddle is really pressed on (switch state write, the
+    binding turns the room on) 2 s before the config tap, and off at the end.
+    Releases use the ``release_hold`` service, so no synthetic ``up_single``
+    leaves Light Man believing the paddle is on while the switch is off.
+    """
+    for i in range(n):
+        if i % 2:
+            _paddle(switch, "ON")
+            time.sleep(PADDLE_ON_LEAD_S)
+        tapper.tap(switch, "config_single", commit=True)
+        time.sleep(ARM_TO_RELEASE_S)
+        _release(room)
+        time.sleep(3.0)
+        if i % 2:
+            _paddle(switch, "OFF")
+        time.sleep(PADDLE_SETTLE_S)
+
+
 def wait_until(hhmm: str) -> None:
     """Sleep until the next local ``HH:MM``."""
     now = datetime.now().astimezone()
@@ -141,6 +204,11 @@ def main() -> None:
     cyc.add_argument("switch")
     cyc.add_argument("--n", type=int, default=20)
     cyc.add_argument("--commit", action="store_true")
+    true = sub.add_parser("true-cycles")
+    true.add_argument("switch")
+    true.add_argument("room", help="Light Man room key, e.g. primary_bath.shower")
+    true.add_argument("--n", type=int, default=20)
+    true.add_argument("--commit", action="store_true")
     at = sub.add_parser("at")
     at.add_argument("time", help="local HH:MM (next occurrence)")
     at.add_argument("switch")
@@ -153,6 +221,10 @@ def main() -> None:
         tapper.tap(args.switch, args.action, commit=args.commit)
     elif args.mode == "cycles":
         run_cycles(tapper, args.switch, args.n, commit=args.commit)
+    elif args.mode == "true-cycles":
+        if not args.commit:
+            raise SystemExit("true-cycles presses real paddles; pass --commit")
+        run_true_cycles(tapper, args.switch, args.room, args.n)
     else:
         wait_until(args.time)
         tapper.tap(args.switch, args.action, commit=args.commit)
