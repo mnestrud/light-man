@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-import asyncio
 import copy
 import json
-import sys
 from typing import TYPE_CHECKING, Any
 from unittest.mock import patch
 
@@ -18,7 +16,7 @@ from custom_components.light_man.coordinator import LightManCoordinator
 from custom_components.light_man.modes import ModeManager
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import AsyncIterator, Iterator
 
     from homeassistant.core import HomeAssistant
 
@@ -195,12 +193,23 @@ def socket_enabled() -> Iterator[None]:
         disable_socket(allow_unix_socket=True)
 
 
-@pytest.fixture(scope="session")
-def event_loop_policy() -> asyncio.AbstractEventLoopPolicy:
-    """Use the selector loop on Windows (ProactorEventLoop breaks PHCC)."""
-    if sys.platform == "win32":
-        return asyncio.WindowsSelectorEventLoopPolicy()
-    return asyncio.DefaultEventLoopPolicy()
+@pytest.fixture
+async def mqtt_mock(hass: HomeAssistant, mqtt_mock: Any) -> AsyncIterator[Any]:
+    """PHCC's mqtt_mock, plus stopping HA's MQTT 1 s housekeeping timer at teardown.
+
+    The real client cancels ``_misc_timer`` when its socket closes; the mocked
+    paho client never closes one, so the timer outlives the test and PHCC's
+    lingering-timer check fails every MQTT test (PHCC 0.13.375 / HA 2026.10).
+    """
+    yield mqtt_mock
+    from homeassistant.components.mqtt.models import DATA_MQTT
+
+    mqtt_data = hass.data.get(DATA_MQTT)
+    client = getattr(mqtt_data, "client", None)
+    timer = getattr(client, "_misc_timer", None)
+    if timer is not None:
+        timer.cancel()
+        client._misc_timer = None
 
 
 @pytest.fixture(autouse=True)

@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-import voluptuous as vol
+import probatio as vol
 from homeassistant.components.websocket_api import async_register_command
 from homeassistant.components.websocket_api.decorators import (
     async_response,

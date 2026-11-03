@@ -19,28 +19,13 @@ from typing import TYPE_CHECKING, TypedDict
 from astral.sun import elevation as solar_elevation
 from astral.sun import noon as solar_noon
 from astral.sun import sun as solar_sun
+from homeassistant.helpers.sun import get_astral_observer
 from homeassistant.util import dt as dt_util
 
 if TYPE_CHECKING:
     from datetime import datetime
 
-    from astral import Observer
     from homeassistant.core import HomeAssistant
-
-try:
-    # HA 2026.x+ — get_astral_location is deprecated (removed 2027.7).
-    # type-ignore: the pinned test-env HA predates this helper; drop the ignore
-    # (and this whole shim) when requirements_test.txt moves past it.
-    from homeassistant.helpers.sun import (
-        get_astral_observer,  # type: ignore[attr-defined]
-    )
-except ImportError:
-    from homeassistant.helpers.sun import get_astral_location
-
-    def get_astral_observer(hass: HomeAssistant) -> Observer:
-        """Fallback for cores that predate get_astral_observer."""
-        return get_astral_location(hass)[0].observer
-
 
 # Events labelled on the curve viz's time axis (clock minutes since midnight).
 _SUN_EVENTS = ("dawn", "sunrise", "noon", "sunset", "dusk")

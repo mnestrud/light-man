@@ -1,6 +1,6 @@
 # Light Man — Compliance & Quality Audit
 
-Snapshot: 2026-06-09. This is the comprehensive, **sourced** compliance checklist for Light Man,
+Snapshot: 2026-06-09; refreshed 2026-11-03 (sources moved, Bronze 20, Gold 21, Linux toolchain). This is the comprehensive, **sourced** compliance checklist for Light Man,
 covering the Home Assistant Integration Quality Scale (all four tiers) and the HA Architecture Decision
 Records (ADRs). It is a living document: update statuses as the build progresses, and keep every
 **ignored** item documented with a reason so the decision is auditable for later work.
@@ -9,22 +9,22 @@ Records (ADRs). It is a living document: update statuses as the build progresses
 
 | Source | URL |
 |---|---|
-| Quality Scale — rules index | https://developers.home-assistant.io/docs/core/integration-quality-scale/rules |
-| Quality Scale — per-rule detail | `https://developers.home-assistant.io/docs/core/integration-quality-scale/rules/{rule-slug}` |
+| Quality Scale — rules index | https://contributors.home-assistant.io/docs/core/quality-scale/rules (moved from developers.home-assistant.io in 2026) |
+| Quality Scale — per-rule detail | `https://contributors.home-assistant.io/docs/core/quality-scale/rules/{rule-slug}` |
 | Architecture Decision Records (ADRs) | https://github.com/home-assistant/architecture/tree/master/adr |
 | ADR 0022 — quality scale framework | https://github.com/home-assistant/architecture/blob/master/adr/0022-integration-quality-scale.md |
 | Lint ruleset (local) | `pyproject.toml` `[tool.ruff.lint]` + `memory/light_man_audit.md` (this file) |
 
-Rule counts per the index at snapshot: **Bronze 19, Silver 10, Gold 24 (21 enumerated below — reconcile the 3-rule delta when Gold work begins), Platinum 3.**
+Rule counts per the index at the 2026-11-03 refresh: **Bronze 20, Silver 10, Gold 21, Platinum 3.**
 
 ## How compliance is enforced — local-first, NOT GitHub Actions
 
 The per-change gate is **local** (GHA `validate.yml` is only a redundant backstop on push):
 
 - **`pre-commit`** (`.pre-commit-config.yaml`): ruff **lint + format** on every commit via the pinned
-  hosted `ruff-pre-commit` (matched to the venv's ruff). pre-commit's `language: system` can't spawn
-  the relative Windows venv path, so mypy/pytest live in the full gate below.
-- **`scripts/check.sh`** (Git Bash): the full gate — ruff format-check + ruff lint + mypy-strict +
+  hosted `ruff-pre-commit` (matched to the venv's ruff); mypy/pytest need the HA-aware venv, so they
+  live in the full gate below.
+- **`scripts/check.sh`**: the full gate — ruff format-check + ruff lint + mypy-strict +
   pytest (+coverage >=95%) — run from the venv before pushing.
 - **`pyproject.toml`**: mypy `strict`; ruff curated strict select + `mccabe max-complexity = 10`;
   pytest `--cov-fail-under=95`.
@@ -42,7 +42,7 @@ The per-change gate is **local** (GHA `validate.yml` is only a redundant backsto
 
 ---
 
-## 🥉 Bronze (19)
+## 🥉 Bronze (20)
 
 | Rule | Status | Notes |
 |---|---|---|
@@ -54,6 +54,8 @@ The per-change gate is **local** (GHA `validate.yml` is only a redundant backsto
 | `config-flow` | ✅ | `config_flow: true`; single-instance confirm step (`single_config_entry` enforces the abort). |
 | `dependency-transparency` | ✅ | `manifest.requirements: []`; only `dependencies: ["mqtt"]` (HA core). Nothing opaque. |
 | `docs-actions` | ✅ | Three services documented in `README.md` (Actions table). |
+| `docs-conditions` | 🚫 | Integration provides no conditions (added to Bronze 2026). |
+| `docs-triggers` | 🚫 | Integration provides no triggers (added to Bronze 2026). |
 | `docs-high-level-description` | ✅ | `README.md` overview ("What it does"). |
 | `docs-installation-instructions` | ✅ | `README.md` Installation (HACS/manual + requirements). |
 | `docs-removal-instructions` | ✅ | `README.md` Removal section. |
@@ -80,7 +82,7 @@ The per-change gate is **local** (GHA `validate.yml` is only a redundant backsto
 | `reauthentication-flow` | 🚫 | No integration-owned credentials; MQTT auth is owned by HA core. N/A. |
 | `test-coverage` | ✅ | 100% coverage; local gate `--cov-fail-under=95`. |
 
-## 🥇 Gold (24 per index; 21 enumerated) — future tier
+## 🥇 Gold (21) — future tier
 
 | Rule | Status | Notes |
 |---|---|---|
@@ -103,7 +105,7 @@ The per-change gate is **local** (GHA `validate.yml` is only a redundant backsto
 | `exception-translations` | ✅ | `not_loaded` / `unknown_room` `translation_key`s in `strings.json`; raised from `services.py` (ahead of tier). |
 | `icon-translations` | ✅ | `icons.json` for entities + services; no `_attr_icon` on translated entities (ahead of tier). |
 | `reconfiguration-flow` | ⬜ | The Phase-2 OptionsFlow (adaptive profiles) is the natural home. |
-| `repair-issues` | ⬜ | Strong candidate: surface native-Hue orphan coverage / unmapped bulbs as a repair issue. |
+| `repair-issues` | ⬜ | Strong candidate: surface native-Hue orphan coverage / unmapped bulbs and persistent delivery failures as repair issues. Target the 2026.11 API (`config_entry_id` on issues, `async_refresh_issues()`). |
 | `stale-devices` | 🚫 | Only if/when `devices` is implemented; no device churn otherwise. |
 
 ## 🏆 Platinum (3) — future tier
@@ -149,6 +151,7 @@ Each is a deliberate exemption — revisit if the trigger condition changes.
 | Item | Reason | Revisit when |
 |---|---|---|
 | `brands` (Bronze) | Personal integration, not in `home-assistant/brands`. | Publishing to HACS/core. |
+| `docs-triggers`, `docs-conditions` (Bronze) | Integration provides no device triggers or conditions. | Ever add triggers or conditions. |
 | `test-before-configure` (Bronze) | Phase-1 config is a no-connection singleton confirm. | Phase 2 OptionsFlow adds validatable input. |
 | `reauthentication-flow` (Silver) | No integration-owned auth; MQTT auth is core's. | Ever add an authenticated cloud/API source. |
 | `discovery`, `discovery-update-info` (Gold) | Topology is seeded, not discovered. | Auto-discovery of Z2M groups/switches is added. |

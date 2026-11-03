@@ -1,6 +1,6 @@
 """Tests for the solar-elevation seam.
 
-Patches HA's ``get_astral_location`` to a real ``astral`` Location at the house
+Patches HA's ``get_astral_observer`` to a real ``astral`` Observer at the house
 lat/long, so this exercises the actual astral API (verifying signatures) while
 staying offline and deterministic.
 """
@@ -22,8 +22,8 @@ HOME = Location(LocationInfo("Home", "IL", "America/Chicago", 41.90845, -87.6666
 
 def _patched_location() -> object:
     return patch(
-        "custom_components.light_man.solar.get_astral_location",
-        return_value=(HOME, 181.0),
+        "custom_components.light_man.solar.get_astral_observer",
+        return_value=HOME.observer,
     )
 
 

@@ -12,7 +12,9 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from homeassistant.components import frontend, panel_custom
-from homeassistant.components.http import StaticPathConfig
+
+# HA re-exports StaticPathConfig without __all__; core imports it from this path.
+from homeassistant.components.http import StaticPathConfig  # type: ignore[attr-defined]
 
 from .const import (
     PANEL_DIR,

@@ -260,7 +260,7 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         for name, curve in curves.items():
             try:
                 preview[name] = self._curve_series(curve, samples, noon, noon_minute)
-            except (KeyError, TypeError, ValueError):
+            except KeyError, TypeError, ValueError:
                 continue  # a malformed curve is skipped, not fatal to the panel
         return {
             "times": [minutes for minutes, _e in samples],
@@ -882,6 +882,6 @@ def _parse_json(payload: str) -> dict[str, Any] | None:
     """Parse a Z2M JSON state payload, returning None if it is not an object."""
     try:
         data = json.loads(payload)
-    except (json.JSONDecodeError, ValueError):
+    except json.JSONDecodeError, ValueError:
         return None
     return data if isinstance(data, dict) else None

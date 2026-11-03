@@ -77,9 +77,9 @@ Raw endpoints behind the script: `GET /api/hassio/core/logs/boots/0`, `/api/hass
 | `.github/workflows/validate.yml` | CI: HACS, hassfest, ruff, mypy, pytest |
 | `.github/workflows/claude-code-review.yml` | Auto PR review on open/sync |
 | `.github/workflows/claude.yml` | @claude mentions in issues/PRs |
-| `.github/workflows/docs.yml` | Deploy docs to GitHub Pages on main push |
+| `.github/workflows/docs.yml` | Deploy docs to GitHub Pages on dev push |
 
-Platforms: `sensor, switch` | Min HA: `2026.1` | Repo: `https://github.com/mnestrud/light-man`
+Platforms: `sensor, switch` | Min HA: `2026.10` | Repo: `https://github.com/mnestrud/light-man`
 
 ---
 
@@ -88,13 +88,13 @@ Platforms: `sensor, switch` | Min HA: `2026.1` | Repo: `https://github.com/mnest
 **Working directory: `/home/ataraxia/code/light-man`**
 
 PHCC and mypy versions are pinned in `requirements_test.txt`
-(`pytest-homeassistant-custom-component==0.13.316`, `mypy==1.20.2`).
+(`pytest-homeassistant-custom-component==0.13.375` → HA 2026.10.4, Python 3.14; `mypy==1.20.2`).
 (The old Windows-only prerequisites — MSVC build tools and the `sitecustomize.py` Unix-module
 shims — are not needed on Linux.)
 
 ```bash
 # First time — create venv
-uv venv .venv
+uv venv -p 3.14 .venv
 uv pip install -p .venv/bin/python -r requirements_test.txt
 
 # Type check (strict — flags come from pyproject.toml [tool.mypy])
@@ -110,7 +110,7 @@ uv pip install -p .venv/bin/python -r requirements_test.txt
 .venv/bin/pytest tests/ -x --tb=short -q
 ```
 
-Target: ≥95% coverage overall; 100% on config_flow. Any PR to main must hit this.
+Target: ≥95% coverage overall (currently 100%); 100% on config_flow. Every release tag must hit this.
 
 ---
 
@@ -121,7 +121,6 @@ Target: ≥95% coverage overall; 100% on config_flow. Any PR to main must hit th
 - `DataUpdateCoordinator` requires `config_entry=` kwarg (HA 2026.x)
 - `Store` must be patched: `patch("custom_components.light_man.coordinator.Store", autospec=True)`
 - `auto_enable_custom_integrations` must be `autouse=True` in conftest — required for config entry setup to find the integration
-- Windows: add `event_loop_policy` fixture to set `WindowsSelectorEventLoopPolicy`
 - `aioclient_mock` URL matching is case-sensitive — use `re.compile(..., re.IGNORECASE)` for mixed-case paths
 - Add `-p no:socket` to `addopts` in pyproject.toml to catch missed mocks
 - `hass.config.units` has no `name` or `is_metric` in HA 2026.x — use integration-defined default constants instead of detecting locale from UnitSystem
@@ -142,7 +141,7 @@ Patterns validated against HA ADRs and quality scale rules. Apply from day one �
 ### pyproject.toml — mypy config (must be in repo root, not inside the component)
 ```toml
 [tool.mypy]
-python_version = "3.13"
+python_version = "3.14"
 strict = true
 ignore_missing_imports = true
 ```
@@ -167,19 +166,20 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 ---
 
-## Branch and PR Workflow
+## Branch and Release Workflow
 
-- **`dev`** — all development. Never commit directly to main.
-- **`main`** — merged from dev via PR only; always tagged with a release.
-- Feature branches: from dev, PR back to dev.
+- **`dev`** is the only long-lived branch. There is no `main` (decision 2026-11-02).
+- Feature branches are optional: from `dev`, merged back to `dev`.
+- Every release is an **annotated tag on `dev`** (`git tag -a vX.Y.Z -m "..."`), pushed with the commit.
+  The previous tag is the rollback point for that release.
 
-**PR checklist before merging dev → main:**
-- [ ] All CI checks pass (validate workflow)
-- [ ] ≥95% test coverage, 0 mypy strict errors
-- [ ] `manifest.json` version bumped (semver)
-- [ ] `manifest.json` has `integration_type` set correctly
-- [ ] Docs updated if behavior or config changed
-- [ ] Audit memory file updated if any rule status changed
+**Release checklist (before tagging):**
+- [ ] `scripts/check.sh` passes (ruff, ruff format, mypy strict, pytest ≥95 % coverage)
+- [ ] `manifest.json` version bumped (semver), `integration_type` set
+- [ ] Deployed to live HA and validated with both logs (Step 2b)
+- [ ] `scripts/health_report.py` passes (once it exists — Workstream A tooling)
+- [ ] Docs updated if behavior or config changed; audit memory updated if any rule status changed
+- [ ] Rollback snapshot taken for any live HA / Z2M change (`backups/<date>/`, git-ignored)
 
 ---
 
@@ -190,7 +190,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 | `validate.yml` | Every push + PR | HACS → hassfest → ruff → mypy → pytest |
 | `claude-code-review.yml` | PR open/sync | Automated Claude review comment |
 | `claude.yml` | @claude in issues/PRs | Responds to @claude mentions |
-| `docs.yml` | Push to main (docs/** or mkdocs.yml) | Deploys GitHub Pages |
+| `docs.yml` | Push to dev (docs/** or mkdocs.yml) | Deploys GitHub Pages |
 
 **Common CI failures:**
 - `hassfest`: manifest.json version format wrong, or missing required field
@@ -291,8 +291,8 @@ rsync -a --delete /home/ataraxia/code/light-man/custom_components/light_man/ /mn
 git add <changed files>
 git commit -m "..."
 git push origin dev
+# release: git tag -a vX.Y.Z -m "..." && git push origin vX.Y.Z
 ```
-Never commit to main directly. Open a PR (dev → main) when ready for release.
 
 ### What NOT to do
 - Do not edit /mnt/ha-config directly — git repo is source of truth; the mount is deploy target only
