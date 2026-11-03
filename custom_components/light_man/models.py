@@ -7,7 +7,7 @@ mypy-strict catches shape errors at the seams (coordinator <-> config <-> MQTT).
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, TypedDict
+from typing import TYPE_CHECKING, Any, TypedDict
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -304,3 +304,4 @@ class HeldRecord:
     kind: str  # one of const.HELD_KINDS
     armed_at: datetime
     expires_at: datetime
+    look: dict[str, Any] | None = None  # manual holds: the level read from the bulb

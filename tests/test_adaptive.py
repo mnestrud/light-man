@@ -226,8 +226,8 @@ def test_mixed_ct_base_blends_to_sleep_rgb_in_xy() -> None:
     assert base.color_mode == COLOR_MODE_COLOR_TEMP
     assert early.color_mode == COLOR_MODE_XY
     assert late.color_mode == COLOR_MODE_XY
-    assert full.color_mode == COLOR_MODE_RGB
-    assert full.rgb_color == (120, 40, 10)
+    assert full.color_mode == COLOR_MODE_XY  # stays in xy: no endpoint step
+    assert full.xy == rgb_to_xy((120, 40, 10))
     start = kelvin_to_xy(base.color_temp_kelvin or 0)
     end = rgb_to_xy((120, 40, 10))
     path = [lerp_oklab(start, end, i / 1000) for i in range(1001)]
@@ -250,8 +250,8 @@ def test_mixed_rgb_base_blends_to_sleep_ct_in_xy() -> None:
     early = compute_target(40.0, SUMMER_NOON, MIXED_RGB_BASE, sleep_s=0.3)
     full = compute_target(40.0, SUMMER_NOON, MIXED_RGB_BASE, sleep_s=1.0)
     assert early.color_mode == COLOR_MODE_XY
-    assert full.color_mode == COLOR_MODE_COLOR_TEMP
-    assert full.color_temp_kelvin == 2200
+    assert full.color_mode == COLOR_MODE_XY
+    assert full.xy == kelvin_to_xy(2200)
 
 
 def test_xy_target_blends_with_ct_from_its_own_xy() -> None:
@@ -416,5 +416,9 @@ def test_ref_elevation_is_the_fixed_color_reference() -> None:
 def test_blend_endpoints_return_the_targets_unchanged() -> None:
     a = EngineTarget(10.0, COLOR_MODE_COLOR_TEMP, 2700, None)
     b = EngineTarget(90.0, COLOR_MODE_RGB, None, (1, 2, 3))
+    c = EngineTarget(90.0, COLOR_MODE_COLOR_TEMP, 4000, None)
     assert adaptive._blend_targets(a, b, 0.0) is a
-    assert adaptive._blend_targets(a, b, 1.0) is b
+    assert adaptive._blend_targets(a, c, 1.0) is c
+    end = adaptive._blend_targets(a, b, 1.0)
+    assert end.color_mode == COLOR_MODE_XY
+    assert end.xy == rgb_to_xy((1, 2, 3))

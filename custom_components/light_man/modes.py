@@ -56,7 +56,10 @@ class ModeManager:
             expires = dt_util.parse_datetime(rec.get("expires_at", ""))
             if kind not in HELD_KINDS or armed is None or expires is None:
                 continue
-            self._held[room] = HeldRecord(room, kind, armed, expires)
+            look = rec.get("look")
+            self._held[room] = HeldRecord(
+                room, kind, armed, expires, look if isinstance(look, dict) else None
+            )
 
     async def _save(self) -> None:
         await self._store.async_save(
@@ -65,6 +68,7 @@ class ModeManager:
                     "kind": rec.kind,
                     "armed_at": rec.armed_at.isoformat(),
                     "expires_at": rec.expires_at.isoformat(),
+                    **({"look": rec.look} if rec.look is not None else {}),
                 }
                 for room, rec in self._held.items()
             }
@@ -74,6 +78,20 @@ class ModeManager:
         """Return the room's current mode (a held kind, or ``adaptive``)."""
         rec = self._held.get(room)
         return rec.kind if rec is not None else MODE_ADAPTIVE
+
+    def look_of(self, room: str) -> dict[str, Any] | None:
+        """Return a manual hold's captured look (persisted across restarts)."""
+        rec = self._held.get(room)
+        return rec.look if rec is not None else None
+
+    async def set_look(self, room: str, look: dict[str, Any]) -> bool:
+        """Store the captured look on a held room. False if it is not held."""
+        rec = self._held.get(room)
+        if rec is None:
+            return False
+        rec.look = dict(look)
+        await self._save()
+        return True
 
     def held_rooms(self) -> set[str]:
         """Return the set of rooms currently holding a look."""

@@ -21,8 +21,8 @@ group classifier, and (in tests) a clock and sleep.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import itertools
+import logging
 import time
 from collections import deque
 from dataclasses import dataclass, field
@@ -30,6 +30,8 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Coroutine, Sequence
+
+_LOGGER = logging.getLogger(__name__)
 
 PRIORITY_INTERACTIVE = 0
 PRIORITY_TICK = 1
@@ -53,9 +55,11 @@ class _Unit:
     seq: int
     priority: int
     sends: list[Send]
-    future: asyncio.Future[bool]
+    future: asyncio.Future[list[Send]]
     queued_at: float
     origin_at: float | None  # when the triggering event arrived (latency stats)
+    planner: Callable[[], list[Send]] | None = None  # lazy: plan at dequeue
+    key: str | None = None  # lazy units with the same key replace each other
 
     def sort_key(self) -> tuple[int, int]:
         return (self.priority, self.seq)
@@ -127,6 +131,9 @@ class PacedPublisher:
         self._group_sends: deque[tuple[float, int]] = deque()  # (time, priority)
         self._last_send_at: float | None = None
         self._worker: asyncio.Task[None] | None = None
+        self._current: _Unit | None = None
+        self._closed = False
+        self._wake = asyncio.Event()
         self.stats = PublisherStats()
 
     # --- public API -----------------------------------------------------------
@@ -137,20 +144,56 @@ class PacedPublisher:
         *,
         priority: int,
         origin_at: float | None = None,
-    ) -> asyncio.Future[bool]:
-        """Queue a unit; the future is True once every send in it was acked.
+    ) -> asyncio.Future[list[Send]]:
+        """Queue a unit; the future resolves to the sends the broker acked.
 
         A send for a topic that is already pending in an older unit replaces it
-        there (the older unit drops that send; an emptied unit resolves False).
+        there (the older unit drops that send; an emptied unit resolves ``[]``).
         """
-        loop = asyncio.get_running_loop()
-        future: asyncio.Future[bool] = loop.create_future()
+        future = self._new_future()
         sends = list(sends)
         if not sends:
-            future.set_result(True)
+            future.set_result([])
             return future
-        topics = {send.topic for send in sends}
+        self._coalesce({send.topic for send in sends})
+        self._add(
+            _Unit(next(self._seq), priority, sends, future, self._clock(), origin_at)
+        )
+        return future
+
+    def enqueue_planned(
+        self,
+        key: str,
+        planner: Callable[[], list[Send]],
+        *,
+        priority: int,
+    ) -> asyncio.Future[list[Send]]:
+        """Queue a unit whose sends are planned when the worker takes it.
+
+        Tick floods use this so a unit always reflects the holds and curve at the
+        moment it is sent (a hold armed while the unit waited is re-asserted).
+        A pending planned unit with the same ``key`` is replaced.
+        """
+        future = self._new_future()
         for unit in list(self._pending):
+            if unit.key == key:
+                self._pending.remove(unit)
+                self.stats.coalesced += 1
+                if not unit.future.done():
+                    unit.future.set_result([])
+        unit = _Unit(next(self._seq), priority, [], future, self._clock(), None)
+        unit.planner = planner
+        unit.key = key
+        self._add(unit)
+        return future
+
+    def _new_future(self) -> asyncio.Future[list[Send]]:
+        return asyncio.get_running_loop().create_future()
+
+    def _coalesce(self, topics: set[str]) -> None:
+        for unit in list(self._pending):
+            if unit.planner is not None:
+                continue
             kept = [send for send in unit.sends if send.topic not in topics]
             if len(kept) != len(unit.sends):
                 self.stats.coalesced += len(unit.sends) - len(kept)
@@ -158,27 +201,27 @@ class PacedPublisher:
                 if not kept:
                     self._pending.remove(unit)
                     if not unit.future.done():
-                        unit.future.set_result(False)
-        unit = _Unit(
-            seq=next(self._seq),
-            priority=priority,
-            sends=sends,
-            future=future,
-            queued_at=self._clock(),
-            origin_at=origin_at,
-        )
+                        unit.future.set_result([])
+
+    def _add(self, unit: _Unit) -> None:
+        if self._closed:
+            unit.future.set_result([])
+            return
         self._pending.append(unit)
         self.stats.queued += 1
+        self._wake.set()
         if self._worker is None or self._worker.done():
             self._worker = self._task_factory(self._run())
-        return future
 
     def cancel(self) -> None:
-        """Drop everything pending and stop the worker (unload)."""
-        for unit in self._pending:
+        """Drop everything pending and stop the worker for good (unload)."""
+        self._closed = True
+        units = [*self._pending, *([self._current] if self._current else [])]
+        for unit in units:
             if not unit.future.done():
-                unit.future.set_result(False)
+                unit.future.set_result([])
         self._pending.clear()
+        self._current = None
         if self._worker is not None and not self._worker.done():
             self._worker.cancel()
         self._worker = None
@@ -193,20 +236,45 @@ class PacedPublisher:
     async def _run(self) -> None:
         while self._pending:
             unit = min(self._pending, key=_Unit.sort_key)
-            waited = await self._wait_for_room(unit)
-            if waited:
-                continue  # re-pick: something higher priority may have arrived
+            if not self._plan(unit):
+                continue
+            if await self._wait_for_room(unit):
+                continue  # re-pick: a planned unit re-plans, a tap may now go first
             self._pending.remove(unit)
-            ok = True
-            for send in unit.sends:
-                ok = await self._send_one(send, unit.priority) and ok
+            self._current = unit
+            acked = [s for s in unit.sends if await self._send_one(s, unit.priority)]
+            self._current = None
             if unit.origin_at is not None and unit.priority == PRIORITY_INTERACTIVE:
                 self.stats.interactive_latency_s.append(self._clock() - unit.origin_at)
             if not unit.future.done():
-                unit.future.set_result(ok)
+                unit.future.set_result(acked)
+
+    def _plan(self, unit: _Unit) -> bool:
+        """(Re-)plan a planned unit; False (and resolved) if it has nothing to send.
+
+        Planned units re-plan on every pick, so a unit that waited for budget
+        still reflects the holds and curve at send time.
+        """
+        if unit.planner is None:
+            return True
+        try:
+            unit.sends = list(unit.planner())
+        except Exception:
+            _LOGGER.exception("planning a publish unit failed")
+            unit.sends = []
+        if unit.sends:
+            return True
+        self._pending.remove(unit)
+        if not unit.future.done():
+            unit.future.set_result([])
+        return False
 
     async def _wait_for_room(self, unit: _Unit) -> bool:
-        """Sleep once if the unit does not fit the budget now; True if it slept."""
+        """Wait if the unit does not fit the budget now; True if it waited.
+
+        The wait ends early when anything new is enqueued, so an interactive
+        unit never sits behind a tick unit that is waiting for budget.
+        """
         now = self._clock()
         self._expire(now)
         groups = sum(1 for send in unit.sends if self._is_group(send.topic))
@@ -219,12 +287,18 @@ class PacedPublisher:
             )
         if need and unit.priority == PRIORITY_TICK:
             ticks = sum(1 for _t, p in self._group_sends if p == PRIORITY_TICK)
-            limit = max(self._tick_budget, need)
-            if ticks + need > limit:
+            if need > self._tick_budget:
+                # An oversized tick unit may only go into an empty window, so it
+                # never eats the slots reserved for taps.
+                if total:
+                    wait = max(
+                        wait, self._wait_until_free(now, total, any_priority=True)
+                    )
+            elif ticks + need > self._tick_budget:
                 wait = max(
                     wait,
                     self._wait_until_free(
-                        now, ticks + need - limit, any_priority=False
+                        now, ticks + need - self._tick_budget, any_priority=False
                     ),
                 )
         if self._last_send_at is not None:
@@ -232,7 +306,15 @@ class PacedPublisher:
         if wait <= 0:
             return False
         self.stats.paced_waits += 1
-        await self._sleep(wait)
+        self._wake.clear()
+        sleeper = asyncio.ensure_future(self._sleep(wait))
+        waker = asyncio.ensure_future(self._wake.wait())
+        try:
+            await asyncio.wait({sleeper, waker}, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            for task in (sleeper, waker):
+                if not task.done():
+                    task.cancel()
         return True
 
     def _wait_until_free(self, now: float, slots: int, *, any_priority: bool) -> float:
@@ -249,8 +331,10 @@ class PacedPublisher:
                 await self._sleep(gap)
                 now = self._clock()
         ok = False
-        with contextlib.suppress(Exception):
+        try:
             ok = bool(await self._send_fn(send.topic, send.payload))
+        except Exception:
+            _LOGGER.exception("publish to %s failed", send.topic)
         self._last_send_at = self._clock()
         if self._is_group(send.topic):
             self._group_sends.append((self._last_send_at, priority))

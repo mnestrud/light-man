@@ -143,6 +143,10 @@ def _blend_targets(a: EngineTarget, b: EngineTarget, t: float) -> EngineTarget:
     if t <= 0:
         return a
     if t >= 1:
+        if a.color_mode != b.color_mode:
+            # Stay in xy at the end of a cross-mode blend, so the last segment
+            # does not step when Z2M converts rgb with a different gamut.
+            return EngineTarget(b.brightness_pct, COLOR_MODE_XY, None, None, _xy_of(b))
         return b
     brightness = perceptual_lerp(a.brightness_pct, b.brightness_pct, t)
     if a.color_mode == COLOR_MODE_RGB and b.color_mode == COLOR_MODE_RGB:

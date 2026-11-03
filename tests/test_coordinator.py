@@ -62,8 +62,10 @@ if TYPE_CHECKING:
 # glide over the interval (30 s in the test seed), interactive sends scale with
 # the change (0.4-2.0 s).
 DAY = {"brightness": 229, "transition": 5.0, "color_temp": 234}
-NIGHT = {"brightness": 76, "transition": 0.4, "color_temp": 370}
-DAY_LOOK = {"brightness": 229, "transition": 0.4, "color_temp": 154}
+# Hold arm from the day curve (229/234): night is a large change -> 2.0 s fade,
+# the day look only moves 80 mired -> 0.72 s.
+NIGHT = {"brightness": 76, "transition": 2.0, "color_temp": 370}
+DAY_LOOK = {"brightness": 229, "transition": 0.72, "color_temp": 154}
 
 
 def _fire(hass: HomeAssistant, topic: str, payload: Any) -> None:
@@ -287,10 +289,10 @@ async def test_paddle_off_releases_hold(
     assert coordinator.data["held_count"] == 0  # off cleared the hold
 
 
-async def test_paddle_on_publishes_nothing_and_invalidates(
+async def test_paddle_on_publishes_nothing(
     hass: HomeAssistant, coordinator: Coord, mqtt_mock: Any, clock: FakeClock
 ) -> None:
-    """Paddle-on sends nothing (bulbs wake at the staged value); next tick re-sends."""
+    """Paddle-on sends nothing (bulbs wake at the staged value), now or next tick."""
     await coordinator.async_set_push_enabled(enabled=True)
     _fire(hass, LR_SWITCH, {"state": "OFF"})
     await hass.async_block_till_done()
@@ -299,7 +301,7 @@ async def test_paddle_on_publishes_nothing_and_invalidates(
     await hass.async_block_till_done()
     assert published(mqtt_mock) == {}
     await tick(hass, coordinator, clock)
-    assert OVERHEAD_ALL in published(mqtt_mock)
+    assert OVERHEAD_ALL not in published(mqtt_mock)  # curve unchanged: no flood
 
 
 async def test_paddle_on_after_hold_releases_the_room(
