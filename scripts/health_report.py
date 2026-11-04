@@ -13,7 +13,12 @@ Where two sources measure the same thing they are cross-checked; a disagreement
 fails the row. Exit status is 0 only when every row passes — a release is tagged
 only then (CLAUDE.md release checklist).
 
-  .venv/bin/python scripts/health_report.py --since 2026-11-03T08:00 [--capture FILE]
+  .venv/bin/python scripts/health_report.py --since 2026-11-03T20:00 \
+      --capture FILE [--from 2026-11-03T20:01] [--to ...] [--operator-actions N]
+
+``--from`` / ``--to`` limit the capture rows to one build's hours. Light Man's own
+counters (forced floods, latency) reset at every HA start, so run the report on
+the build that is live and set ``--since`` to its start.
 """
 
 from __future__ import annotations
@@ -27,13 +32,18 @@ from typing import Any
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "scripts"))
+import capture_checks  # noqa: E402  # sibling helper: checks on a live_probe capture
 import ha_ws  # noqa: E402  # sibling helper: authenticated HA websocket
 import z2m_failures  # noqa: E402  # sibling helper: Z2M file-log parser
 
 CAP = 8
-STEADY_WINDOW = 3
-TAP_LATENCY_S = 1.0
-PCT_PER_S_GLIDE = 0.2
+LIVE_STORE = Path("/mnt/ha-config/.storage/light_man_config")
+
+
+def _stamp(text: str | None) -> float | None:
+    return (
+        None if text is None else datetime.fromisoformat(text).astimezone().timestamp()
+    )
 
 
 def light_man_state() -> dict[str, Any]:
@@ -48,66 +58,6 @@ def light_man_state() -> dict[str, Any]:
             raise SystemExit(f"light_man/subscribe failed: {reply}")
 
 
-def capture_rows(path: Path) -> list[tuple[str, str, bool]]:
-    """Rows measured from a live_probe capture."""
-    records = [json.loads(line) for line in path.read_text().splitlines()]
-    groups_rec = next((r for r in records if r["kind"] == "groups"), None)
-    groups = (
-        {f"zigbee2mqtt/{g['friendly_name']}/set" for g in groups_rec["groups"]}
-        if groups_rec
-        else set()
-    )
-    sends = [r for r in records if r["kind"] == "set"]
-    worst = 0
-    window: list[float] = []
-    for rec in sends:
-        if rec["topic"] not in groups:
-            continue
-        window = [t for t in window if rec["t"] - t < 10.0] + [rec["t"]]
-        worst = max(worst, len(window))
-    rows = [(f"capture: worst 10 s group window = {worst}", f"<= {CAP}", worst <= CAP)]
-    latencies = []
-    for i, rec in enumerate(records):
-        if rec["kind"] != "action":
-            continue
-        first = next(
-            (
-                r
-                for r in records[i + 1 :]
-                if r["kind"] == "report" and 0 <= r["t"] - rec["t"] <= 5
-            ),
-            None,
-        )
-        if first is not None:
-            latencies.append(first["t"] - rec["t"])
-    if latencies:
-        slow = [x for x in latencies if x > TAP_LATENCY_S]
-        rows.append(
-            (
-                f"capture: taps with a bulb report <= 1 s: "
-                f"{len(latencies) - len(slow)}/{len(latencies)}",
-                "all",
-                not slow,
-            )
-        )
-    last: dict[str, dict[str, Any]] = {}
-    jumps = 0
-    for rec in sends:
-        payload = rec["payload"]
-        prev = last.get(rec["topic"])
-        last[rec["topic"]] = payload
-        transition = float(payload.get("transition", 0) or 0)
-        if prev is None or transition < 30 or "brightness" not in payload:
-            continue
-        d_pct = abs(payload["brightness"] - prev.get("brightness", 0)) * 100 / 254
-        if d_pct / transition > PCT_PER_S_GLIDE:
-            jumps += 1
-    rows.append(
-        (f"capture: glide sends over the jump limit = {jumps}", "0", jumps == 0)
-    )
-    return rows
-
-
 def main() -> None:
     """Print the budget table; exit non-zero if any row fails."""
     parser = argparse.ArgumentParser(description="Light Man network-health report")
@@ -115,6 +65,15 @@ def main() -> None:
         "--since", required=True, help="local time, e.g. 2026-11-03T08:00"
     )
     parser.add_argument("--capture", type=Path, default=None)
+    parser.add_argument("--from", dest="start", default=None, help="capture rows from")
+    parser.add_argument("--to", dest="end", default=None, help="capture rows until")
+    parser.add_argument(
+        "--operator-actions",
+        type=int,
+        default=0,
+        help="force_push / master-on uses since HA start (each is one forced flood)",
+    )
+    parser.add_argument("--store", type=Path, default=LIVE_STORE)
     parser.add_argument(
         "--ha-config", type=Path, default=z2m_failures.DEFAULT_HA_CONFIG
     )
@@ -149,13 +108,8 @@ def main() -> None:
         ),
         (
             f"forced floods since HA start = {state.get('forced_floods')}",
-            "boot/operator only",
-            state.get("forced_floods") is not None,
-        ),
-        (
-            f"interactive latency p95 = {latency.get('p95_ms')} ms",
-            "<= 300 ms",
-            latency.get("p95_ms") is None or latency["p95_ms"] <= 300,
+            f"{1 + args.operator_actions} (boot + operator actions)",
+            state.get("forced_floods") == 1 + args.operator_actions,
         ),
         (
             f"cross-check BUSY: Z2M log {busy} vs Light Man {lm_fail.get('busy', 0)}",
@@ -169,9 +123,26 @@ def main() -> None:
             True,
         ),
     ]
+    p95 = latency.get("p95_ms")
     rows = rows_missing + rows
+    taps = 0
     if args.capture:
-        rows += capture_rows(args.capture)
+        config = json.loads(args.store.read_text())["data"]
+        capture_rows, taps = capture_checks.all_rows(
+            args.capture,
+            config,
+            _stamp(args.start),
+            _stamp(args.end),
+            float(config["push_interval_s"]),
+        )
+        rows += capture_rows
+    rows.append(
+        (
+            f"interactive latency p95 = {p95} ms (Light Man, since HA start)",
+            "<= 300 ms; no samples only if no taps",
+            p95 <= 300 if p95 is not None else taps == 0,
+        )
+    )
     width = max(len(r[0]) for r in rows)
     ok = True
     for label, target, passed in rows:
