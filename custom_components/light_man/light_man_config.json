@@ -1,5 +1,5 @@
 {
-  "seed_version": 10,
+  "seed_version": 11,
   "push_interval_s": 120,
   "curves": {
     "daylight_standard": {
@@ -341,7 +341,16 @@
           "source": "hallway_down"
         }
       ],
-      "switches": [],
+      "switches": [
+        {
+          "topic": "zigbee2mqtt/Hallway Light Switch East New New mmwave",
+          "governs": "hallway"
+        },
+        {
+          "topic": "zigbee2mqtt/Hall Smart Switch West New mmwave",
+          "governs": "hallway"
+        }
+      ],
       "sensors": {
         "hall_east": {
           "topic": "zigbee2mqtt/Hallway Light Switch East New New mmwave",
@@ -408,7 +417,15 @@
             }
           ]
         }
-      }
+      },
+      "sync_switches": [
+        "zigbee2mqtt/Hallway Light Switch East New New mmwave"
+      ],
+      "override_switches": [
+        "zigbee2mqtt/Hallway Light Switch East New New mmwave",
+        "zigbee2mqtt/Hall Smart Switch West New mmwave"
+      ],
+      "override_idle_s": 3600
     },
     "stairwell": {
       "off_lights": [
@@ -433,7 +450,10 @@
             }
           ]
         }
-      }
+      },
+      "sync_switches": [
+        "zigbee2mqtt/Stairwell Top Smart Switch mmwave"
+      ]
     }
   },
   "sleep": {

@@ -25,8 +25,8 @@ from typing import TYPE_CHECKING, Any, NamedTuple, TypedDict, cast
 from homeassistant.components import mqtt
 from homeassistant.core import callback
 from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers.event import async_call_later
 from homeassistant.helpers.start import async_at_started
-from homeassistant.helpers.sun import get_astral_event_next
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.util import dt as dt_util
 
@@ -42,6 +42,8 @@ from .const import (
     CONF_OCCUPANCY_KEY,
     CONF_OFF_LIGHTS,
     CONF_OFF_TRANSITION,
+    CONF_OVERRIDE_IDLE,
+    CONF_OVERRIDE_SWITCHES,
     CONF_PUSH_INTERVAL,
     CONF_ROOMS,
     CONF_SENSORS,
@@ -50,9 +52,12 @@ from .const import (
     CONF_SOURCES,
     CONF_STAGE_DELAY,
     CONF_SWEEP,
+    CONF_SYNC_SWITCHES,
     CONF_TOPIC,
+    CONFIG_TAP_MIN_ON_S,
     DEFAULT_OCCUPANCY_KEY,
     DEFAULT_OCCUPANCY_TRANSITION_S,
+    DEFAULT_OVERRIDE_IDLE_S,
     DEFAULT_SLEEP_RAMP_IN_S,
     DEFAULT_SLEEP_RAMP_OUT_S,
     DEFAULT_TRANSITION_S,
@@ -66,6 +71,7 @@ from .const import (
     INTERACTIVE_RETRY_WINDOW_S,
     INTERACTIVE_TRANSITION_MAX_S,
     INTERACTIVE_TRANSITION_MIN_S,
+    LOOK_KINDS,
     MANUAL_CAPTURE_DELAY_S,
     MANUAL_CAPTURE_REPLY_S,
     MANUAL_CAPTURE_TIMEOUT_S,
@@ -74,9 +80,10 @@ from .const import (
     MQTT_SLOW_PUBLISH_S,
     PADDLE_STATE_GRACE_S,
     RELEASE_ACTIONS,
-    SOLAR_MIDNIGHT_EVENT,
     STATE_OFF,
     STATE_ON,
+    SWITCH_ECHO_S,
+    SWITCH_READ_GAP_S,
     TRANSITION_CATCHUP_UNKNOWN_S,
     TRANSITION_REASSERT,
 )
@@ -96,7 +103,7 @@ from .solar import day_profile, solar_inputs
 from .z2m import RESEND_KINDS, parse_publish_failure, set_topic_for, z2m_base_topic
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterable
 
     from homeassistant.config_entries import ConfigEntry
     from homeassistant.core import HomeAssistant
@@ -180,6 +187,12 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         self.stored = validated.stored  # the data-model shape (read by the panel)
         self._modes = modes
         self._switch_map = validated.switch_map
+        # room-level switches (the hallway pair): base -> (room, [(source, ref)])
+        self._room_switches = validated.room_switch_map
+        self._on_since: dict[str, float] = {}  # switch -> when it last turned on
+        self._expect_echo: dict[str, tuple[str, float]] = {}  # our switch writes
+        self._override_timers: dict[str, Callable[[], None]] = {}
+        self._zone_lit: dict[str, set[str]] = {}  # zone -> topics lit this episode
         self._room_source: dict[str, str] = {
             room: source_key
             for source_key, source in config[CONF_SOURCES].items()
@@ -279,6 +292,10 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
             self._bindings_by_topic.setdefault(binding.topic, []).append(binding)
             self._bindings_by_zone.setdefault(binding.zone, []).append(binding)
         self._sensor_occupied: dict[tuple[str, str], bool] = {}
+        self._override_zones: dict[str, list[str]] = {}  # switch -> zones it holds
+        for zone_key, zone in self._occupancy.items():
+            for base in zone.get(CONF_OVERRIDE_SWITCHES, []):
+                self._override_zones.setdefault(base, []).append(zone_key)
         self._sweep_tasks: dict[tuple[str, str], asyncio.Task[None]] = {}
         self.diagnostics: dict[str, Any] = {
             "issues": validated.issues,
@@ -290,6 +307,7 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
             "occupancy": {},
             "delivery_failures": {"total": 0, "by_kind": {}, "by_topic": {}},
             "forced_floods": 0,
+            "ignored_config_taps": 0,
         }
 
     # --- lifecycle ----------------------------------------------------------
@@ -304,10 +322,15 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         # carries `action` on a tap (Z2M output: json), so the separate
         # `<base>/action` topic would only duplicate every tap's handling
         # (observed live as double force-floods per tap).
-        for base in self._switch_map:
+        for base in self._all_switches():
             self._unsubs.append(
                 await mqtt.async_subscribe(self.hass, base, self._handle_message)
             )
+        for zone in self._modes.overrides():
+            if zone in self._occupancy:
+                self._restart_idle_timer(zone)  # presence unknown until reported
+            else:
+                await self._modes.end_override(zone)
         for topic in self._bindings_by_topic:
             self._unsubs.append(
                 await mqtt.async_subscribe(self.hass, topic, self._handle_occupancy)
@@ -333,6 +356,26 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         if self.push_enabled and not self._pushed_once:
             await self._run_push(force=True)
         self._publish_snapshot()
+        # Switch states are not retained: read each once so a config tap after a
+        # restart is judged on the switch's real state (unknown counts as off).
+        self._entry.async_create_background_task(
+            self.hass, self._read_switches(), name="lm_read_switches"
+        )
+
+    def _all_switches(self) -> list[str]:
+        return [*self._switch_map, *self._room_switches]
+
+    async def _read_switches(self) -> None:
+        """Ask each switch for its state once (unicasts, spaced)."""
+        for base in self._all_switches():
+            if self._closed:
+                return
+            if base in self._paddle_on:
+                continue  # it already reported
+            await mqtt.async_publish(
+                self.hass, f"{base}/get", json.dumps({"state": ""})
+            )
+            await _pace_sleep(SWITCH_READ_GAP_S)
 
     @callback
     def _publish_snapshot(self) -> None:
@@ -355,11 +398,18 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         for task in self._capture_tasks.values():
             task.cancel()
         self._capture_tasks.clear()
+        for cancel in self._override_timers.values():
+            cancel()
+        self._override_timers.clear()
         self._publisher.cancel()
 
     def is_known_room(self, room: str) -> bool:
-        """Return True if ``room`` exists in the seed config (service validation)."""
-        return room in self._room_source
+        """Return True if ``room`` is a light ref, or a zone that can be overridden."""
+        return room in self._room_source or any(
+            self._occupancy[zone].get(CONF_OVERRIDE_SWITCHES)
+            for zone in self._occupancy
+            if zone == room
+        )
 
     def config_summary(self) -> dict[str, Any]:
         """Non-secret config shape for diagnostics."""
@@ -469,6 +519,7 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
             "dedup_skips": self.diagnostics.get("dedup_skips", 0),
             "delivery_failures": self.diagnostics.get("delivery_failures", {}),
             "forced_floods": self.diagnostics.get("forced_floods", 0),
+            "ignored_config_taps": self.diagnostics.get("ignored_config_taps", 0),
             "publisher": self._publisher.stats.as_dict(),
         }
 
@@ -484,6 +535,11 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         for room in await self._modes.sweep_expired(now):
             self._invalidate_room(room)
             _LOGGER.info("hold expired for room %s", room)
+        for zone in await self._modes.sweep_expired_overrides(now):
+            _LOGGER.info("override expired for zone %s", zone)
+            self._cancel_idle_timer(zone)
+            if zone in self._occupancy and self._zone_vacant(zone):
+                self._clear_zone(zone)
         await self._run_push(force=False, due_only=True)
         return self._snapshot()
 
@@ -906,6 +962,14 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
             if occupied == self._sensor_occupied.get(bid):
                 continue  # no edge for this binding
             self._sensor_occupied[bid] = occupied
+            if self._modes.override_until(binding.zone) is not None:
+                # Held on by a tap: no sweep (the lights are on), no clear; any
+                # presence restarts the idle clock.
+                self.diagnostics["occupancy"][binding.zone] = not self._zone_vacant(
+                    binding.zone
+                )
+                self._restart_idle_timer(binding.zone)
+                continue
             if occupied:
                 self._start_sweep(binding)
             else:
@@ -920,18 +984,26 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         self.diagnostics["occupancy"][binding.zone] = True
         self._sweep_tasks[task_key] = self._entry.async_create_background_task(
             self.hass,
-            self._run_sweep(binding.sweep),
+            self._run_sweep(binding.zone, binding.sweep),
             name=f"lm_sweep_{binding.zone}_{binding.name}",
         )
 
-    async def _run_sweep(self, sweep: list[OccupancyStage]) -> None:
-        """Light a sensor's stages in order, pausing ``delay_s`` before each."""
+    async def _run_sweep(self, zone_key: str, sweep: list[OccupancyStage]) -> None:
+        """Light a sensor's stages in order, pausing ``delay_s`` before each.
+
+        A light already lit in this occupancy episode (by the other sensor's
+        sweep) is skipped (#10a). After the last stage, the zone's sync switches
+        are told ON so their state and LED bar follow the lights (F).
+        """
+        lit = self._zone_lit.setdefault(zone_key, set())
         for stage in sweep:
             delay = stage.get(CONF_STAGE_DELAY, 0.0)
             if delay:
                 await asyncio.sleep(delay)
             sends: list[Send] = []
             for light in stage.get(CONF_LIGHTS, []):
+                if light[CONF_SET_TOPIC] in lit:
+                    continue
                 payload = self._room_glide_target(light[CONF_SOURCE])
                 if payload is None:
                     continue
@@ -941,24 +1013,106 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
                     "state": STATE_ON,
                 }
                 sends.append(Send(light[CONF_SET_TOPIC], body))
+                lit.add(light[CONF_SET_TOPIC])
             if sends:
                 self._enqueue(sends, priority=PRIORITY_INTERACTIVE)
+        self._write_switches(
+            self._occupancy[zone_key].get(CONF_SYNC_SWITCHES, []), STATE_ON
+        )
+
+    def _zone_vacant(self, zone_key: str) -> bool:
+        return not any(
+            self._sensor_occupied.get((b.zone, b.name))
+            for b in self._bindings_by_zone.get(zone_key, [])
+        )
 
     async def _maybe_clear_zone(self, zone_key: str) -> None:
         """Turn the zone's off_lights off once all its bindings report no presence."""
-        zone = self._occupancy[zone_key]
-        if any(
-            self._sensor_occupied.get((b.zone, b.name))
-            for b in self._bindings_by_zone.get(zone_key, [])
-        ):
+        if not self._zone_vacant(zone_key):
             return
         self.diagnostics["occupancy"][zone_key] = False
+        self._clear_zone(zone_key)
+
+    def _clear_zone(self, zone_key: str) -> None:
+        """Turn a vacant zone off: through its sync switch, else its off topics.
+
+        A sync switch that shows ON is told OFF and its own binding switches the
+        lights (one unicast + the binding's groupcast, and the bar follows). A
+        switch that does not show ON may not forward an OFF, so the group gets
+        Light Man's OFF as before.
+        """
+        zone = self._occupancy[zone_key]
+        self._zone_lit.pop(zone_key, None)
+        sync = zone.get(CONF_SYNC_SWITCHES, [])
+        if sync and all(self._paddle_on.get(base) for base in sync):
+            self._write_switches(sync, STATE_OFF)
+            return
         transition = zone.get(CONF_OFF_TRANSITION, DEFAULT_OCCUPANCY_TRANSITION_S)
         off = {"state": STATE_OFF, "transition": transition}
         sends = [Send(topic, off) for topic in zone.get(CONF_OFF_LIGHTS, [])]
         if sends:
             self._enqueue(sends, priority=PRIORITY_INTERACTIVE)
             self._state_resend.update(send.topic for send in sends)
+        self._write_switches(sync, STATE_OFF)  # bars follow (lights already off)
+
+    def _write_switches(self, bases: Iterable[str], state: str) -> None:
+        """Set switches' on/off state (unicasts); their echo is not a paddle press.
+
+        A switch already showing ``state`` is skipped.
+        """
+        want = state == STATE_ON
+        sends = [
+            Send(f"{base}/set", {"state": state})
+            for base in bases
+            if self._paddle_on.get(base) != want
+        ]
+        if not sends:
+            return
+        now = self._clock()
+        for send in sends:
+            self._expect_echo[send.topic.removesuffix("/set")] = (state, now)
+        self._enqueue(sends, priority=PRIORITY_INTERACTIVE)
+
+    # --- zone override (a tap holds the zone on; motion ignored) ------------
+
+    async def _arm_override(self, zone_key: str) -> None:
+        await self._modes.set_override(
+            zone_key, expires_at=self._next_midnight(dt_util.utcnow())
+        )
+        _LOGGER.info("override armed for zone %s", zone_key)
+        self._restart_idle_timer(zone_key)
+
+    async def _end_override(self, zone_key: str) -> None:
+        self._cancel_idle_timer(zone_key)
+        if await self._modes.end_override(zone_key):
+            _LOGGER.info("override ended for zone %s", zone_key)
+
+    def _cancel_idle_timer(self, zone_key: str) -> None:
+        cancel = self._override_timers.pop(zone_key, None)
+        if cancel is not None:
+            cancel()
+
+    def _restart_idle_timer(self, zone_key: str) -> None:
+        """End a vacant zone's override ``override_idle_s`` after its last presence."""
+        self._cancel_idle_timer(zone_key)
+        if not self._zone_vacant(zone_key):
+            return
+        zone = self._occupancy[zone_key]
+        idle = zone.get(CONF_OVERRIDE_IDLE, DEFAULT_OVERRIDE_IDLE_S)
+        self._override_timers[zone_key] = async_call_later(
+            self.hass, idle, partial(self._override_idle, zone_key)
+        )
+
+    async def _override_idle(self, zone_key: str, _now: datetime) -> None:
+        """No presence for the idle time: end the override and clear the zone."""
+        self._override_timers.pop(zone_key, None)
+        if self._closed or not await self._modes.end_override(zone_key):
+            return
+        _LOGGER.info("override ended for zone %s (no presence)", zone_key)
+        if self._zone_vacant(zone_key):
+            self.diagnostics["occupancy"][zone_key] = False
+            self._clear_zone(zone_key)
+        self._publish_snapshot()
 
     async def _stage_off(self, source_key: str, light_ref: str) -> None:
         """Turn a room off + stage its adaptive value in one deterministic command.
@@ -986,9 +1140,10 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
 
     # --- modes --------------------------------------------------------------
 
-    def _next_solar_midnight(self, now: datetime) -> datetime:
-        """Next solar midnight (mode TTL — held looks clear overnight)."""
-        return get_astral_event_next(self.hass, SOLAR_MIDNIGHT_EVENT, now)
+    def _next_midnight(self, now: datetime) -> datetime:
+        """Next local 00:00 (hold and override TTL), correct across DST."""
+        tomorrow = dt_util.as_local(now).date() + timedelta(days=1)
+        return dt_util.start_of_local_day(tomorrow)
 
     def _invalidate_source(self, source_key: str) -> None:
         """Forget what a source's topics last showed (next due tick re-sends)."""
@@ -1020,7 +1175,7 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         """Hold a room at a look and show it now — one interactive send (#3)."""
         now = dt_util.utcnow()
         await self._modes.set_held(
-            room, kind=kind, armed_at=now, expires_at=self._next_solar_midnight(now)
+            room, kind=kind, armed_at=now, expires_at=self._next_midnight(now)
         )
         source_key = self._room_source.get(room)
         topic = self._room_topic(room)
@@ -1036,7 +1191,16 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
     async def async_release_hold(
         self, room: str, *, origin_at: float | None = None
     ) -> None:
-        """Resume adaptive for a room: one send to the curve at the glide end (#4)."""
+        """Resume adaptive for a room: one send to the curve at the glide end (#4).
+
+        ``room`` may also be a zone: that ends its override (motion resumes).
+        """
+        if room in self._occupancy and room not in self._room_source:
+            await self._end_override(room)
+            if self._zone_vacant(room):
+                self._clear_zone(room)
+            self._publish_snapshot()
+            return
         if not await self._modes.release(room):
             return
         self._release_room(room, origin_at=origin_at)
@@ -1055,6 +1219,8 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         """Resume adaptive everywhere: one release send per held room (#5)."""
         for room in await self._modes.clear():
             self._release_room(room)
+        for zone in self._modes.overrides():
+            await self._end_override(zone)
         self._publish_snapshot()
 
     async def async_force_push(self) -> None:
@@ -1104,30 +1270,156 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         """
         if not self.push_enabled:
             return  # inert when Light Man is off — the blueprint owns taps
+        if base in self._room_switches:
+            await self._on_room_action(base, action)
+            return
         mapping = self._switch_map.get(base)
         if mapping is None:
             return
         origin_at = self._clock()
         source_key, light_ref = mapping
         if action in RELEASE_ACTIONS:
-            if self._modes.mode_of(light_ref) == HELD_MANUAL:
-                self._schedule_manual_capture(light_ref)
+            self._on_dim_release(light_ref)
             return
         mode = action_to_mode(action)
         if mode is None:
             return
         if mode != MODE_ADAPTIVE:
-            await self.async_hold(light_ref, mode, origin_at=origin_at)
+            if mode not in LOOK_KINDS or self._on_long_enough(base, action):
+                await self.async_hold(light_ref, mode, origin_at=origin_at)
             return
         off = action.startswith("down")
-        self._paddle_on[base] = not off
+        self._set_paddle(base, on=not off)
         self._paddle_action_at[base] = self._clock()
         released = await self._modes.release(light_ref)
         if off:
+            self._forget_lit(light_ref)
             await self._stage_off(source_key, light_ref)
         elif released:
             self._release_room(light_ref, origin_at=origin_at)
         self._publish_snapshot()
+
+    def _on_dim_release(self, light_ref: str) -> None:
+        if self._modes.mode_of(light_ref) == HELD_MANUAL:
+            self._schedule_manual_capture(light_ref)
+
+    def _set_paddle(self, base: str, *, on: bool) -> None:
+        """Record a switch's on/off and when it turned on (config-tap rule)."""
+        was = self._paddle_on.get(base)
+        self._paddle_on[base] = on
+        if not on:
+            self._on_since.pop(base, None)
+        elif not was:
+            self._on_since[base] = self._clock()
+
+    def _on_long_enough(self, base: str, action: str) -> bool:
+        """Return True once the switch has been on for 0.5 s (config-tap rule).
+
+        Family members hit config by accident while pressing the paddle on; an
+        unknown switch state counts as off. A config tap never turns lights on.
+        """
+        since = self._on_since.get(base)
+        if since is not None and self._clock() - since >= CONFIG_TAP_MIN_ON_S:
+            return True
+        self.diagnostics["ignored_config_taps"] += 1
+        _LOGGER.debug("%s on %s ignored: the light is not on", action, base)
+        return False
+
+    def _forget_lit(self, light_ref: str) -> None:
+        """Let this episode's sweep light again a light switched off by hand."""
+        topic = self._room_topic(light_ref)
+        for lit in self._zone_lit.values():
+            lit.discard(topic or "")
+
+    async def _on_room_action(self, base: str, action: str) -> None:
+        """Handle a tap on a switch that governs a whole room (the hallway pair).
+
+        Paddle on/off and dimming are the switch's own binding. Up arms the
+        zone's motion override (and releases a look); down ends it. A config tap
+        holds every light of the room at the look while the lights are on.
+        """
+        room, lights = self._room_switches[base]
+        origin_at = self._clock()
+        mode = action_to_mode(action)
+        if mode is None or mode == HELD_MANUAL:
+            return  # a held dim is local; the next tick glides on
+        if mode in LOOK_KINDS:
+            if self._on_long_enough(base, action):
+                await self._hold_lights(lights, mode, origin_at=origin_at)
+            return
+        off = action.startswith("down")
+        self._set_paddle(base, on=not off)
+        self._paddle_action_at[base] = origin_at
+        released = [ref for _src, ref in lights if await self._modes.release(ref)]
+        zones = self._override_zones.get(base, [])
+        if off:
+            for zone in zones:
+                await self._end_override(zone)
+                self._zone_lit.pop(zone, None)
+            for source_key in {src for src, _ref in lights}:
+                self._invalidate_source(source_key)
+        else:
+            if released:
+                self._show_lights(
+                    [(src, ref) for src, ref in lights if ref in released],
+                    self._room_glide_target,
+                    origin_at=origin_at,
+                )
+            for zone in zones:
+                await self._arm_override(zone)
+        _LOGGER.debug("%s on %s (room %s)", action, base, room)
+        self._publish_snapshot()
+
+    async def _hold_lights(
+        self, lights: list[tuple[str, str]], kind: str, *, origin_at: float
+    ) -> None:
+        """Hold several lights at a look; show it with one send per source."""
+        now = dt_util.utcnow()
+        for _source, ref in lights:
+            await self._modes.set_held(
+                ref, kind=kind, armed_at=now, expires_at=self._next_midnight(now)
+            )
+
+        def look(source_key: str) -> PushPayload | None:
+            profile = self._config[CONF_SOURCES][source_key]["profile"]
+            target = night_look(profile) if kind == HELD_NIGHT else day_look(profile)
+            return _strip(_target_to_payload(target, 0.0))
+
+        if self.push_enabled:
+            self._show_lights(lights, look, origin_at=origin_at)
+        self._publish_snapshot()
+
+    def _show_lights(
+        self,
+        lights: list[tuple[str, str]],
+        payload_of: Callable[[str], PushPayload | None],
+        *,
+        origin_at: float,
+    ) -> None:
+        """Send each source's payload to its lights.
+
+        The consolidated topic when every light of the source is in ``lights``,
+        else each light's own topic.
+        """
+        by_source: dict[str, list[str]] = {}
+        for source_key, ref in lights:
+            by_source.setdefault(source_key, []).append(ref)
+        for source_key, refs in by_source.items():
+            payload = payload_of(source_key)
+            if payload is None:
+                continue
+            source = self._config[CONF_SOURCES][source_key]
+            rooms = source.get(CONF_ROOMS, {})
+            if set(rooms) <= set(refs):
+                topics = [source[CONF_CONSOLIDATED_TOPIC]]
+            else:
+                topics = [
+                    rooms[ref][CONF_SET_TOPIC]
+                    for ref in refs
+                    if ref in rooms and rooms[ref].get(CONF_SET_TOPIC)
+                ]
+            for topic in topics:
+                self._interactive_send(topic, payload, origin_at=origin_at)
 
     async def _on_state(self, base: str, state: str) -> None:
         """Track the paddle: on invalidates the source; off stages the room off.
@@ -1137,13 +1429,20 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         flood — the flood would race the local binding and re-brighten the bulb
         (see :meth:`_stage_off`).
         """
-        mapping = self._switch_map.get(base)
-        if mapping is None:
-            return
         on = state == STATE_ON
         previous = self._paddle_on.get(base)
         if previous == on:
             return  # unchanged, or the matching action already handled it
+        echo = self._expect_echo.get(base)
+        if (
+            echo is not None
+            and echo[0] == state
+            and self._clock() - echo[1] < SWITCH_ECHO_S
+        ):
+            # Our own sync write coming back: record it, it is not a press.
+            del self._expect_echo[base]
+            self._set_paddle(base, on=on)
+            return
         tapped = self._paddle_action_at.get(base)
         if tapped is not None and self._clock() - tapped < PADDLE_STATE_GRACE_S:
             # Z2M republishes the switch's *cached* state with any attribute report
@@ -1152,9 +1451,10 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
             # cache (live 2026-11-04 03:40: a bath light turned on, then staged
             # off 0.37 s later); a real paddle change arrives as an action.
             return
-        self._paddle_on[base] = on
-        if not self.push_enabled:
-            return
+        self._set_paddle(base, on=on)
+        mapping = self._switch_map.get(base)
+        if mapping is None or not self.push_enabled:
+            return  # a room-level switch: its binding acts, the state is tracked
         source_key, light_ref = mapping
         if previous is None:
             # The first report after startup (retained): record it only. The
@@ -1170,6 +1470,7 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         else:
             if await self._modes.release(light_ref):
                 _LOGGER.info("hold released by switch-off for %s", light_ref)
+            self._forget_lit(light_ref)
             await self._stage_off(source_key, light_ref)
         self._publish_snapshot()
 

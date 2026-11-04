@@ -10,6 +10,11 @@ Versions:
             ``edge_transition_s`` / ``wind_down_s``). Engine output is identical.
   v9 -> v10 ``push_interval_s`` 30 -> 120 (bulb-side glide makes the longer
             interval invisible; a value other than the old default is kept).
+  v10 -> v11 the hallway east + west switches govern the whole hallway and hold
+            its motion off (``override_switches``); the hallway and stairwell
+            switches follow their zones (``sync_switches``). Applied only where
+            the stored rooms still have those switches as shipped. Behaviour
+            change, intended (Workstream F / F-hall).
 """
 
 from __future__ import annotations
@@ -58,9 +63,46 @@ def _v9_to_v10(raw: dict[str, Any]) -> dict[str, Any]:
     return raw
 
 
+HALL_EAST = "zigbee2mqtt/Hallway Light Switch East New New mmwave"
+HALL_WEST = "zigbee2mqtt/Hall Smart Switch West New mmwave"
+STAIRWELL_TOP = "zigbee2mqtt/Stairwell Top Smart Switch mmwave"
+
+
+def _v10_to_v11(raw: dict[str, Any]) -> dict[str, Any]:
+    rooms = raw.get("rooms") or {}
+    zones = raw.get("occupancy_zones") or {}
+    hallway = rooms.get("hallway")
+    hall_zone = zones.get("hallway")
+    if (
+        isinstance(hallway, dict)
+        and isinstance(hall_zone, dict)
+        and not hallway.get("switches")
+    ):
+        hallway["switches"] = [
+            {"topic": HALL_EAST, "governs": "hallway"},
+            {"topic": HALL_WEST, "governs": "hallway"},
+        ]
+        hall_zone.setdefault("sync_switches", [HALL_EAST])
+        hall_zone.setdefault("override_switches", [HALL_EAST, HALL_WEST])
+        hall_zone.setdefault("override_idle_s", 3600)
+    stairwell = rooms.get("stairwell")
+    stair_zone = zones.get("stairwell")
+    if (
+        isinstance(stairwell, dict)
+        and isinstance(stair_zone, dict)
+        and any(
+            isinstance(sw, dict) and sw.get("topic") == STAIRWELL_TOP
+            for sw in stairwell.get("switches") or []
+        )
+    ):
+        stair_zone.setdefault("sync_switches", [STAIRWELL_TOP])
+    return raw
+
+
 MIGRATIONS: dict[int, Callable[[dict[str, Any]], dict[str, Any]]] = {
     8: _v8_to_v9,
     9: _v9_to_v10,
+    10: _v10_to_v11,
 }
 
 

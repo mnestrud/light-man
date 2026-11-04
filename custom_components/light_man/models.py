@@ -88,6 +88,9 @@ class OccupancyZone(TypedDict, total=False):
     sensors: dict[str, OccupancySensor]  # sensor name -> its binding
     off_lights: list[str]  # /set topics turned off on all-clear
     off_transition_s: float
+    sync_switches: list[str]  # switch bases whose state follows the zone
+    override_switches: list[str]  # switch bases whose up tap overrides motion
+    override_idle_s: float  # an override ends after this long with no presence
 
 
 class LightManConfig(TypedDict):
@@ -199,10 +202,11 @@ class RoomLight(TypedDict, total=False):
 
 
 class RoomSwitch(TypedDict, total=False):
-    """An Inovelli switch in a room and the light group it governs (holds).
+    """An Inovelli switch in a room and the lights it governs (holds).
 
     ``governs`` is a light ref ``"<room_id>.<light_id>"`` — the group the switch is
-    SBM-bound to and whose hold its taps drive.
+    SBM-bound to and whose hold its taps drive — or a room id, for a switch bound
+    to every light of the room (the hallway pair).
     """
 
     topic: str
@@ -260,6 +264,9 @@ class ZoneConfig(TypedDict, total=False):
     sensors: dict[str, ZoneSensorBinding]
     off_lights: list[str]
     off_transition_s: float
+    sync_switches: list[str]
+    override_switches: list[str]
+    override_idle_s: float
 
 
 class SleepConfig(TypedDict, total=False):

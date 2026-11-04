@@ -26,7 +26,7 @@ MODES_STORE_VERSION: Final = 1
 # top-level objects merged across groups; occupancy moved to `occupancy_zones`
 # referencing room-owned sensors; sleep ramp became a top-level block. The loader
 # derives the unchanged runtime view from this shape, so addressing is identical.
-BUNDLED_SEED_VERSION: Final = 10
+BUNDLED_SEED_VERSION: Final = 11
 
 # --- Seed-config JSON keys --------------------------------------------------
 CONF_PUSH_INTERVAL: Final = "push_interval_s"
@@ -97,6 +97,8 @@ HELD_NIGHT: Final = "night"  # config_single -> hold at Light Man's night target
 HELD_DAY: Final = "day"  # config_double -> hold at the day value
 HELD_MANUAL: Final = "manual"  # up/down_held -> freeze (blueprint owns the level)
 HELD_KINDS: Final = frozenset({HELD_NIGHT, HELD_DAY, HELD_MANUAL})
+LOOK_KINDS: Final = frozenset({HELD_NIGHT, HELD_DAY})  # config taps
+MODE_OVERRIDE: Final = "override"  # a zone held on by a tap (motion ignored)
 
 # Inovelli action string -> resulting room mode. Single taps release to
 # `adaptive` (down differs only in the resulting paddle state). Double/triple
@@ -128,6 +130,14 @@ CONF_OFF_TRANSITION: Final = "off_transition_s"
 # Default JSON field in an Inovelli mmwave payload that reports overall presence.
 DEFAULT_OCCUPANCY_KEY: Final = "occupancy"
 DEFAULT_OCCUPANCY_TRANSITION_S: Final = 1.5
+# Switches whose state (and LED bar) follows the zone: written ON after a sweep
+# and OFF at all-clear; the switch's own binding then switches the lights.
+CONF_SYNC_SWITCHES: Final = "sync_switches"
+# Switches whose up tap holds the zone on (motion override) until 00:00 local or
+# ``override_idle_s`` with no presence.
+CONF_OVERRIDE_SWITCHES: Final = "override_switches"
+CONF_OVERRIDE_IDLE: Final = "override_idle_s"
+DEFAULT_OVERRIDE_IDLE_S: Final = 3600.0
 
 # --- Services ---------------------------------------------------------------
 SERVICE_RELEASE_HOLD: Final = "release_hold"
@@ -145,9 +155,6 @@ UID_SLEEP_ENABLE: Final = "sleep_enable"
 # the ramp. Global durations — a per-source override can come later if needed.
 DEFAULT_SLEEP_RAMP_IN_S: Final = 5400.0  # 90 min ease into the sleep target
 DEFAULT_SLEEP_RAMP_OUT_S: Final = 1800.0  # 30 min ease back out on wake
-
-# --- Solar event for hold TTL (astral "midnight" = solar midnight/nadir) -----
-SOLAR_MIDNIGHT_EVENT: Final = "midnight"
 
 # --- Web control panel (sidebar SPA) ----------------------------------------
 # A self-hosted read-only dashboard (Phase 2): a custom panel mounts the SPA,
@@ -182,3 +189,6 @@ PADDLE_STATE_GRACE_S: Final = 3.0  # ignore a contradicting switch state after a
 RELEASE_ACTIONS: Final = frozenset(
     {"up_release", "down_release", "up_released", "down_released"}
 )
+CONFIG_TAP_MIN_ON_S: Final = 0.5  # a config tap needs the switch on this long
+SWITCH_ECHO_S: Final = 5.0  # our own switch write is echoed back within this
+SWITCH_READ_GAP_S: Final = 0.5  # spacing of the startup switch-state reads

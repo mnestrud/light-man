@@ -35,6 +35,8 @@ from .const import (
     CONF_OCCUPANCY_ZONES,
     CONF_OFF_LIGHTS,
     CONF_OFF_TRANSITION,
+    CONF_OVERRIDE_IDLE,
+    CONF_OVERRIDE_SWITCHES,
     CONF_PROFILE,
     CONF_PUSH_INTERVAL,
     CONF_RAMP_IN,
@@ -48,10 +50,12 @@ from .const import (
     CONF_STAGE_DELAY,
     CONF_SWEEP,
     CONF_SWITCHES,
+    CONF_SYNC_SWITCHES,
     CONF_TOPIC,
     CONF_TRANSITION,
     DEFAULT_OCCUPANCY_KEY,
     DEFAULT_OCCUPANCY_TRANSITION_S,
+    DEFAULT_OVERRIDE_IDLE_S,
     DEFAULT_PUSH_INTERVAL_S,
 )
 from .models import (
@@ -91,6 +95,10 @@ class ValidatedConfig:
     stored: StoredConfig
     switch_map: dict[str, tuple[str, str]]
     issues: list[str] = field(default_factory=list)
+    # room-level switches: base -> (room id, [(source, light_ref), ...])
+    room_switch_map: dict[str, tuple[str, list[tuple[str, str]]]] = field(
+        default_factory=dict
+    )
 
 
 @dataclass(slots=True)
@@ -104,6 +112,7 @@ class _RoomScan:
     sensor_index: dict[str, RoomSensor] = field(default_factory=dict)
     # (switch base topic, governed light ref)
     switch_entries: list[tuple[str, str]] = field(default_factory=list)
+    switch_topics: set[str] = field(default_factory=set)
     # light refs whose set_topic was missing/empty (flagged after switch scan)
     empty_topic_refs: set[str] = field(default_factory=set)
 
@@ -237,6 +246,7 @@ def _scan_room_switches(
             issues.append(f"switch {topic!r}: missing 'governs'")
             continue
         scan.switch_entries.append((topic, governs))
+        scan.switch_topics.add(topic)
         switches.append(RoomSwitch(topic=topic, governs=governs))
     return switches
 
@@ -295,18 +305,38 @@ def _scan_rooms(
 
 
 def _build_switch_map(
-    scan: _RoomScan, issues: list[str]
+    scan: _RoomScan,
+    issues: list[str],
+    room_switches: dict[str, tuple[str, list[tuple[str, str]]]],
 ) -> tuple[dict[str, tuple[str, str]], dict[str, list[str]]]:
-    """Resolve switch bases to ``(group, light_ref)`` + reverse governs index."""
+    """Resolve switch bases to ``(group, light_ref)`` + reverse governs index.
+
+    A switch governing a whole room (``governs`` is a room id) goes to
+    ``room_switches`` instead, with every light of that room.
+    """
     switch_map: dict[str, tuple[str, str]] = {}
     governs_by_light: dict[str, list[str]] = {}
     for base, governs in scan.switch_entries:
         info = scan.light_index.get(governs)
+        if info is None and governs in scan.rooms:
+            prefix = f"{governs}."
+            lights = [
+                (light[CONF_SOURCE], ref)
+                for ref, light in scan.light_index.items()
+                if ref.startswith(prefix)
+            ]
+            if not lights:
+                issues.append(f"switch {base!r}: room {governs!r} has no lights")
+            elif base in switch_map or base in room_switches:
+                issues.append(f"switch {base!r} is listed twice")
+            else:
+                room_switches[base] = (governs, lights)
+            continue
         if info is None:
             issues.append(f"switch {base!r}: governs unknown light {governs!r}")
             continue
         mapping = (info[CONF_SOURCE], governs)
-        if base in switch_map:
+        if base in switch_map or base in room_switches:
             issues.append(
                 f"switch {base!r} maps to both {switch_map[base]} and {mapping}"
             )
@@ -392,6 +422,28 @@ def _resolve_sweep(
     return runtime, stored
 
 
+def _zone_switches(
+    zone_id: str,
+    zone_raw: dict[str, object],
+    key: str,
+    scan: _RoomScan,
+    issues: list[str],
+) -> list[str] | None:
+    """Return a zone's switch list (sync or override), or None if absent."""
+    if key not in zone_raw:
+        return None
+    raw_list = zone_raw[key]
+    topics = (
+        [t for t in raw_list if isinstance(t, str) and t]
+        if isinstance(raw_list, list)
+        else []
+    )
+    unknown = [t for t in topics if t not in scan.switch_topics]
+    if unknown:
+        issues.append(f"occupancy.{zone_id}.{key}: unknown switch {unknown}")
+    return [t for t in topics if t in scan.switch_topics]
+
+
 def _validate_zone(
     zone_id: str,
     zone_raw: dict[str, object],
@@ -444,6 +496,18 @@ def _validate_zone(
     stored = ZoneConfig(
         sensors=stored_sensors, off_lights=off_lights, off_transition_s=off_transition_s
     )
+    sync = _zone_switches(zone_id, zone_raw, CONF_SYNC_SWITCHES, scan, issues)
+    if sync is not None:
+        runtime[CONF_SYNC_SWITCHES] = stored[CONF_SYNC_SWITCHES] = sync
+    override = _zone_switches(zone_id, zone_raw, CONF_OVERRIDE_SWITCHES, scan, issues)
+    if override is not None:
+        runtime[CONF_OVERRIDE_SWITCHES] = stored[CONF_OVERRIDE_SWITCHES] = override
+        idle = zone_raw.get(CONF_OVERRIDE_IDLE, DEFAULT_OVERRIDE_IDLE_S)
+        if not _is_number(idle) or float(cast("float", idle)) <= 0:
+            issues.append(f"occupancy.{zone_id}: bad {CONF_OVERRIDE_IDLE}; default")
+            idle = DEFAULT_OVERRIDE_IDLE_S
+        seconds = float(cast("float", idle))
+        runtime[CONF_OVERRIDE_IDLE] = stored[CONF_OVERRIDE_IDLE] = seconds
     return runtime, stored
 
 
@@ -505,7 +569,8 @@ def validate_config(raw: object) -> ValidatedConfig:
     curves = _validate_curves(raw, issues)
     groups = _validate_groups(raw, curves)
     scan = _scan_rooms(raw, set(groups), issues)
-    switch_map, governs_by_light = _build_switch_map(scan, issues)
+    room_switches: dict[str, tuple[str, list[tuple[str, str]]]] = {}
+    switch_map, governs_by_light = _build_switch_map(scan, issues, room_switches)
     runtime_sources = _build_runtime_sources(groups, curves, scan, governs_by_light)
     runtime_zones, stored_zones = _validate_zones(raw, scan, issues)
     sleep = _validate_sleep(raw)
@@ -526,5 +591,9 @@ def validate_config(raw: object) -> ValidatedConfig:
     if isinstance(raw.get("seed_version"), int):
         stored["seed_version"] = raw["seed_version"]
     return ValidatedConfig(
-        config=config, stored=stored, switch_map=switch_map, issues=issues
+        config=config,
+        stored=stored,
+        switch_map=switch_map,
+        issues=issues,
+        room_switch_map=room_switches,
     )

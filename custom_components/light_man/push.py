@@ -99,6 +99,8 @@ def plan_source(
     manual hold whose level is not known yet.
 
     - No holds (or no rooms): the consolidated topic alone.
+    - Every room held at the same known look (the hallway pair holds all six
+      lights): the look on the consolidated topic alone.
     - Holds with known looks: the consolidated flood **then** a re-assert of each
       held room's look, sent as one unit (verified live 2026-11-03: a lit held
       bulb moves at most 1 point / 1 mired between the two frames).
@@ -112,6 +114,13 @@ def plan_source(
     held = {room: look for room, look in looks.items() if room in rooms}
     if not held:
         return "consolidated", [PlannedSend(consolidated, adaptive_payload)]
+    first = next(iter(held.values()))
+    if (
+        len(held) == len(rooms)
+        and first is not None
+        and all(look == first for look in held.values())
+    ):
+        return "held", [PlannedSend(consolidated, first)]
     fits = max_unit is None or 1 + len(held) <= max_unit
     if fits and all(look is not None for look in held.values()):
         reasserts = [

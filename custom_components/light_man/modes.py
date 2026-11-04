@@ -4,7 +4,10 @@ Each room is ``adaptive`` (the default — no record) or held at a look
 (``night`` / ``day`` / ``manual``). The mode is driven only by explicit Inovelli
 action intents — never inferred from switch on/off bounce (the old, buggy
 signal). Held modes persist across restarts (Store) so a restart never drops a
-held look, and auto-expire at the next solar midnight.
+held look, and auto-expire at the next local midnight (00:00).
+
+Zone overrides (a tap holding an occupancy zone on, motion ignored) persist in
+the same Store under ``OVERRIDES_KEY``, also expiring at 00:00.
 """
 
 from __future__ import annotations
@@ -13,11 +16,13 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 from homeassistant.util import dt as dt_util
 
-from .const import ACTION_MODE, HELD_KINDS, MODE_ADAPTIVE
+from .const import ACTION_MODE, HELD_KINDS, MODE_ADAPTIVE, MODE_OVERRIDE
 from .models import HeldRecord
 
 if TYPE_CHECKING:
     from datetime import datetime
+
+OVERRIDES_KEY = "__zone_overrides__"
 
 
 def action_to_mode(action: str) -> str | None:
@@ -44,13 +49,23 @@ class ModeManager:
         """Bind to a Store; call :meth:`async_load` before use."""
         self._store = store
         self._held: dict[str, HeldRecord] = {}
+        self._overrides: dict[str, datetime] = {}  # zone -> expires_at
 
     async def async_load(self) -> None:
         """Load persisted held modes, dropping malformed/unknown entries."""
         data = await self._store.async_load()
         if not isinstance(data, dict):
             return
+        data = dict(data)
+        overrides = data.pop(OVERRIDES_KEY, None)
+        if isinstance(overrides, dict):
+            for zone, expires_raw in overrides.items():
+                expires = dt_util.parse_datetime(str(expires_raw))
+                if expires is not None:
+                    self._overrides[zone] = expires
         for room, rec in data.items():
+            if not isinstance(rec, dict):
+                continue
             kind = rec.get("kind")
             armed = dt_util.parse_datetime(rec.get("armed_at", ""))
             expires = dt_util.parse_datetime(rec.get("expires_at", ""))
@@ -74,7 +89,7 @@ class ModeManager:
         await self._store.async_save(self._data())
 
     def _data(self) -> dict[str, Any]:
-        return {
+        data: dict[str, Any] = {
             room: {
                 "kind": rec.kind,
                 "armed_at": rec.armed_at.isoformat(),
@@ -83,6 +98,42 @@ class ModeManager:
             }
             for room, rec in self._held.items()
         }
+        if self._overrides:
+            data[OVERRIDES_KEY] = {
+                zone: expires.isoformat() for zone, expires in self._overrides.items()
+            }
+        return data
+
+    # --- zone overrides -----------------------------------------------------
+
+    def override_until(self, zone: str) -> datetime | None:
+        """When the zone's override expires, or None if it has none."""
+        return self._overrides.get(zone)
+
+    def overrides(self) -> dict[str, datetime]:
+        """Every active zone override and its expiry."""
+        return dict(self._overrides)
+
+    async def set_override(self, zone: str, *, expires_at: datetime) -> None:
+        """Arm (or extend) a zone override."""
+        self._overrides[zone] = expires_at
+        await self._save()
+
+    async def end_override(self, zone: str) -> bool:
+        """End a zone override. Returns True if there was one."""
+        if self._overrides.pop(zone, None) is None:
+            return False
+        await self._save()
+        return True
+
+    async def sweep_expired_overrides(self, now: datetime) -> list[str]:
+        """End overrides whose expiry has passed. Returns those zones."""
+        expired = [z for z, expires in self._overrides.items() if expires <= now]
+        if expired:
+            for zone in expired:
+                del self._overrides[zone]
+            await self._save()
+        return expired
 
     def mode_of(self, room: str) -> str:
         """Return the room's current mode (a held kind, or ``adaptive``)."""
@@ -160,8 +211,11 @@ class ModeManager:
         return expired
 
     def as_attributes(self) -> dict[str, dict[str, str]]:
-        """Per-room ``{mode, expires_at}`` map for the sensor + diagnostics."""
-        return {
+        """Per-room ``{mode, expires_at}`` map (+ zone overrides) for the sensor."""
+        attrs = {
             room: {"mode": rec.kind, "expires_at": rec.expires_at.isoformat()}
             for room, rec in self._held.items()
         }
+        for zone, expires in self._overrides.items():
+            attrs[zone] = {"mode": MODE_OVERRIDE, "expires_at": expires.isoformat()}
+        return attrs

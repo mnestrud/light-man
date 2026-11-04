@@ -495,7 +495,7 @@ async def test_a_broken_curve_skips_only_its_source(
         await coordinator.async_set_push_enabled(enabled=True)
         await hass.async_block_till_done()
     assert "skipping source" in caplog.text
-    assert published(mqtt_mock) == {}
+    assert [t for t in published(mqtt_mock) if not t.endswith("/get")] == []
 
 
 async def test_sources_are_staggered_across_the_interval(

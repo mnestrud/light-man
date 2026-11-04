@@ -68,6 +68,12 @@ NIGHT = {"brightness": 76, "transition": 2.0, "color_temp": 370}
 DAY_LOOK = {"brightness": 229, "transition": 0.72, "color_temp": 154}
 
 
+def _lit(coordinator: Coord, base: str = LR_SWITCH) -> None:
+    """The switch has been on for a while (config taps need the light on)."""
+    coordinator._set_paddle(base, on=True)
+    coordinator._on_since[base] -= 10.0
+
+
 def _fire(hass: HomeAssistant, topic: str, payload: Any) -> None:
     if isinstance(payload, dict):
         payload = json.dumps(payload)
@@ -147,6 +153,7 @@ async def test_config_single_holds_night_per_room(
     await hass.async_block_till_done()
     mqtt_mock.async_publish.reset_mock()
 
+    _lit(coordinator)
     _fire(hass, LR_SWITCH, {"action": "config_single"})
     await hass.async_block_till_done()
     assert coordinator.data["held_count"] == 1
@@ -164,6 +171,7 @@ async def test_config_double_holds_day_per_room(
     await hass.async_block_till_done()
     mqtt_mock.async_publish.reset_mock()
 
+    _lit(coordinator)
     _fire(hass, LR_SWITCH, {"action": "config_double"})
     await hass.async_block_till_done()
     assert coordinator.data["held"]["living_room.overhead"]["mode"] == "day"
@@ -177,6 +185,7 @@ async def test_up_single_releases(
 ) -> None:
     """up_single resumes adaptive: one send of the curve to that room."""
     await coordinator.async_set_push_enabled(enabled=True)
+    _lit(coordinator)
     _fire(hass, LR_SWITCH, {"action": "config_single"})
     await hass.async_block_till_done()
     mqtt_mock.async_publish.reset_mock()
@@ -195,6 +204,7 @@ async def test_down_single_also_releases(
 ) -> None:
     """down_single also resumes adaptive (matches the old re-engage)."""
     await coordinator.async_set_push_enabled(enabled=True)
+    _lit(coordinator)
     _fire(hass, LR_SWITCH, {"action": "config_single"})
     await hass.async_block_till_done()
     _fire(hass, LR_SWITCH, {"action": "down_single"})
@@ -282,6 +292,7 @@ async def test_paddle_off_releases_hold(
 ) -> None:
     """Switching a held light off resumes adaptive (the hold does not linger)."""
     await coordinator.async_set_push_enabled(enabled=True)
+    _lit(coordinator)
     _fire(hass, LR_SWITCH, {"action": "config_single"})
     await hass.async_block_till_done()
     assert coordinator.data["held_count"] == 1
@@ -360,6 +371,7 @@ async def test_inert_when_disabled(
 ) -> None:
     """In legacy mode Light Man ignores taps and publishes nothing."""
     mqtt_mock.async_publish.reset_mock()
+    _lit(coordinator)
     _fire(hass, LR_SWITCH, {"action": "config_single"})
     await hass.async_block_till_done()
     assert coordinator.data["held_count"] == 0
@@ -798,7 +810,11 @@ def _assert_no_switch_writes(mqtt_mock: Any) -> None:
     "passive" `defaultLevelLocal/Remote` prestage — can drive the local Zigbee
     bind and turn the bound bulb on. Switch topics are read-only inputs.
     """
-    hit = [t for t in published(mqtt_mock) if t.startswith(SWITCH_BASES)]
+    hit = [
+        t
+        for t in published(mqtt_mock)
+        if t.startswith(SWITCH_BASES) and not t.endswith("/get")  # reads are fine
+    ]
     assert not hit, f"published to switch topics: {hit}"
 
 
@@ -822,6 +838,7 @@ async def test_no_switch_writes_on_paddle_and_holds(
     await coordinator.async_set_push_enabled(enabled=True)
     for event in (
         {"state": "ON"},
+        None,
         {"action": "config_single"},  # -> held night
         {"action": "config_double"},  # -> held day
         {"action": "up_held"},  # -> held manual
@@ -829,6 +846,9 @@ async def test_no_switch_writes_on_paddle_and_holds(
         {"action": "down_single"},  # release -> off (stage_off path)
         {"state": "OFF"},
     ):
+        if event is None:
+            _lit(coordinator)
+            continue
         _fire(hass, LR_SWITCH, event)
         await hass.async_block_till_done()
     _assert_no_switch_writes(mqtt_mock)

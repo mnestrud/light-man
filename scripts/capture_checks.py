@@ -141,8 +141,14 @@ def _first(
     return None
 
 
-def tap_latency(records: list[dict[str, Any]], house: House) -> list[Row]:
-    """Tap → Light Man's send → the tapped room's bulbs report it."""
+def tap_latency(
+    records: list[dict[str, Any]], house: House, ignored: int = 0
+) -> list[Row]:
+    """Tap → Light Man's send → the tapped room's bulbs report it.
+
+    ``ignored`` is Light Man's count of config taps it dropped on purpose (light
+    off or on < 0.5 s, 0.8.5); that many unanswered config taps are expected.
+    """
     sends: list[float] = []
     reported: list[float] = []
     skipped = 0
@@ -207,9 +213,10 @@ def tap_latency(records: list[dict[str, Any]], house: House) -> list[Row]:
             not slow,
         ),
         (
-            f"capture: config taps Light Man did not answer = {look_without_send}",
-            "0",
-            look_without_send == 0,
+            f"capture: config taps Light Man did not answer = {look_without_send} "
+            f"(ignored on purpose: {ignored})",
+            "<= ignored (light off)",
+            look_without_send <= ignored,
         ),
     ]
 
@@ -322,6 +329,7 @@ def all_rows(
     start: float | None,
     end: float | None,
     interval: float,
+    ignored_config_taps: int = 0,
 ) -> tuple[list[Row], int]:
     """Every capture row, and how many Light Man switch taps were in the window."""
     records, house = load(path, config, start, end)
@@ -331,7 +339,7 @@ def all_rows(
     rows = (
         group_window(records, house)
         + source_spacing(records, house, interval)
-        + tap_latency(records, house)
+        + tap_latency(records, house, ignored_config_taps)
         + bulb_jumps(records, house)
         + held_drift(records, house)
     )

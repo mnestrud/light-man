@@ -12,6 +12,9 @@ from custom_components.light_man.adaptive import compute_target
 from custom_components.light_man.config_loader import validate_config
 from custom_components.light_man.const import BUNDLED_SEED_VERSION
 from custom_components.light_man.migrations import (
+    HALL_EAST,
+    HALL_WEST,
+    STAIRWELL_TOP,
     MigrationError,
     migrate,
     stored_version,
@@ -27,7 +30,7 @@ def _seed_v8() -> dict:
 
 def test_v8_fixture_migrates_to_the_shipped_bundle() -> None:
     migrated, steps = migrate(_seed_v8())
-    assert steps == [8, 9]
+    assert steps == [8, 9, 10]
     assert migrated == json.loads(BUNDLE.read_text())
     assert migrated["seed_version"] == BUNDLED_SEED_VERSION
 
@@ -43,7 +46,7 @@ def test_v8_to_v9_makes_day_window_defaults_explicit() -> None:
 def test_v9_fixture_migrates_to_the_shipped_bundle() -> None:
     raw = json.loads((FIXTURES / "seed_v9.json").read_text())
     migrated, steps = migrate(raw)
-    assert steps == [9]
+    assert steps == [9, 10]
     assert migrated == json.loads(BUNDLE.read_text())
     assert migrated["push_interval_s"] == 120
 
@@ -52,6 +55,32 @@ def test_v9_to_v10_keeps_an_edited_interval() -> None:
     raw = json.loads((FIXTURES / "seed_v9.json").read_text())
     raw["push_interval_s"] = 45
     assert migrate(raw)[0]["push_interval_s"] == 45
+
+
+def test_v10_fixture_migrates_to_the_shipped_bundle() -> None:
+    raw = json.loads((FIXTURES / "seed_v10.json").read_text())
+    migrated, steps = migrate(raw)
+    assert steps == [10]
+    assert migrated == json.loads(BUNDLE.read_text())
+    hall = migrated["occupancy_zones"]["hallway"]
+    assert hall["override_switches"] == [HALL_EAST, HALL_WEST]
+    assert hall["sync_switches"] == [HALL_EAST]
+    assert migrated["occupancy_zones"]["stairwell"]["sync_switches"] == [STAIRWELL_TOP]
+    assert validate_config(migrated).issues == []
+
+
+def test_v10_to_v11_leaves_an_edited_hallway_and_stairwell_alone() -> None:
+    raw = json.loads((FIXTURES / "seed_v10.json").read_text())
+    raw["rooms"]["hallway"]["switches"] = [
+        {"topic": HALL_EAST, "governs": "hallway.east_up"}
+    ]
+    raw["rooms"]["stairwell"]["switches"] = []
+    migrated = migrate(raw)[0]
+    assert "override_switches" not in migrated["occupancy_zones"]["hallway"]
+    assert "sync_switches" not in migrated["occupancy_zones"]["stairwell"]
+    assert (
+        migrated["rooms"]["hallway"]["switches"] == raw["rooms"]["hallway"]["switches"]
+    )
 
 
 def test_migration_is_engine_identical() -> None:

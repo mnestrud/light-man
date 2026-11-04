@@ -134,6 +134,7 @@ def main() -> None:
             _stamp(args.start),
             _stamp(args.end),
             float(config["push_interval_s"]),
+            int(state.get("ignored_config_taps", 0)),
         )
         rows += capture_rows
     rows.append(
