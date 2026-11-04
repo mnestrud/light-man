@@ -178,6 +178,7 @@ MANUAL_CAPTURE_TRIES: Final = 3  # bulbs asked before giving up
 MANUAL_CAPTURE_TIMEOUT_S: Final = 15.0  # a source defers at most this long
 FAILURE_LOG_INTERVAL_S: Final = 600.0
 MQTT_SLOW_PUBLISH_S: Final = 10.0
+PADDLE_STATE_GRACE_S: Final = 3.0  # ignore a contradicting switch state after a tap
 RELEASE_ACTIONS: Final = frozenset(
     {"up_release", "down_release", "up_released", "down_released"}
 )

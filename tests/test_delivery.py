@@ -1002,3 +1002,27 @@ def test_next_slot_always_moves_past_the_slot_it_is_given(coordinator: Coord) ->
             assert coordinator._next_slot(key, due) == pytest.approx(
                 due + coordinator._interval
             )
+
+
+async def test_stale_off_right_after_an_up_tap_is_ignored(
+    hass: HomeAssistant, coordinator: Coord, mqtt_mock: Any, clock: FakeClock
+) -> None:
+    """0.8.4: Z2M's cached OFF published just after an up tap must not stage off.
+
+    Live 2026-11-04 03:40: up tap, then 0.37 s later a front-switch message with
+    the pre-tap cached state OFF; Light Man staged the room off.
+    """
+    await _enabled(hass, coordinator, mqtt_mock)
+    _fire(hass, LR_SWITCH, {"state": "OFF"})  # first report after start
+    await hass.async_block_till_done()
+    _fire(hass, LR_SWITCH, {"action": "up_single"})
+    await hass.async_block_till_done()
+    mqtt_mock.async_publish.reset_mock()
+    clock.advance(0.4)
+    _fire(hass, LR_SWITCH, {"state": "OFF", "power": 0.2})  # stale cache
+    await hass.async_block_till_done()
+    assert LR_SET not in published(mqtt_mock)
+    clock.advance(3.0)  # after the grace window a real OFF report still counts
+    _fire(hass, LR_SWITCH, {"state": "OFF"})
+    await hass.async_block_till_done()
+    assert published(mqtt_mock)[LR_SET]["state"] == "OFF"

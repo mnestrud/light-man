@@ -72,6 +72,7 @@ from .const import (
     MANUAL_CAPTURE_TRIES,
     MODE_ADAPTIVE,
     MQTT_SLOW_PUBLISH_S,
+    PADDLE_STATE_GRACE_S,
     RELEASE_ACTIONS,
     SOLAR_MIDNIGHT_EVENT,
     STATE_OFF,
@@ -189,6 +190,7 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         self._last_published: dict[str, PushPayload] = {}
         self._last_planned: dict[str, dict[str, Any]] = {}  # for re-sends/replay
         self._paddle_on: dict[str, bool] = {}
+        self._paddle_action_at: dict[str, float] = {}  # switch -> last up/down tap
         self._unsubs: list[Any] = []
         self._clock: Callable[[], float] = lambda: _monotonic()
         topics = [s[CONF_CONSOLIDATED_TOPIC] for s in config[CONF_SOURCES].values()]
@@ -1119,6 +1121,7 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
             return
         off = action.startswith("down")
         self._paddle_on[base] = not off
+        self._paddle_action_at[base] = self._clock()
         released = await self._modes.release(light_ref)
         if off:
             await self._stage_off(source_key, light_ref)
@@ -1141,6 +1144,14 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         previous = self._paddle_on.get(base)
         if previous == on:
             return  # unchanged, or the matching action already handled it
+        tapped = self._paddle_action_at.get(base)
+        if tapped is not None and self._clock() - tapped < PADDLE_STATE_GRACE_S:
+            # Z2M republishes the switch's *cached* state with any attribute report
+            # until the switch reports its new state (~1.5 s after a tap). A
+            # contradicting state this soon after an up/down tap is that stale
+            # cache (live 2026-11-04 03:40: a bath light turned on, then staged
+            # off 0.37 s later); a real paddle change arrives as an action.
+            return
         self._paddle_on[base] = on
         if not self.push_enabled:
             return
