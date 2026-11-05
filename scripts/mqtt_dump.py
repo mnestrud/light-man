@@ -152,10 +152,16 @@ def bridge_request(
 
 
 def flatten(items: list[dict[str, Any]] | None, out: dict[str, Any]) -> dict[str, Any]:
-    """Flatten an exposes/options tree into {property: feature} for settable leaves."""
+    """Flatten an exposes/options tree into {property: feature} for settable leaves.
+
+    A composite (e.g. ``led_effect``) is also kept whole under its own property:
+    it is set as ``{property: {feature: value, ...}}``. ``color`` stays special.
+    """
     for ex in items or []:
         if "features" in ex:
             flatten(ex["features"], out)
+            if ex.get("type") == "composite" and ex.get("property", "color") != "color":
+                out[ex["property"]] = ex
         elif ex.get("access", ACCESS_SET) & ACCESS_SET and "property" in ex:
             out[ex["property"]] = ex
     return out
@@ -173,6 +179,8 @@ def describe(feat: dict[str, Any]) -> str:
         return f"enum {feat.get('values')}"
     if kind == "binary":
         return f"binary on={feat.get('value_on')!r} off={feat.get('value_off')!r}"
+    if kind == "composite":
+        return f"composite {{{', '.join(sorted(flatten(feat.get('features'), {})))}}}"
     return str(kind)
 
 
@@ -184,9 +192,25 @@ def find_named(items: list[dict[str, Any]], friendly: str) -> dict[str, Any] | N
     return None
 
 
+def composite_error(key: str, feat: dict[str, Any], val: Any) -> str:
+    """Return an error if val is not an object of the composite's own features."""
+    if not isinstance(val, dict):
+        return f"{key}: expected an object"
+    parts = flatten(feat.get("features"), {})
+    for sub, sub_val in val.items():
+        if sub not in parts:
+            return f"{key}.{sub}: not part of {key} ({', '.join(sorted(parts))})"
+        msg = value_error(f"{key}.{sub}", parts[sub], sub_val)
+        if msg:
+            return msg
+    return ""
+
+
 def value_error(key: str, feat: dict[str, Any], val: Any) -> str:
     """Return an error if val violates the feature's constraints, else ''."""
     kind = feat.get("type")
+    if kind == "composite":
+        return composite_error(key, feat, val)
     if kind == "numeric":
         if not isinstance(val, (int, float)):
             return f"{key}: expected a number"
