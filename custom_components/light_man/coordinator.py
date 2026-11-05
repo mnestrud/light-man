@@ -32,6 +32,21 @@ from homeassistant.util import dt as dt_util
 
 from . import hue_frame
 from .adaptive import compute_target, day_look, night_look, sleep_ramp
+from .bars import (
+    BAR_KEYS,
+    COLOR_BAR,
+    COLOR_GREEN,
+    COLOR_RED,
+    EFFECT_BLINK,
+    EFFECT_PULSE,
+    FEEDBACK_LEVEL,
+    FEEDBACK_S,
+    KEY_LEVEL,
+    LED_BOTTOM,
+    LED_TOP,
+    LOOK_COLORS,
+    BarManager,
+)
 from .const import (
     COLOR_MODE_COLOR_TEMP,
     COLOR_MODE_RGB,
@@ -131,6 +146,7 @@ def _monotonic() -> float:
 
 # Pacing sleep, looked up at call time so tests can patch it.
 _pace_sleep = asyncio.sleep
+_bar_sleep = asyncio.sleep  # the LED bars' own pacing (separate so tests can idle it)
 
 
 class _Binding(NamedTuple):
@@ -231,6 +247,13 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
             min_gap_s=INTER_PUBLISH_DELAY_S,
             clock=lambda: _monotonic(),
             sleep=lambda seconds: _pace_sleep(seconds),
+        )
+        # LED bars: status lights, tap/shade animations, curve-following level.
+        self._animations = validated.switch_animations
+        self._bars = BarManager(
+            self._send,
+            lambda coro: hass.async_create_task(coro, "lm_bars", eager_start=True),
+            sleep=lambda seconds: _bar_sleep(seconds),
         )
         offsets = {key: i / n_sources for i, key in enumerate(config[CONF_SOURCES])}
         self._stagger = offsets
@@ -405,6 +428,7 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         """
         self.data = self._snapshot()
         self.async_update_listeners()
+        self._sync_bars()
 
     def shutdown_subscriptions(self) -> None:
         """Unsubscribe all MQTT subscriptions and stop the publisher (unload)."""
@@ -421,6 +445,7 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
             cancel()
         self._override_timers.clear()
         self._publisher.cancel()
+        self._bars.cancel()
 
     def is_known_room(self, room: str) -> bool:
         """Return True if ``room`` is a light ref, or a zone that can be overridden."""
@@ -563,6 +588,7 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
             if zone in self._occupancy and self._zone_vacant(zone):
                 self._clear_zone(zone)
         await self._run_push(force=False, due_only=True)
+        self._sync_bars()
         return self._snapshot()
 
     # --- push (engine-driven adaptive value) --------------------------------
@@ -960,6 +986,63 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         self.sleep_on = enabled
         self._publish_snapshot()
 
+    # --- LED bars (status for the switch's own room, animations, level) -----
+
+    def _bar_source(self, base: str) -> str:
+        """Return the source whose curve a switch's bar follows."""
+        mapping = self._switch_map.get(base)
+        if mapping is not None:
+            return mapping[0]
+        return self._room_switches[base][1][0][0]
+
+    def _bar_fraction(self, source_key: str) -> float | None:
+        """Where the source's curve sits, 0 (dark) to 1 (its brightest), if known."""
+        engine = self.diagnostics["engine"].get(source_key)
+        peak = self._config[CONF_SOURCES][source_key]["profile"].get("max_br")
+        if not engine or not peak:
+            return None
+        return max(0.0, min(1.0, float(engine["brightness_pct"]) / peak))
+
+    def _bar_leds(self, base: str) -> dict[str, int | None]:
+        """Status lights of a switch: a held look on top, the override below."""
+        mapping = self._switch_map.get(base)
+        if mapping is not None:
+            refs = [mapping[1]]
+        else:
+            refs = [ref for _source, ref in self._room_switches[base][1]]
+        kinds = {self._modes.mode_of(ref) for ref in refs}
+        top = next((c for kind, c in LOOK_COLORS.items() if kind in kinds), None)
+        leds: dict[str, int | None] = {LED_TOP: top}
+        zones = self._override_zones.get(base)
+        if zones:
+            held_on = any(self._modes.override_until(z) is not None for z in zones)
+            leds[LED_BOTTOM] = COLOR_GREEN if held_on else None
+        return leds
+
+    def _sync_bars(self) -> None:
+        """Bring every switch's bar to its room's status and curve level."""
+        if self._closed or not self.push_enabled:
+            return
+        for base in self._all_switches():
+            fraction = self._bar_fraction(self._bar_source(base))
+            if fraction is not None:
+                self._bars.sync(base, self._bar_leds(base), fraction)
+
+    def _bar_play(
+        self,
+        base: str,
+        effect: str,
+        color: int,
+        *,
+        level: int = FEEDBACK_LEVEL,
+        duration: int = FEEDBACK_S,
+    ) -> None:
+        """Play a whole-bar animation on one switch, dimmed with its curve."""
+        fraction = self._bar_fraction(self._bar_source(base))
+        self._bars.play(
+            base, effect, color, level, duration, 1.0 if fraction is None else fraction
+        )
+
     # --- occupancy (mmwave presence -> directional sweep, MQTT-driven) ------
 
     async def _handle_occupancy(self, msg: mqtt.ReceiveMessage) -> None:
@@ -1319,6 +1402,9 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         data = _parse_json(str(msg.payload))
         if data is None:
             return
+        level = data.get(KEY_LEVEL)
+        if isinstance(level, int):
+            self._bars.seed_level(msg.topic, level)
         action = data.get("action")
         if isinstance(action, str) and action:
             await self._on_action(msg.topic, action)
@@ -1337,6 +1423,7 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         """
         if not self.push_enabled:
             return  # inert when Light Man is off — the blueprint owns taps
+        self._play_tap_animation(base, action)
         if base in self._room_switches:
             await self._on_room_action(base, action)
             return
@@ -1344,17 +1431,26 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         if mapping is None:
             return
         origin_at = self._clock()
-        source_key, light_ref = mapping
+        light_ref = mapping[1]
         if action in RELEASE_ACTIONS:
             self._on_dim_release(light_ref)
             return
         mode = action_to_mode(action)
         if mode is None:
             return
-        if mode != MODE_ADAPTIVE:
-            if mode not in LOOK_KINDS or self._on_long_enough(base, action):
-                await self.async_hold(light_ref, mode, origin_at=origin_at)
-            return
+        if mode == MODE_ADAPTIVE:
+            await self._on_paddle_tap(base, action, mapping, origin_at)
+        elif mode not in LOOK_KINDS:
+            await self.async_hold(light_ref, mode, origin_at=origin_at)
+        elif self._look_tap_accepted(base, action):
+            await self.async_hold(light_ref, mode, origin_at=origin_at)
+            self._bar_play(base, EFFECT_PULSE, LOOK_COLORS[mode])
+
+    async def _on_paddle_tap(
+        self, base: str, action: str, mapping: tuple[str, str], origin_at: float
+    ) -> None:
+        """Handle a single up/down tap: track the paddle and release any hold."""
+        source_key, light_ref = mapping
         off = action.startswith("down")
         self._set_paddle(base, on=not off)
         self._paddle_action_at[base] = self._clock()
@@ -1365,6 +1461,27 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         elif released:
             self._release_room(light_ref, origin_at=origin_at)
         self._publish_snapshot()
+        if released and not off:
+            self._bar_play(base, EFFECT_PULSE, COLOR_BAR)  # back to automatic
+
+    def _play_tap_animation(self, base: str, action: str) -> None:
+        """Play the bar animation configured for a tap (the shade taps)."""
+        animation = self._animations.get(base, {}).get(action)
+        if animation is not None:
+            self._bar_play(
+                base,
+                animation["effect"],
+                animation["color"],
+                level=animation["level"],
+                duration=animation["duration"],
+            )
+
+    def _look_tap_accepted(self, base: str, action: str) -> bool:
+        """Apply the config-tap rule; an ignored tap blinks the bar red."""
+        if self._on_long_enough(base, action):
+            return True
+        self._bar_play(base, EFFECT_BLINK, COLOR_RED)
+        return False
 
     def _on_dim_release(self, light_ref: str) -> None:
         if self._modes.mode_of(light_ref) == HELD_MANUAL:
@@ -1411,14 +1528,16 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         if mode is None or mode == HELD_MANUAL:
             return  # a held dim is local; the next tick glides on
         if mode in LOOK_KINDS:
-            if self._on_long_enough(base, action):
+            if self._look_tap_accepted(base, action):
                 await self._hold_lights(lights, mode, origin_at=origin_at)
+                self._bar_play(base, EFFECT_PULSE, LOOK_COLORS[mode])
             return
         off = action.startswith("down")
         self._set_paddle(base, on=not off)
         self._paddle_action_at[base] = origin_at
         released = [ref for _src, ref in lights if await self._modes.release(ref)]
         zones = self._override_zones.get(base, [])
+        feedback: int | None = None
         if off:
             for zone in zones:
                 await self._end_override(zone)
@@ -1426,16 +1545,26 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
             for source_key in {src for src, _ref in lights}:
                 self._invalidate_source(source_key)
         else:
-            if released:
-                self._show_lights(
-                    [(src, ref) for src, ref in lights if ref in released],
-                    self._room_glide_target,
-                    origin_at=origin_at,
-                )
-            for zone in zones:
-                await self._arm_override(zone)
+            shown = [(src, ref) for src, ref in lights if ref in released]
+            feedback = await self._room_tap_up(zones, shown, origin_at)
         _LOGGER.debug("%s on %s (room %s)", action, base, room)
         self._publish_snapshot()
+        if feedback is not None:
+            self._bar_play(base, EFFECT_PULSE, feedback)
+
+    async def _room_tap_up(
+        self, zones: list[str], released: list[tuple[str, str]], origin_at: float
+    ) -> int | None:
+        """Release looks to the curve and arm the override; return the bar colour."""
+        feedback: int | None = None
+        if released:
+            self._show_lights(released, self._room_glide_target, origin_at=origin_at)
+            feedback = COLOR_BAR  # back to automatic
+        for zone in zones:
+            if self._modes.override_until(zone) is None:
+                feedback = COLOR_GREEN  # motion override armed
+            await self._arm_override(zone)
+        return feedback
 
     async def _hold_lights(
         self, lights: list[tuple[str, str]], kind: str, *, origin_at: float
@@ -1676,6 +1805,10 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         stats["by_kind"][failure.kind] = stats["by_kind"].get(failure.kind, 0) + 1
         stats["by_topic"][topic] = stats["by_topic"].get(topic, 0) + 1
         stats["last"] = {"topic": topic, "kind": failure.kind, "error": failure.error}
+        if failure.attr in BAR_KEYS:
+            # A bar command: forget what that bar shows; the next sync re-sends it.
+            self._bars.forget(topic.removesuffix("/set"))
+            return
         if failure.kind not in RESEND_KINDS:
             return
         self._failed_at[topic] = self._clock()

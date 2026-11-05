@@ -1,5 +1,5 @@
 {
-  "seed_version": 11,
+  "seed_version": 12,
   "push_interval_s": 120,
   "curves": {
     "daylight_standard": {
@@ -138,7 +138,33 @@
       "switches": [
         {
           "topic": "zigbee2mqtt/Living Room Overhead Light Switch 1",
-          "governs": "living_room.overhead"
+          "governs": "living_room.overhead",
+          "animations": {
+            "up_double": {
+              "effect": "slow_rising",
+              "color": 220,
+              "level": 50,
+              "duration": 10
+            },
+            "down_double": {
+              "effect": "slow_falling",
+              "color": 220,
+              "level": 50,
+              "duration": 10
+            },
+            "up_triple": {
+              "effect": "slow_rising",
+              "color": 220,
+              "level": 50,
+              "duration": 10
+            },
+            "down_triple": {
+              "effect": "slow_falling",
+              "color": 220,
+              "level": 50,
+              "duration": 10
+            }
+          }
         }
       ],
       "sensors": {}
@@ -160,11 +186,51 @@
       "switches": [
         {
           "topic": "zigbee2mqtt/Kitchen Overhead Light Switch",
-          "governs": "kitchen.overhead"
+          "governs": "kitchen.overhead",
+          "animations": {
+            "up_double": {
+              "effect": "slow_rising",
+              "color": 220,
+              "level": 50,
+              "duration": 10
+            },
+            "down_double": {
+              "effect": "slow_falling",
+              "color": 220,
+              "level": 50,
+              "duration": 10
+            },
+            "up_triple": {
+              "effect": "pulse",
+              "color": 220,
+              "level": 50,
+              "duration": 10
+            },
+            "down_triple": {
+              "effect": "pulse",
+              "color": 220,
+              "level": 50,
+              "duration": 10
+            }
+          }
         },
         {
           "topic": "zigbee2mqtt/Kitchen Island Light Switch",
-          "governs": "kitchen.island"
+          "governs": "kitchen.island",
+          "animations": {
+            "up_double": {
+              "effect": "slow_rising",
+              "color": 220,
+              "level": 50,
+              "duration": 10
+            },
+            "down_double": {
+              "effect": "slow_falling",
+              "color": 220,
+              "level": 50,
+              "duration": 10
+            }
+          }
         }
       ],
       "sensors": {}
@@ -181,7 +247,33 @@
       "switches": [
         {
           "topic": "zigbee2mqtt/Primary Bedroom Overhead Light Switch",
-          "governs": "primary_bedroom.overhead"
+          "governs": "primary_bedroom.overhead",
+          "animations": {
+            "up_double": {
+              "effect": "slow_rising",
+              "color": 220,
+              "level": 50,
+              "duration": 10
+            },
+            "down_double": {
+              "effect": "slow_falling",
+              "color": 220,
+              "level": 50,
+              "duration": 10
+            },
+            "up_triple": {
+              "effect": "pulse",
+              "color": 220,
+              "level": 50,
+              "duration": 10
+            },
+            "down_triple": {
+              "effect": "pulse",
+              "color": 220,
+              "level": 50,
+              "duration": 10
+            }
+          }
         }
       ],
       "sensors": {}
@@ -229,7 +321,33 @@
       "switches": [
         {
           "topic": "zigbee2mqtt/Office Smart Switch",
-          "governs": "office.overhead"
+          "governs": "office.overhead",
+          "animations": {
+            "up_double": {
+              "effect": "slow_rising",
+              "color": 220,
+              "level": 50,
+              "duration": 10
+            },
+            "down_double": {
+              "effect": "slow_falling",
+              "color": 220,
+              "level": 50,
+              "duration": 10
+            },
+            "up_triple": {
+              "effect": "pulse",
+              "color": 220,
+              "level": 50,
+              "duration": 10
+            },
+            "down_triple": {
+              "effect": "pulse",
+              "color": 220,
+              "level": 50,
+              "duration": 10
+            }
+          }
         }
       ],
       "sensors": {}
@@ -302,7 +420,33 @@
       "switches": [
         {
           "topic": "zigbee2mqtt/Michael Closet Overhead Switch",
-          "governs": "michael_closet.overhead"
+          "governs": "michael_closet.overhead",
+          "animations": {
+            "up_double": {
+              "effect": "slow_rising",
+              "color": 220,
+              "level": 50,
+              "duration": 10
+            },
+            "down_double": {
+              "effect": "slow_falling",
+              "color": 220,
+              "level": 50,
+              "duration": 10
+            },
+            "up_triple": {
+              "effect": "pulse",
+              "color": 220,
+              "level": 50,
+              "duration": 10
+            },
+            "down_triple": {
+              "effect": "pulse",
+              "color": 220,
+              "level": 50,
+              "duration": 10
+            }
+          }
         }
       ],
       "sensors": {}

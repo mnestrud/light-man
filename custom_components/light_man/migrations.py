@@ -15,6 +15,9 @@ Versions:
             switches follow their zones (``sync_switches``). Applied only where
             the stored rooms still have those switches as shipped. Behaviour
             change, intended (Workstream F / F-hall).
+  v11 -> v12 the shade taps' bar animations move from the HA blueprint into the
+            switch entries (``animations``), with the blueprint's values. Added
+            only to a shipped switch that has no ``animations`` yet.
 """
 
 from __future__ import annotations
@@ -99,10 +102,46 @@ def _v10_to_v11(raw: dict[str, Any]) -> dict[str, Any]:
     return raw
 
 
+# The blueprint's shade animations as of 2026-11-05: light pink (220), level 50,
+# 10 s; slow rising / falling on double taps, pulse (living room: rising /
+# falling) on triple taps; the island has no triple-tap scene.
+_SHADE = {"color": 220, "level": 50, "duration": 10}
+_RISING = {"effect": "slow_rising", **_SHADE}
+_FALLING = {"effect": "slow_falling", **_SHADE}
+_PULSE = {"effect": "pulse", **_SHADE}
+_DOUBLES = {"up_double": _RISING, "down_double": _FALLING}
+_WITH_PULSE = {**_DOUBLES, "up_triple": _PULSE, "down_triple": _PULSE}
+V12_ANIMATIONS: dict[str, dict[str, dict[str, Any]]] = {
+    "zigbee2mqtt/Kitchen Overhead Light Switch": _WITH_PULSE,
+    "zigbee2mqtt/Kitchen Island Light Switch": _DOUBLES,
+    "zigbee2mqtt/Living Room Overhead Light Switch 1": {
+        **_DOUBLES,
+        "up_triple": _RISING,
+        "down_triple": _FALLING,
+    },
+    "zigbee2mqtt/Office Smart Switch": _WITH_PULSE,
+    "zigbee2mqtt/Michael Closet Overhead Switch": _WITH_PULSE,
+    "zigbee2mqtt/Primary Bedroom Overhead Light Switch": _WITH_PULSE,
+}
+
+
+def _v11_to_v12(raw: dict[str, Any]) -> dict[str, Any]:
+    for room in (raw.get("rooms") or {}).values():
+        switches = room.get("switches") if isinstance(room, dict) else None
+        for switch in switches if isinstance(switches, list) else []:
+            if not isinstance(switch, dict) or "animations" in switch:
+                continue
+            animations = V12_ANIMATIONS.get(str(switch.get("topic")))
+            if animations is not None:
+                switch["animations"] = copy.deepcopy(animations)
+    return raw
+
+
 MIGRATIONS: dict[int, Callable[[dict[str, Any]], dict[str, Any]]] = {
     8: _v8_to_v9,
     9: _v9_to_v10,
     10: _v10_to_v11,
+    11: _v11_to_v12,
 }
 
 

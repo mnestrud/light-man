@@ -201,16 +201,27 @@ class RoomLight(TypedDict, total=False):
     source: str
 
 
+class BarAnimation(TypedDict):
+    """A timed whole-bar animation on a switch's LED bar (Z2M ``led_effect``)."""
+
+    effect: str  # e.g. "slow_rising", "pulse"
+    color: int  # Inovelli hue wheel, 0-255
+    level: int  # 1-100, scaled down with the room's curve
+    duration: int  # seconds (1-60); the switch's own longer codes up to 255
+
+
 class RoomSwitch(TypedDict, total=False):
     """An Inovelli switch in a room and the lights it governs (holds).
 
     ``governs`` is a light ref ``"<room_id>.<light_id>"`` — the group the switch is
     SBM-bound to and whose hold its taps drive — or a room id, for a switch bound
-    to every light of the room (the hallway pair).
+    to every light of the room (the hallway pair). ``animations`` maps a tap
+    (``up_double`` ...) to the bar animation it plays — the shade taps.
     """
 
     topic: str
     governs: str
+    animations: dict[str, BarAnimation]
 
 
 class RoomSensor(TypedDict, total=False):

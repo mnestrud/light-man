@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 from typing import cast
 
 from .const import (
+    CONF_ANIMATIONS,
     CONF_CONSOLIDATED_TOPIC,
     CONF_CURVE_REF,
     CONF_CURVES,
@@ -59,6 +60,7 @@ from .const import (
     DEFAULT_PUSH_INTERVAL_S,
 )
 from .models import (
+    BarAnimation,
     LightManConfig,
     OccupancyLight,
     OccupancySensor,
@@ -99,6 +101,8 @@ class ValidatedConfig:
     room_switch_map: dict[str, tuple[str, list[tuple[str, str]]]] = field(
         default_factory=dict
     )
+    # switch base -> tap action -> the bar animation it plays (shade taps)
+    switch_animations: dict[str, dict[str, BarAnimation]] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -113,6 +117,7 @@ class _RoomScan:
     # (switch base topic, governed light ref)
     switch_entries: list[tuple[str, str]] = field(default_factory=list)
     switch_topics: set[str] = field(default_factory=set)
+    switch_animations: dict[str, dict[str, BarAnimation]] = field(default_factory=dict)
     # light refs whose set_topic was missing/empty (flagged after switch scan)
     empty_topic_refs: set[str] = field(default_factory=set)
 
@@ -224,6 +229,44 @@ def _scan_room_lights(
     return lights
 
 
+def _int_in(value: object, low: int, high: int) -> bool:
+    return (
+        isinstance(value, int) and not isinstance(value, bool) and low <= value <= high
+    )
+
+
+def _switch_animations(
+    topic: str, raw: object, issues: list[str]
+) -> dict[str, BarAnimation]:
+    """Return a switch's tap -> bar animation map, dropping malformed entries."""
+    animations: dict[str, BarAnimation] = {}
+    if raw is None:
+        return animations
+    if not isinstance(raw, dict):
+        issues.append(f"switch {topic!r}: 'animations' must be a mapping; ignoring")
+        return animations
+    for action, anim in raw.items():
+        if not (
+            isinstance(anim, dict)
+            and isinstance(anim.get("effect"), str)
+            and _int_in(anim.get("color"), 0, 255)
+            and _int_in(anim.get("level"), 1, 100)
+            and _int_in(anim.get("duration"), 1, 255)
+        ):
+            issues.append(
+                f"switch {topic!r}: animation {action!r} needs effect, "
+                "color 0-255, level 1-100, duration 1-255"
+            )
+            continue
+        animations[str(action)] = BarAnimation(
+            effect=anim["effect"],
+            color=anim["color"],
+            level=anim["level"],
+            duration=anim["duration"],
+        )
+    return animations
+
+
 def _scan_room_switches(
     room_id: str, room_raw: dict[str, object], scan: _RoomScan, issues: list[str]
 ) -> list[RoomSwitch]:
@@ -247,7 +290,12 @@ def _scan_room_switches(
             continue
         scan.switch_entries.append((topic, governs))
         scan.switch_topics.add(topic)
-        switches.append(RoomSwitch(topic=topic, governs=governs))
+        switch = RoomSwitch(topic=topic, governs=governs)
+        animations = _switch_animations(topic, entry.get(CONF_ANIMATIONS), issues)
+        if animations:
+            switch[CONF_ANIMATIONS] = animations
+            scan.switch_animations[topic] = animations
+        switches.append(switch)
     return switches
 
 
@@ -596,4 +644,5 @@ def validate_config(raw: object) -> ValidatedConfig:
         switch_map=switch_map,
         issues=issues,
         room_switch_map=room_switches,
+        switch_animations=scan.switch_animations,
     )

@@ -61,6 +61,8 @@ physical room. So rooms **merge for display** (kitchen shows both light groups, 
 while a tap on the island switch holds **only** the island light group and the overhead switch **only** the
 overhead light group — identical to today, with no per-light `arms` list. Each switch carries a single
 `governs` reference to its light group.
+A switch may also carry `animations`: a map of tap (`up_double`, `down_triple`, …) to the LED-bar animation
+it plays (`effect`, `color` 0–255, `level` 1–100, `duration` s) — the shade taps (seed v12).
 
 ### S3 / C1 — Sleep is split; no dedicated tab
 Sleep is three separable things with natural homes: **global on/off** = runtime, exposed as

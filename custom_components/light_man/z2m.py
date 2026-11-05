@@ -31,7 +31,7 @@ KIND_OTHER = "other"
 RESEND_KINDS = frozenset({KIND_BUSY, KIND_DELIVERY_FAILED})
 
 _FAILURE = re.compile(
-    r"^Publish '[^']*' '[^']*' to '(?P<name>[^']+)' failed: (?P<error>.*)$"
+    r"^Publish '[^']*' '(?P<attr>[^']*)' to '(?P<name>[^']+)' failed: (?P<error>.*)$"
 )
 
 
@@ -42,6 +42,7 @@ class PublishFailure:
     name: str
     kind: str
     error: str
+    attr: str = ""  # the key Z2M was setting (``brightness``, ``led_effect`` ...)
 
 
 def classify_failure(error: str) -> str:
@@ -65,7 +66,9 @@ def parse_publish_failure(message: str) -> PublishFailure | None:
     if match is None:
         return None
     error = match.group("error")
-    return PublishFailure(match.group("name"), classify_failure(error), error[:300])
+    return PublishFailure(
+        match.group("name"), classify_failure(error), error[:300], match.group("attr")
+    )
 
 
 def set_topic_for(base: str, name: str) -> str:

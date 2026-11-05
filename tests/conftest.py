@@ -11,6 +11,7 @@ from unittest.mock import patch
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
+from custom_components.light_man.bars import BAR_KEYS
 from custom_components.light_man.config_loader import validate_config
 from custom_components.light_man.const import CONFIG_STORE_KEY, DOMAIN
 from custom_components.light_man.coordinator import LightManCoordinator
@@ -229,6 +230,10 @@ class FakeClock:
         self.now += max(seconds, 0.0)
         await asyncio.sleep(0)
 
+    async def idle(self, _seconds: float) -> None:
+        """Yield without moving the clock (the LED bars' pacing)."""
+        await asyncio.sleep(0)
+
 
 @pytest.fixture(autouse=True)
 def clock() -> Iterator[FakeClock]:
@@ -237,6 +242,7 @@ def clock() -> Iterator[FakeClock]:
     with (
         patch("custom_components.light_man.coordinator._monotonic", fake),
         patch("custom_components.light_man.coordinator._pace_sleep", fake.sleep),
+        patch("custom_components.light_man.coordinator._bar_sleep", fake.idle),
     ):
         yield fake
 
@@ -302,11 +308,29 @@ async def setup_lightman(hass: HomeAssistant, seed: Any = SEED) -> MockConfigEnt
     return entry
 
 
+def _is_bar_command(payload: dict[str, Any]) -> bool:
+    return bool(payload) and set(payload) <= BAR_KEYS
+
+
 def published(mqtt_mock: Any) -> dict[str, dict[str, Any]]:
-    """Map each published zigbee2mqtt topic to its decoded JSON payload."""
+    """Map each published zigbee2mqtt topic to its decoded JSON payload.
+
+    LED-bar commands are left out (see :func:`bar_published`): these are the
+    light and switch-state publishes.
+    """
     out: dict[str, dict[str, Any]] = {}
     for call in mqtt_mock.async_publish.call_args_list:
-        topic, payload = call.args[0], call.args[1]
-        if topic.startswith("zigbee2mqtt"):
-            out[topic] = json.loads(payload)
+        topic, payload = call.args[0], json.loads(call.args[1])
+        if topic.startswith("zigbee2mqtt") and not _is_bar_command(payload):
+            out[topic] = payload
+    return out
+
+
+def bar_published(mqtt_mock: Any) -> list[tuple[str, dict[str, Any]]]:
+    """Every LED-bar command published, in order, as ``(topic, payload)``."""
+    out: list[tuple[str, dict[str, Any]]] = []
+    for call in mqtt_mock.async_publish.call_args_list:
+        topic, payload = call.args[0], json.loads(call.args[1])
+        if _is_bar_command(payload):
+            out.append((topic, payload))
     return out

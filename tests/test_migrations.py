@@ -30,7 +30,7 @@ def _seed_v8() -> dict:
 
 def test_v8_fixture_migrates_to_the_shipped_bundle() -> None:
     migrated, steps = migrate(_seed_v8())
-    assert steps == [8, 9, 10]
+    assert steps == [8, 9, 10, 11]
     assert migrated == json.loads(BUNDLE.read_text())
     assert migrated["seed_version"] == BUNDLED_SEED_VERSION
 
@@ -46,7 +46,7 @@ def test_v8_to_v9_makes_day_window_defaults_explicit() -> None:
 def test_v9_fixture_migrates_to_the_shipped_bundle() -> None:
     raw = json.loads((FIXTURES / "seed_v9.json").read_text())
     migrated, steps = migrate(raw)
-    assert steps == [9, 10]
+    assert steps == [9, 10, 11]
     assert migrated == json.loads(BUNDLE.read_text())
     assert migrated["push_interval_s"] == 120
 
@@ -60,7 +60,7 @@ def test_v9_to_v10_keeps_an_edited_interval() -> None:
 def test_v10_fixture_migrates_to_the_shipped_bundle() -> None:
     raw = json.loads((FIXTURES / "seed_v10.json").read_text())
     migrated, steps = migrate(raw)
-    assert steps == [10]
+    assert steps == [10, 11]
     assert migrated == json.loads(BUNDLE.read_text())
     hall = migrated["occupancy_zones"]["hallway"]
     assert hall["override_switches"] == [HALL_EAST, HALL_WEST]
