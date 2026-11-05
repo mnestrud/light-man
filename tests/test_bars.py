@@ -16,6 +16,7 @@ from custom_components.light_man.bars import (
     COLOR_BAR,
     COLOR_GREEN,
     COLOR_RED,
+    FEEDBACK_S,
     INDEFINITE,
     KEY_EFFECT,
     KEY_LED,
@@ -267,7 +268,7 @@ async def test_config_tap_lights_the_top_led_and_pulses_then_up_tap_clears(
     assert sent[0][KEY_LED]["color"] == COLOR_AMBER
     assert sent[1][KEY_EFFECT]["effect"] == "pulse"
     assert sent[1][KEY_EFFECT]["color"] == COLOR_AMBER
-    assert sent[1][KEY_EFFECT]["duration"] == 1
+    assert sent[1][KEY_EFFECT]["duration"] == FEEDBACK_S == 3
     mqtt_mock.async_publish.reset_mock()
     await _send(hass, house, LR_SWITCH, {"action": "up_single"})
     assert _leds(mqtt_mock, LR_SET_TOPIC) == [("7", "clear_effect", 0)]

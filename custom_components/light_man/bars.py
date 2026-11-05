@@ -37,7 +37,9 @@ STATUS_MIN_LEVEL = 10
 STATUS_LEVEL_STEP = 5
 EFFECT_MIN_LEVEL = 5
 FEEDBACK_LEVEL = 60
-FEEDBACK_S = 1  # the shortest duration the switch accepts
+# Shorter whole-bar effects do not show at all: 1 s and 2 s blinks and pulses
+# were invisible on a VZM31-SN, 3 s ones showed (checked 2026-11-05).
+FEEDBACK_S = 3
 INDEFINITE = 255
 
 # Inovelli hue wheel (0-255; 255 is white).
