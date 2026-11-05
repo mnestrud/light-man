@@ -112,6 +112,7 @@ if TYPE_CHECKING:
     from .models import (
         EngineTarget,
         LightManConfig,
+        OccupancyLight,
         OccupancyStage,
         PushPayload,
         SourceConfig,
@@ -292,6 +293,24 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
             self._bindings_by_topic.setdefault(binding.topic, []).append(binding)
             self._bindings_by_zone.setdefault(binding.zone, []).append(binding)
         self._sensor_occupied: dict[tuple[str, str], bool] = {}
+        # The rooms each zone's sweeps light: a config-tap look on any of them
+        # holds the zone on (no all-clear OFF; sweeps show the look).
+        self._topic_room: dict[str, str] = {
+            room_cfg[CONF_SET_TOPIC]: room
+            for source in config[CONF_SOURCES].values()
+            for room, room_cfg in source.get(CONF_ROOMS, {}).items()
+            if room_cfg.get(CONF_SET_TOPIC)
+        }
+        self._zone_rooms: dict[str, set[str]] = {
+            zone_key: {
+                self._topic_room[light[CONF_SET_TOPIC]]
+                for binding in bindings
+                for stage in binding.sweep
+                for light in stage.get(CONF_LIGHTS, [])
+                if light[CONF_SET_TOPIC] in self._topic_room
+            }
+            for zone_key, bindings in self._bindings_by_zone.items()
+        }
         self._override_zones: dict[str, list[str]] = {}  # switch -> zones it holds
         for zone_key, zone in self._occupancy.items():
             for base in zone.get(CONF_OVERRIDE_SWITCHES, []):
@@ -532,9 +551,12 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         due tick sends what changed (no forced flood at solar midnight).
         """
         now = dt_util.utcnow()
-        for room in await self._modes.sweep_expired(now):
+        looks = self._look_rooms()
+        expired = await self._modes.sweep_expired(now)
+        for room in expired:
             self._invalidate_room(room)
             _LOGGER.info("hold expired for room %s", room)
+        self._resume_motion(looks.intersection(expired))
         for zone in await self._modes.sweep_expired_overrides(now):
             _LOGGER.info("override expired for zone %s", zone)
             self._cancel_idle_timer(zone)
@@ -1004,7 +1026,7 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
             for light in stage.get(CONF_LIGHTS, []):
                 if light[CONF_SET_TOPIC] in lit:
                     continue
-                payload = self._room_glide_target(light[CONF_SOURCE])
+                payload = self._sweep_payload(light)
                 if payload is None:
                     continue
                 body = {
@@ -1019,6 +1041,43 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         self._write_switches(
             self._occupancy[zone_key].get(CONF_SYNC_SWITCHES, []), STATE_ON
         )
+
+    def _sweep_payload(self, light: OccupancyLight) -> PushPayload | None:
+        """Return what a sweep shows on a light: its held look, else the curve."""
+        source_key = light[CONF_SOURCE]
+        room = self._topic_room.get(light[CONF_SET_TOPIC], "")
+        if self._modes.mode_of(room) in LOOK_KINDS:
+            source = self._config[CONF_SOURCES][source_key]
+            return self._held_looks(source_key, source).get(room)
+        return self._room_glide_target(source_key)
+
+    def _look_rooms(self) -> set[str]:
+        """Rooms held at a config-tap look (night / day)."""
+        return {
+            room
+            for room in self._modes.held_rooms()
+            if self._modes.mode_of(room) in LOOK_KINDS
+        }
+
+    def _zone_held(self, zone_key: str) -> bool:
+        """Return True while a config-tap look holds any of the zone's lights.
+
+        A look also keeps its zone on (user 2026-11-05): the all-clear does not
+        turn it off until a tap off, a release, or 00:00 ends the look.
+        """
+        return not self._look_rooms().isdisjoint(self._zone_rooms.get(zone_key, ()))
+
+    def _resume_motion(self, rooms: Iterable[str]) -> None:
+        """Clear each vacant zone that an ended look on ``rooms`` was keeping on."""
+        ended = set(rooms)
+        for zone_key, zone_rooms in self._zone_rooms.items():
+            if (
+                not ended.isdisjoint(zone_rooms)
+                and self._zone_vacant(zone_key)
+                and self._modes.override_until(zone_key) is None
+            ):
+                self.diagnostics["occupancy"][zone_key] = False
+                self._clear_zone(zone_key)
 
     def _zone_vacant(self, zone_key: str) -> bool:
         return not any(
@@ -1039,10 +1098,13 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         A sync switch that shows ON is told OFF and its own binding switches the
         lights (one unicast + the binding's groupcast, and the bar follows). A
         switch that does not show ON may not forward an OFF, so the group gets
-        Light Man's OFF as before.
+        Light Man's OFF as before. A zone held on by a config-tap look is left
+        on; the next occupancy episode's sweep shows the look again.
         """
         zone = self._occupancy[zone_key]
         self._zone_lit.pop(zone_key, None)
+        if self._zone_held(zone_key):
+            return
         sync = zone.get(CONF_SYNC_SWITCHES, [])
         if sync and all(self._paddle_on.get(base) for base in sync):
             self._write_switches(sync, STATE_OFF)
@@ -1201,9 +1263,12 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
                 self._clear_zone(room)
             self._publish_snapshot()
             return
+        was_look = room in self._look_rooms()
         if not await self._modes.release(room):
             return
         self._release_room(room, origin_at=origin_at)
+        if was_look:
+            self._resume_motion([room])
         self._publish_snapshot()
 
     def _release_room(self, room: str, *, origin_at: float | None = None) -> None:
@@ -1217,8 +1282,10 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
 
     async def async_clear_holds(self) -> None:
         """Resume adaptive everywhere: one release send per held room (#5)."""
+        looks = self._look_rooms()
         for room in await self._modes.clear():
             self._release_room(room)
+        self._resume_motion(looks)
         for zone in self._modes.overrides():
             await self._end_override(zone)
         self._publish_snapshot()

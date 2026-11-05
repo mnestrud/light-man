@@ -172,6 +172,10 @@ stale bulb NVRAM groups; the **runtime** integration just never uses it. See §8
   then **trigger an immediate push cycle** so the room snaps to adaptive at once (reuses the push path,
   no bespoke single-room publish).
 - **TTL sweep** (piggyback the push loop) clears expired holds; info line on expiry.
+- **A look keeps its motion zone on** (0.8.6): while any light of an occupancy zone is held at a
+  config-tap look (night / day), the zone's all-clear does not turn it off and an occupancy sweep
+  shows the look instead of the curve. A tap off, a release, or 00:00 ends it; when the look ends on
+  a vacant zone, the zone is cleared.
 - **Holdable rooms** must have a per-room `set_topic` — without one the push cannot address around the
   room (it would fall back to the consolidated flood and hit the held bulbs). Validate the
   `switch → room → set_topic` chain at config load.

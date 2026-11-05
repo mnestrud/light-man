@@ -500,3 +500,96 @@ async def test_show_lights_uses_light_topics_for_part_of_a_source(
     hall._show_lights([("hallway_up", "hall.center")], lambda _s: None, origin_at=0)
     await hass.async_block_till_done()
     assert set(published(mqtt_mock)) == {HALL_CENTER_SET}
+
+
+# --- a config-tap look keeps its zone on (user 2026-11-05) --------------------
+
+
+async def _hold_hall_at_night(
+    hass: HomeAssistant, hall: LightManCoordinator, mqtt_mock: Any, clock: FakeClock
+) -> None:
+    """Motion lights the hall, then a config tap holds both lights at night."""
+    await _send(hass, hall, MMWAVE_EAST, {"occupancy": True})
+    _fire(hass, MMWAVE_EAST, {"state": "ON"})  # the sync write's echo
+    await hass.async_block_till_done()
+    clock.advance(1.0)
+    await _send(hass, hall, MMWAVE_EAST, {"action": "config_single"})
+    assert hall._modes.held_rooms() == {"hall.up_main", "hall.center"}
+    mqtt_mock.async_publish.reset_mock()
+
+
+async def test_config_look_keeps_the_zone_on_and_sweeps_show_the_look(
+    hass: HomeAssistant, hall: LightManCoordinator, mqtt_mock: Any, clock: FakeClock
+) -> None:
+    await _hold_hall_at_night(hass, hall, mqtt_mock, clock)
+    await _send(hass, hall, MMWAVE_EAST, {"occupancy": False})
+    assert published(mqtt_mock) == {}  # vacant, but held: nothing turns off
+    assert hall.diagnostics["occupancy"]["hallway"] is False
+    # the next episode's sweep shows the look, not the curve
+    await _send(hass, hall, MMWAVE_WEST, {"occupancy": True})
+    night = _night(hall, "hallway_up")
+    assert published(mqtt_mock) == {
+        HALL_CENTER_SET: {**night, "transition": 1.5, "state": "ON"}
+    }
+    mqtt_mock.async_publish.reset_mock()
+    await _send(hass, hall, MMWAVE_WEST, {"occupancy": False})
+    assert published(mqtt_mock) == {}
+
+
+async def test_tap_off_returns_a_held_zone_to_motion(
+    hass: HomeAssistant, hall: LightManCoordinator, mqtt_mock: Any, clock: FakeClock
+) -> None:
+    await _hold_hall_at_night(hass, hall, mqtt_mock, clock)
+    await _send(hass, hall, MMWAVE_EAST, {"action": "down_single"})
+    assert hall._modes.held_rooms() == set()
+    await _send(hass, hall, MMWAVE_EAST, {"occupancy": False})
+    assert HALL_OFF in published(mqtt_mock)  # the normal clear again
+
+
+async def test_look_expiring_at_midnight_clears_a_vacant_zone(
+    hass: HomeAssistant, hall: LightManCoordinator, mqtt_mock: Any, clock: FakeClock
+) -> None:
+    await _hold_hall_at_night(hass, hall, mqtt_mock, clock)
+    await _send(hass, hall, MMWAVE_EAST, {"occupancy": False})
+    now = dt_util.utcnow()
+    for room in ("hall.up_main", "hall.center"):
+        await hall._modes.set_held(room, kind="night", armed_at=now, expires_at=now)
+    await tick(hass, hall, clock)
+    assert hall._modes.held_rooms() == set()
+    assert published(mqtt_mock)[EAST_SET] == {"state": "OFF"}
+
+
+async def test_look_expiring_with_presence_waits_for_the_normal_clear(
+    hass: HomeAssistant, hall: LightManCoordinator, mqtt_mock: Any, clock: FakeClock
+) -> None:
+    await _hold_hall_at_night(hass, hall, mqtt_mock, clock)
+    now = dt_util.utcnow()
+    for room in ("hall.up_main", "hall.center"):
+        await hall._modes.set_held(room, kind="night", armed_at=now, expires_at=now)
+    await tick(hass, hall, clock)
+    assert EAST_SET not in published(mqtt_mock)  # someone is there
+    await _send(hass, hall, MMWAVE_EAST, {"occupancy": False})
+    assert published(mqtt_mock)[EAST_SET] == {"state": "OFF"}
+
+
+async def test_releasing_the_last_look_clears_a_vacant_zone(
+    hass: HomeAssistant, hall: LightManCoordinator, mqtt_mock: Any, clock: FakeClock
+) -> None:
+    await _hold_hall_at_night(hass, hall, mqtt_mock, clock)
+    await _send(hass, hall, MMWAVE_EAST, {"occupancy": False})
+    await hall.async_release_hold("hall.center")
+    await hass.async_block_till_done()
+    assert EAST_SET not in published(mqtt_mock)  # hall.up_main still holds it
+    await hall.async_release_hold("hall.up_main")
+    await hass.async_block_till_done()
+    assert published(mqtt_mock)[EAST_SET] == {"state": "OFF"}
+
+
+async def test_clear_holds_clears_a_vacant_held_zone(
+    hass: HomeAssistant, hall: LightManCoordinator, mqtt_mock: Any, clock: FakeClock
+) -> None:
+    await _hold_hall_at_night(hass, hall, mqtt_mock, clock)
+    await _send(hass, hall, MMWAVE_EAST, {"occupancy": False})
+    await hall.async_clear_holds()
+    await hass.async_block_till_done()
+    assert published(mqtt_mock)[EAST_SET] == {"state": "OFF"}
