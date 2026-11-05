@@ -1443,8 +1443,9 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         elif mode not in LOOK_KINDS:
             await self.async_hold(light_ref, mode, origin_at=origin_at)
         elif self._look_tap_accepted(base, action):
+            self._bars.announce(base, LED_TOP)  # the top LED pulses, then stays
             await self.async_hold(light_ref, mode, origin_at=origin_at)
-            self._bar_play(base, EFFECT_PULSE, LOOK_COLORS[mode])
+            self._bars.unannounce(base)
 
     async def _on_paddle_tap(
         self, base: str, action: str, mapping: tuple[str, str], origin_at: float
@@ -1477,10 +1478,17 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
             )
 
     def _look_tap_accepted(self, base: str, action: str) -> bool:
-        """Apply the config-tap rule; an ignored tap blinks the bar red."""
+        """Apply the config-tap rule; an ignored tap blinks the top LED red."""
         if self._on_long_enough(base, action):
             return True
-        self._bar_play(base, EFFECT_BLINK, COLOR_RED)
+        fraction = self._bar_fraction(self._bar_source(base))
+        self._bars.flash(
+            base,
+            LED_TOP,
+            EFFECT_BLINK,
+            COLOR_RED,
+            1.0 if fraction is None else fraction,
+        )
         return False
 
     def _on_dim_release(self, light_ref: str) -> None:
@@ -1529,8 +1537,9 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
             return  # a held dim is local; the next tick glides on
         if mode in LOOK_KINDS:
             if self._look_tap_accepted(base, action):
+                self._bars.announce(base, LED_TOP)  # the top LED pulses, then stays
                 await self._hold_lights(lights, mode, origin_at=origin_at)
-                self._bar_play(base, EFFECT_PULSE, LOOK_COLORS[mode])
+                self._bars.unannounce(base)
             return
         off = action.startswith("down")
         self._set_paddle(base, on=not off)
@@ -1546,23 +1555,33 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
                 self._invalidate_source(source_key)
         else:
             shown = [(src, ref) for src, ref in lights if ref in released]
-            feedback = await self._room_tap_up(zones, shown, origin_at)
+            feedback = await self._room_tap_up(base, zones, shown, origin_at)
         _LOGGER.debug("%s on %s (room %s)", action, base, room)
         self._publish_snapshot()
+        self._bars.unannounce(base)
         if feedback is not None:
             self._bar_play(base, EFFECT_PULSE, feedback)
 
     async def _room_tap_up(
-        self, zones: list[str], released: list[tuple[str, str]], origin_at: float
+        self,
+        base: str,
+        zones: list[str],
+        released: list[tuple[str, str]],
+        origin_at: float,
     ) -> int | None:
-        """Release looks to the curve and arm the override; return the bar colour."""
+        """Release looks to the curve and arm the override; return the bar colour.
+
+        A newly armed override is answered on the bottom LED of the tapped
+        switch (it pulses, then stays); only a bare release pulses the bar.
+        """
         feedback: int | None = None
         if released:
             self._show_lights(released, self._room_glide_target, origin_at=origin_at)
             feedback = COLOR_BAR  # back to automatic
         for zone in zones:
             if self._modes.override_until(zone) is None:
-                feedback = COLOR_GREEN  # motion override armed
+                self._bars.announce(base, LED_BOTTOM)
+                feedback = None
             await self._arm_override(zone)
         return feedback
 

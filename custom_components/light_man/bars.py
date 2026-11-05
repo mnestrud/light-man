@@ -10,8 +10,12 @@ Three things are written to a bar, all on ``<switch>/set``:
   moved ``BAR_LEVEL_STEP``, so a day is a handful of writes per switch.
 - **Status** — one LED per state, lit while the state is true
   (``individual_led_effect``, indefinite): the top LED for a held look, the
-  bottom LED for the hallway motion override.
-- **Animations** — a timed whole-bar ``led_effect`` (tap feedback, shades). It
+  bottom LED for the hallway motion override. A tap that sets a state is
+  answered on that LED itself: it pulses for ``FEEDBACK_S``, then stays on. An
+  ignored config tap blinks the top LED red. One LED keeps the colour honest: a
+  single LED beside the bar's blue reads as a warm white, which a whole-bar
+  effect in the same colour does not (user, 2026-11-05).
+- **Animations** — a timed whole-bar ``led_effect`` (shades, look released). It
   hides the status LEDs while it plays; they show again when it ends (checked
   on a VZM31-SN, 2026-11-05).
 
@@ -76,13 +80,20 @@ def scaled(level: int, fraction: float, floor: int) -> int:
     return max(floor, min(100, round(level * fraction)))
 
 
-def led_command(led: str, color: int | None, level: int) -> dict[str, Any]:
-    """Return the command that lights one LED solid, or clears it (``color`` None)."""
+def led_command(
+    led: str,
+    color: int | None,
+    level: int,
+    *,
+    effect: str = "solid",
+    duration: int = INDEFINITE,
+) -> dict[str, Any]:
+    """Return the command that lights one LED (solid by default) or clears it."""
     if color is None:
-        effect = {"led": led, "effect": "clear_effect"}
-        return {KEY_LED: {**effect, "color": 0, "level": 0, "duration": 0}}
-    effect = {"led": led, "effect": "solid"}
-    return {KEY_LED: {**effect, "color": color, "level": level, "duration": INDEFINITE}}
+        cleared = {"led": led, "effect": "clear_effect"}
+        return {KEY_LED: {**cleared, "color": 0, "level": 0, "duration": 0}}
+    body = {"led": led, "effect": effect}
+    return {KEY_LED: {**body, "color": color, "level": level, "duration": duration}}
 
 
 class BarManager:
@@ -106,6 +117,8 @@ class BarManager:
         self._level: dict[str, int] = {}  # switch -> on-level it shows
         self._leds: dict[str, dict[str, int | None]] = {}  # switch -> led -> colour
         self._status_level: dict[str, int] = {}  # switch -> level its status shows at
+        self._announce: set[tuple[str, str]] = set()  # (switch, led) to pulse next
+        self._settling: set[asyncio.Task[None]] = set()
         self._worker: asyncio.Task[None] | None = None
         self._closed = False
 
@@ -119,10 +132,28 @@ class BarManager:
         self._leds.pop(base, None)
         self._status_level.pop(base, None)
 
+    def announce(self, base: str, led: str) -> None:
+        """Make the next sync pulse this status LED before it settles to solid."""
+        self._announce.add((base, led))
+
+    def unannounce(self, base: str) -> None:
+        """Drop announcements a sync did not use (the tap changed nothing)."""
+        self._announce = {key for key in self._announce if key[0] != base}
+
+    def flash(
+        self, base: str, led: str, effect: str, color: int, fraction: float
+    ) -> None:
+        """Show a timed effect on one LED, then put its status (if any) back."""
+        level = scaled(FEEDBACK_LEVEL, fraction, STATUS_MIN_LEVEL)
+        command = led_command(led, color, level, effect=effect, duration=FEEDBACK_S)
+        self._queue(base, f"led{led}", command)
+        self._settle(base, led)
+
     def sync(self, base: str, leds: dict[str, int | None], fraction: float) -> None:
         """Bring one bar to its level and status lights; send only what changed.
 
         ``leds`` maps each status LED this switch uses to its colour (None = off).
+        An announced LED that is lit pulses first, then settles to solid.
         """
         level = bar_level(fraction)
         shown = self._level.get(base)
@@ -133,12 +164,33 @@ class BarManager:
         last_level = self._status_level.get(base, status_level)
         relevel = abs(status_level - last_level) >= STATUS_LEVEL_STEP
         before = self._leds.get(base)
+        self._leds[base] = dict(leds)
         for led, color in leds.items():
             changed = before is None or before.get(led) != color
-            if changed or (relevel and color is not None):
+            # An announcement waits for the LED to light: a sync that runs while
+            # the tap is still being handled must not use it up.
+            announce = (base, led) in self._announce and color is not None
+            if announce:
+                self._announce.discard((base, led))
+            if not (changed or announce or (relevel and color is not None)):
+                continue
+            self._status_level[base] = status_level
+            if announce:
+                # One second longer than the wait: the solid command replaces
+                # the pulse, so the LED never drops out in between.
+                pulse = led_command(
+                    led,
+                    color,
+                    status_level,
+                    effect=EFFECT_PULSE,
+                    duration=FEEDBACK_S + 1,
+                )
+                self._queue(base, f"led{led}", pulse)
+                self._settle(base, led)
+            else:
+                # The LED's new state: a solid still waiting from a pulse is stale.
+                self._pending.pop((base, f"settle{led}"), None)
                 self._queue(base, f"led{led}", led_command(led, color, status_level))
-                self._status_level[base] = status_level
-        self._leds[base] = dict(leds)
 
     def play(
         self,
@@ -158,10 +210,27 @@ class BarManager:
         }
         self._queue(base, "effect", {KEY_EFFECT: body})
 
+    def _settle(self, base: str, led: str) -> None:
+        task = self._task_factory(self._settle_later(base, led))
+        self._settling.add(task)
+        task.add_done_callback(self._settling.discard)
+
+    async def _settle_later(self, base: str, led: str) -> None:
+        """After a pulse or flash, show the LED's status solid (if it has one)."""
+        await self._sleep(FEEDBACK_S)
+        color = self._leds.get(base, {}).get(led)
+        if color is not None:
+            # Its own slot: it queues behind a pulse that is still waiting,
+            # rather than replacing it.
+            level = self._status_level.get(base, STATUS_PEAK_LEVEL)
+            self._queue(base, f"settle{led}", led_command(led, color, level))
+
     def cancel(self) -> None:
         """Drop everything pending and stop for good (unload)."""
         self._closed = True
         self._pending.clear()
+        for task in list(self._settling):
+            task.cancel()
         if self._worker is not None and not self._worker.done():
             self._worker.cancel()
         self._worker = None

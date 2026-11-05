@@ -174,9 +174,11 @@ stale bulb NVRAM groups; the **runtime** integration just never uses it. See §8
 - **TTL sweep** (piggyback the push loop) clears expired holds; info line on expiry.
 - **LED bars** (0.8.7, `bars.py`): Light Man is the only writer to the Inovelli bars. Each bar reports on
   its own room: the top LED is lit while a look is held (amber night, white day, violet held dim) and the
-  bottom LED (green) while the hallway motion override is on. Taps get a 3 s whole-bar animation (shorter ones do not show): a pulse
-  in the look's colour when a config tap is accepted, a fast red blink when it is ignored, a pulse in the
-  bar's own colour when an up tap releases a look, a green pulse when the override is armed. Shade taps
+  bottom LED (green) while the hallway motion override is on. A tap is answered on the status LED itself:
+  it pulses for 3 s, then stays on (an accepted config tap on the top LED, an armed override on the
+  bottom LED of the tapped switch); an ignored config tap blinks the top LED red for 3 s. Effects shorter
+  than 3 s do not show. The only whole-bar tap feedback is a 3 s pulse in the bar's own colour when an
+  up tap releases a look. Shade taps
   play the animation in the switch's `animations` map. The bar's on-level (`ledIntensityWhenOn`) follows
   the room's brightness curve (25 at the curve's brightest), written in steps of 2; status and animation
   levels scale with it. Bar commands are unicasts, paced 0.2 s apart on their own queue, never re-sent

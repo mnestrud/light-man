@@ -16,6 +16,7 @@ from custom_components.light_man.bars import (
     COLOR_BAR,
     COLOR_GREEN,
     COLOR_RED,
+    COLOR_WHITE,
     FEEDBACK_S,
     INDEFINITE,
     KEY_EFFECT,
@@ -96,9 +97,11 @@ class _Bars:
         await asyncio.sleep(0)
 
     async def drain(self) -> list[tuple[str, dict[str, Any]]]:
-        worker = self.manager._worker
-        if worker is not None:
-            await worker
+        for _round in range(3):  # a settle task may queue one more command
+            pending = [*self.manager._settling]
+            if self.manager._worker is not None:
+                pending.append(self.manager._worker)
+            await asyncio.gather(*pending)
         sent, self.sent = self.sent, []
         return sent
 
@@ -186,6 +189,55 @@ async def test_play_scales_the_level_and_a_newer_animation_replaces_a_waiting_on
     }
 
 
+async def test_an_announced_led_pulses_then_settles_to_solid() -> None:
+    bars = _Bars()
+    bars.manager.sync("sw", {LED_TOP: None}, 1.0)
+    await bars.drain()
+    pulse = led_command(
+        LED_TOP, COLOR_AMBER, 60, effect="pulse", duration=FEEDBACK_S + 1
+    )
+    solid = led_command(LED_TOP, COLOR_AMBER, 60)
+    bars.manager.announce("sw", LED_TOP)
+    bars.manager.sync("sw", {LED_TOP: COLOR_AMBER}, 1.0)
+    assert await bars.drain() == [("sw/set", pulse), ("sw/set", solid)]
+    # the same look tapped again is answered again, though nothing changed
+    bars.manager.announce("sw", LED_TOP)
+    bars.manager.sync("sw", {LED_TOP: COLOR_AMBER}, 1.0)
+    assert await bars.drain() == [("sw/set", pulse), ("sw/set", solid)]
+    # an announcement for an LED that stays off, or that no sync used, is dropped
+    bars.manager.announce("sw", LED_BOTTOM)
+    bars.manager.sync("sw", {LED_TOP: COLOR_AMBER, LED_BOTTOM: None}, 1.0)
+    assert await bars.drain() == []
+    bars.manager.announce("sw", LED_TOP)
+    bars.manager.announce("other", LED_TOP)
+    bars.manager.unannounce("sw")
+    assert bars.manager._announce == {("other", LED_TOP)}
+
+
+async def test_a_pulse_cut_short_by_a_release_does_not_settle() -> None:
+    bars = _Bars()
+    bars.manager.announce("sw", LED_TOP)
+    bars.manager.sync("sw", {LED_TOP: COLOR_AMBER}, 1.0)
+    bars.manager.sync("sw", {LED_TOP: None}, 1.0)  # released before the pulse ended
+    leds = [p[KEY_LED]["effect"] for _t, p in await bars.drain() if KEY_LED in p]
+    assert leds == ["clear_effect"]  # the clear replaced the waiting pulse
+
+
+async def test_flash_is_timed_and_puts_a_lit_status_back() -> None:
+    bars = _Bars()
+    bars.manager.flash("sw", LED_TOP, "fast_blink", COLOR_RED, 0.5)
+    blink = led_command(
+        LED_TOP, COLOR_RED, 30, effect="fast_blink", duration=FEEDBACK_S
+    )
+    assert await bars.drain() == [("sw/set", blink)]  # no status: nothing follows
+    bars.manager.sync("sw", {LED_TOP: COLOR_AMBER}, 1.0)
+    await bars.drain()
+    bars.manager.flash("sw", LED_TOP, "fast_blink", COLOR_RED, 1.0)
+    sent = await bars.drain()
+    assert [p[KEY_LED]["effect"] for _t, p in sent] == ["fast_blink", "solid"]
+    assert sent[1][1] == led_command(LED_TOP, COLOR_AMBER, 60)
+
+
 async def test_cancel_drops_pending_and_refuses_new_commands() -> None:
     bars = _Bars()
     bars.manager.play("a", "pulse", COLOR_RED, 60, 1, 1.0)
@@ -196,6 +248,14 @@ async def test_cancel_drops_pending_and_refuses_new_commands() -> None:
     assert bars.manager._pending == {}
     assert bars.sent == []
     bars.manager.cancel()  # idempotent
+    # a settle that is still waiting is cancelled with it
+    waiting = _Bars()
+    waiting.manager._sleep = asyncio.sleep
+    waiting.manager.flash("sw", LED_TOP, "fast_blink", COLOR_RED, 1.0)
+    (task,) = waiting.manager._settling
+    waiting.manager.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+    assert task.cancelled()
 
 
 # --- coordinator: status, feedback, shades, level ------------------------------
@@ -256,36 +316,46 @@ async def test_startup_sets_each_bar_level_and_clears_its_status(
     ]
 
 
-async def test_config_tap_lights_the_top_led_and_pulses_then_up_tap_clears(
+async def test_config_tap_pulses_the_top_led_then_it_stays_and_up_tap_clears(
     hass: HomeAssistant, house: LightManCoordinator, mqtt_mock: Any, clock: FakeClock
 ) -> None:
     await _send(hass, house, LR_SWITCH, {"action": "up_single"})
     clock.advance(1.0)
     mqtt_mock.async_publish.reset_mock()
     await _send(hass, house, LR_SWITCH, {"action": "config_single"})
-    sent = [p for t, p in bar_published(mqtt_mock) if t == LR_SET_TOPIC]
-    assert [next(iter(p)) for p in sent] == [KEY_LED, KEY_EFFECT]  # status, then pulse
-    assert sent[0][KEY_LED]["color"] == COLOR_AMBER
-    assert sent[1][KEY_EFFECT]["effect"] == "pulse"
-    assert sent[1][KEY_EFFECT]["color"] == COLOR_AMBER
-    assert sent[1][KEY_EFFECT]["duration"] == FEEDBACK_S == 3
+    assert _leds(mqtt_mock, LR_SET_TOPIC) == [
+        ("7", "pulse", COLOR_AMBER),
+        ("7", "solid", COLOR_AMBER),
+    ]
+    assert _effects(mqtt_mock, LR_SET_TOPIC) == []  # nothing on the whole bar
+    mqtt_mock.async_publish.reset_mock()
+    await _send(hass, house, LR_SWITCH, {"action": "config_double"})
+    assert _leds(mqtt_mock, LR_SET_TOPIC) == [
+        ("7", "pulse", COLOR_WHITE),
+        ("7", "solid", COLOR_WHITE),
+    ]
     mqtt_mock.async_publish.reset_mock()
     await _send(hass, house, LR_SWITCH, {"action": "up_single"})
     assert _leds(mqtt_mock, LR_SET_TOPIC) == [("7", "clear_effect", 0)]
     assert [e["color"] for e in _effects(mqtt_mock, LR_SET_TOPIC)] == [COLOR_BAR]
 
 
-async def test_ignored_config_tap_blinks_red_and_lights_nothing(
+async def test_ignored_config_tap_blinks_the_top_led_red(
     hass: HomeAssistant, house: LightManCoordinator, mqtt_mock: Any
 ) -> None:
     mqtt_mock.async_publish.reset_mock()
     await _send(hass, house, LR_SWITCH, {"action": "config_single"})  # light off
     await _send(hass, house, MMWAVE_EAST, {"action": "config_double"})
     for topic in (LR_SET_TOPIC, EAST_SET):
-        assert [(e["effect"], e["color"]) for e in _effects(mqtt_mock, topic)] == [
-            ("fast_blink", COLOR_RED)
-        ]
-        assert _leds(mqtt_mock, topic) == []
+        assert _leds(mqtt_mock, topic) == [("7", "fast_blink", COLOR_RED)]
+        assert _effects(mqtt_mock, topic) == []
+    blink = next(p[KEY_LED] for t, p in bar_published(mqtt_mock) if t == LR_SET_TOPIC)
+    assert blink["duration"] == FEEDBACK_S == 3
+    # before the engine has run, the blink shows at its full level
+    house.diagnostics["engine"].clear()
+    mqtt_mock.async_publish.reset_mock()
+    await _send(hass, house, LR_SWITCH, {"action": "config_single"})
+    assert bar_published(mqtt_mock)[0][1][KEY_LED]["level"] == 60
 
 
 async def test_hallway_pair_shows_override_and_look_on_both_switches(
@@ -293,18 +363,23 @@ async def test_hallway_pair_shows_override_and_look_on_both_switches(
 ) -> None:
     mqtt_mock.async_publish.reset_mock()
     await _send(hass, house, MMWAVE_EAST, {"action": "up_single"})
-    for topic in (EAST_SET, WEST_SET):
-        assert _leds(mqtt_mock, topic) == [("1", "solid", COLOR_GREEN)]
-    assert [e["color"] for e in _effects(mqtt_mock, EAST_SET)] == [COLOR_GREEN]
-    assert _effects(mqtt_mock, WEST_SET) == []  # feedback only where it was tapped
+    # the tapped switch's bottom LED pulses, then stays; the other just lights
+    assert _leds(mqtt_mock, EAST_SET) == [
+        ("1", "pulse", COLOR_GREEN),
+        ("1", "solid", COLOR_GREEN),
+    ]
+    assert _leds(mqtt_mock, WEST_SET) == [("1", "solid", COLOR_GREEN)]
+    assert _effects(mqtt_mock, EAST_SET) == []
     mqtt_mock.async_publish.reset_mock()
     await _send(hass, house, MMWAVE_EAST, {"action": "up_single"})
     assert bar_published(mqtt_mock) == []  # already armed, nothing held
     clock.advance(1.0)
     await _send(hass, house, MMWAVE_EAST, {"action": "config_single"})
-    for topic in (EAST_SET, WEST_SET):
-        assert _leds(mqtt_mock, topic) == [("7", "solid", COLOR_AMBER)]
-    assert [e["color"] for e in _effects(mqtt_mock, EAST_SET)] == [COLOR_AMBER]
+    assert _leds(mqtt_mock, EAST_SET) == [
+        ("7", "pulse", COLOR_AMBER),
+        ("7", "solid", COLOR_AMBER),
+    ]
+    assert _leds(mqtt_mock, WEST_SET) == [("7", "solid", COLOR_AMBER)]
     mqtt_mock.async_publish.reset_mock()
     await _send(hass, house, MMWAVE_WEST, {"action": "up_single"})  # look released
     assert [e["color"] for e in _effects(mqtt_mock, WEST_SET)] == [COLOR_BAR]
@@ -314,6 +389,16 @@ async def test_hallway_pair_shows_override_and_look_on_both_switches(
     for topic in (EAST_SET, WEST_SET):
         assert _leds(mqtt_mock, topic) == [("1", "clear_effect", 0)]
     assert _effects(mqtt_mock, EAST_SET) == []
+    # a look held when the override is armed: the bottom LED answers, not the bar
+    await _send(hass, house, MMWAVE_EAST, {"occupancy": True})
+    _fire(hass, MMWAVE_EAST, {"state": "ON"})
+    await hass.async_block_till_done()
+    clock.advance(1.0)
+    await _send(hass, house, MMWAVE_EAST, {"action": "config_single"})
+    mqtt_mock.async_publish.reset_mock()
+    await _send(hass, house, MMWAVE_EAST, {"action": "up_single"})
+    assert _effects(mqtt_mock, EAST_SET) == []
+    assert ("1", "pulse", COLOR_GREEN) in _leds(mqtt_mock, EAST_SET)
 
 
 async def test_shade_taps_play_their_animation_dimmed_with_the_curve(
