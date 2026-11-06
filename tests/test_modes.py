@@ -147,3 +147,10 @@ async def test_save_uses_delayed_write_when_the_store_offers_it() -> None:
     await modes.set_held("kitchen", kind="night", armed_at=now, expires_at=now)
     assert scheduled[0][1] == 0
     assert scheduled[0][0]["kitchen"]["kind"] == "night"
+
+
+async def test_set_look_needs_a_held_room() -> None:
+    modes = ModeManager(FakeStore(None))
+    await modes.async_load()
+    assert not await modes.set_look("office", {"brightness": 9})
+    assert modes.look_of("office") is None

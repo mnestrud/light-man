@@ -167,6 +167,13 @@ unnecessary.
   went 127 → 137 → 182 → 200 in 0.6 s; the next 120 s glide started from 200 without a step.
 - **Held dim** (binding `genLevelCtrl.move` / `stop`): takes over within 0.3 s, cancels the running glide, and
   the level stays put after release; the next glide starts from the dimmed level (one 2-point dip at the start).
+  **Superseded 2026-11-06:** on release the VZM31-SN sets the bound bulbs to its own level (they landed on
+  the switch's reported `brightness` 5 of 5 times), and a level written to the switch is forwarded to the
+  bulbs within ~0.5 s. The level bindings to lights are removed; Light Man fades the lights itself (0.8.8).
+  With the binding gone a level write to a switch moves only its LED bar (checked on the kitchen switch).
+- **Z2M's cached `philips_raw`**: Z2M polls bound bulbs 1 s after a switch command and republishes the
+  cached frame with the fresh `brightness`; the first message after a `/get` is therefore often stale. Use
+  the `brightness` field of a `{"brightness": ""}` read, not the first frame.
 - **Cross-mode / cross-hue fades are curved**: a 60 s fade from 2700 K to xy (0.30, 0.25) swung toward
   orange-red first (x 0.48 → 0.53) before curving to the target, 0.098 off the straight line — the same
   whether the start was given as mirek or as xy. The bulb chooses its own path; a straight path needs the

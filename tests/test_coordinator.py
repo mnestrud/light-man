@@ -287,6 +287,29 @@ async def test_setup_prunes_orphaned_holds(hass: HomeAssistant, mqtt_mock: Any) 
     coord.shutdown_subscriptions()
 
 
+async def test_setup_drops_a_dim_cut_short_by_a_restart(
+    hass: HomeAssistant, mqtt_mock: Any
+) -> None:
+    """A manual hold with no level (restart mid-hold) goes back to its curve."""
+    entry = MockConfigEntry(domain=DOMAIN, title="Light Man")
+    entry.add_to_hass(hass)
+    modes = ModeManager(FakeStore(None))
+    await modes.async_load()
+    now = dt_util.utcnow()
+    later = now + timedelta(hours=8)
+    await modes.set_held(
+        "living_room.overhead", kind="manual", armed_at=now, expires_at=later
+    )
+    await modes.set_held(
+        "kitchen.overhead", kind="manual", armed_at=now, expires_at=later
+    )
+    await modes.set_look("kitchen.overhead", {"brightness": 90, "color_temp": 300})
+    coord = LightManCoordinator(hass, entry, validate_config(SEED), modes)
+    await coord._async_setup()
+    assert modes.held_rooms() == {"kitchen.overhead"}
+    coord.shutdown_subscriptions()
+
+
 async def test_paddle_off_releases_hold(
     hass: HomeAssistant, coordinator: Coord, mqtt_mock: Any
 ) -> None:

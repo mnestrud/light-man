@@ -2,11 +2,11 @@
 
 Timer-driven on its own cadence. Each cycle: sweep expired held modes, then (if
 Light Man owns the push) publish every source. Per room the target is its live
-adaptive value, its held look (night/day), or nothing (off / manually frozen) —
+adaptive value, its held look (night/day, or the level a paddle was held to) —
 so an off room is never re-on'd and a held look is never clobbered.
 
 Modes are driven only by explicit Inovelli action intents (``config_*`` hold,
-single taps release, held-dim freezes) — never inferred from switch on/off
+single taps release, a held paddle dims) — never inferred from switch on/off
 bounce. The ``push_enable`` switch is a plain master on/off: ON runs the adaptive
 push, OFF makes Light Man inert (it no longer touches any legacy stack).
 """
@@ -18,6 +18,7 @@ import json
 import logging
 import math
 import time
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from functools import partial
 from typing import TYPE_CHECKING, Any, NamedTuple, TypedDict, cast
@@ -30,7 +31,6 @@ from homeassistant.helpers.start import async_at_started
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.util import dt as dt_util
 
-from . import hue_frame
 from .adaptive import compute_target, day_look, night_look, sleep_ramp
 from .bars import (
     BAR_KEYS,
@@ -48,6 +48,7 @@ from .bars import (
     BarManager,
 )
 from .const import (
+    BRIGHTNESS_MAX,
     COLOR_MODE_COLOR_TEMP,
     COLOR_MODE_RGB,
     CONF_CONSOLIDATED_TOPIC,
@@ -76,6 +77,13 @@ from .const import (
     DEFAULT_SLEEP_RAMP_IN_S,
     DEFAULT_SLEEP_RAMP_OUT_S,
     DEFAULT_TRANSITION_S,
+    DIM_FLOOR,
+    DIM_LEAD_S,
+    DIM_MIN_FADE_S,
+    DIM_MIN_SPAN,
+    DIM_RATE,
+    DIM_STOP_TRANSITION_S,
+    DIM_TIMEOUT_S,
     FAILURE_LOG_INTERVAL_S,
     HELD_DAY,
     HELD_MANUAL,
@@ -87,10 +95,6 @@ from .const import (
     INTERACTIVE_TRANSITION_MAX_S,
     INTERACTIVE_TRANSITION_MIN_S,
     LOOK_KINDS,
-    MANUAL_CAPTURE_DELAY_S,
-    MANUAL_CAPTURE_REPLY_S,
-    MANUAL_CAPTURE_TIMEOUT_S,
-    MANUAL_CAPTURE_TRIES,
     MODE_ADAPTIVE,
     MQTT_SLOW_PUBLISH_S,
     PADDLE_STATE_GRACE_S,
@@ -147,6 +151,24 @@ def _monotonic() -> float:
 # Pacing sleep, looked up at call time so tests can patch it.
 _pace_sleep = asyncio.sleep
 _bar_sleep = asyncio.sleep  # the LED bars' own pacing (separate so tests can idle it)
+
+
+@dataclass(slots=True)
+class _Dim:
+    """One fade a held paddle is running on a light topic."""
+
+    topic: str
+    refs: list[str]  # the light refs held at the level when the paddle lets go
+    colour: PushPayload  # what the lights showed when the hold began
+    start: int
+    target: int
+    duration: float
+    began: float
+
+    def level_at(self, clock: float) -> int:
+        """Return the level the fade has reached at ``clock``."""
+        done = min(1.0, max(0.0, (clock - self.began) / self.duration))
+        return round(self.start + (self.target - self.start) * done)
 
 
 class _Binding(NamedTuple):
@@ -226,17 +248,13 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         topics = [s[CONF_CONSOLIDATED_TOPIC] for s in config[CONF_SOURCES].values()]
         self._z2m_base, _disagree = z2m_base_topic(topics)
         self._group_topics: set[str] | None = None
-        self._group_members: dict[str, list[str]] = {}
-        self._device_names: dict[str, str] = {}
-        self._groups_loaded = False
-        self._devices_loaded = False
         self._state_resend: set[str] = set()  # topics whose OFF a retry keeps
         # source -> generation of the latest force request (cleared when a unit
         # planned with that generation is actually sent)
         self._force_pending: dict[str, int] = {}
         self._force_seq = 0
         self._failed_at: dict[str, float] = {}  # topic -> last Z2M failure
-        self._capture_tasks: dict[str, asyncio.Task[None]] = {}
+        self._dims: dict[str, list[_Dim]] = {}  # switch -> fades it is running
         self._plan_diag: dict[str, tuple[dict[str, Any], int]] = {}
         self._replanned_at: dict[str, float] = {}  # source -> last BUSY re-plan
         self._publisher = PacedPublisher(
@@ -261,9 +279,6 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         self._next_due: dict[str, float] = {}
         self._glide_end: dict[str, datetime] = {}
         self._pushed_once = False
-        self._capture_room: dict[str, str] = {}  # bulb -> room awaiting a read
-        self._capture_asked: dict[str, float] = {}  # bulb -> when /get was sent
-        self._capture_started: dict[str, float] = {}  # room -> capture start
         self._closed = False
         self._marked_at: dict[str, float] = {}
         self._planned_at: dict[str, float] = {}
@@ -280,7 +295,6 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
                     self._topic_source_consolidated[room_cfg[CONF_SET_TOPIC]] = src[
                         CONF_CONSOLIDATED_TOPIC
                     ]
-        self._bulb_unsubs: dict[str, Any] = {}
         self._interactive_recent: dict[str, tuple[float, int]] = {}
         self._failure_log: dict[str, tuple[float | None, int]] = {}
         self._z2m_online: bool | None = None
@@ -360,6 +374,14 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         pruned = await self._modes.prune(set(self._room_source))
         if pruned:
             _LOGGER.info("pruned orphaned holds: %s", ", ".join(sorted(pruned)))
+        # A dim cut short by a restart has no level: the room goes back to its curve.
+        for room in sorted(self._modes.held_rooms()):
+            if (
+                self._modes.mode_of(room) == HELD_MANUAL
+                and self._modes.look_of(room) is None
+            ):
+                await self._modes.release(room)
+                _LOGGER.info("dropped the unfinished dim of %s", room)
         # One subscription per switch: the device's JSON publish. It always
         # carries `action` on a tap (Z2M output: json), so the separate
         # `<base>/action` topic would only duplicate every tap's handling
@@ -382,7 +404,6 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
             ("logging", self._handle_bridge_logging),
             ("state", self._handle_bridge_state),
             ("groups", self._handle_bridge_groups),
-            ("devices", self._handle_bridge_devices),
         ):
             self._unsubs.append(
                 await mqtt.async_subscribe(self.hass, f"{bridge}/{suffix}", handler)
@@ -435,12 +456,7 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         self._closed = True
         while self._unsubs:
             self._unsubs.pop()()
-        while self._bulb_unsubs:
-            _bulb, unsub = self._bulb_unsubs.popitem()
-            unsub()
-        for task in self._capture_tasks.values():
-            task.cancel()
-        self._capture_tasks.clear()
+        self._dims.clear()
         for cancel in self._override_timers.values():
             cancel()
         self._override_timers.clear()
@@ -587,6 +603,7 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
             self._cancel_idle_timer(zone)
             if zone in self._occupancy and self._zone_vacant(zone):
                 self._clear_zone(zone)
+        await self._finish_stale_dims()
         await self._run_push(force=False, due_only=True)
         self._sync_bars()
         return self._snapshot()
@@ -707,11 +724,9 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         if adaptive is None:
             return []
         looks = self._held_looks(key, source)
-        if any(
-            looks.get(room) is None and self._capture_pending(room) for room in looks
-        ):
+        if any(looks.get(room) is None and self._dim_pending(room) for room in looks):
             self._plan_diag[key] = ({"mode": "deferred", "topics": []}, 0)
-            return []  # a manual level is being read; this source waits one tick
+            return []  # a paddle is being held; this source waits one tick
         addressing, planned = plan_source(
             source, adaptive_payload=adaptive, looks=looks, max_unit=TICK_BUDGET
         )
@@ -788,7 +803,7 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
     def _held_looks(
         self, key: str, source: SourceConfig
     ) -> dict[str, PushPayload | None]:
-        """Each held room's look: night/day from the curve, manual as captured."""
+        """Each held room's look: night/day from the curve, manual as dimmed to."""
         looks: dict[str, PushPayload | None] = {}
         profile = source["profile"]
         for room in source.get(CONF_ROOMS, {}):
@@ -1324,9 +1339,7 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         )
         source_key = self._room_source.get(room)
         topic = self._room_topic(room)
-        if kind == HELD_MANUAL:
-            pass  # the level is read from a bulb at the paddle release
-        elif source_key is not None and topic is not None:
+        if source_key is not None and topic is not None:
             look = self._held_looks(source_key, self._config[CONF_SOURCES][source_key])
             payload = look.get(room)
             if payload is not None and self.push_enabled:
@@ -1433,7 +1446,7 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         origin_at = self._clock()
         light_ref = mapping[1]
         if action in RELEASE_ACTIONS:
-            self._on_dim_release(light_ref)
+            await self._end_dim(base)
             return
         mode = action_to_mode(action)
         if mode is None:
@@ -1441,7 +1454,7 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         if mode == MODE_ADAPTIVE:
             await self._on_paddle_tap(base, action, mapping, origin_at)
         elif mode not in LOOK_KINDS:
-            await self.async_hold(light_ref, mode, origin_at=origin_at)
+            await self._start_dim(base, action)
         elif self._look_tap_accepted(base, action):
             self._bars.announce(base, LED_TOP)  # the top LED pulses, then stays
             await self.async_hold(light_ref, mode, origin_at=origin_at)
@@ -1453,6 +1466,7 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         """Handle a single up/down tap: track the paddle and release any hold."""
         source_key, light_ref = mapping
         off = action.startswith("down")
+        self._dims.pop(base, None)
         self._set_paddle(base, on=not off)
         self._paddle_action_at[base] = self._clock()
         released = await self._modes.release(light_ref)
@@ -1491,10 +1505,6 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         )
         return False
 
-    def _on_dim_release(self, light_ref: str) -> None:
-        if self._modes.mode_of(light_ref) == HELD_MANUAL:
-            self._schedule_manual_capture(light_ref)
-
     def _set_paddle(self, base: str, *, on: bool) -> None:
         """Record a switch's on/off and when it turned on (config-tap rule)."""
         was = self._paddle_on.get(base)
@@ -1526,15 +1536,22 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
     async def _on_room_action(self, base: str, action: str) -> None:
         """Handle a tap on a switch that governs a whole room (the hallway pair).
 
-        Paddle on/off and dimming are the switch's own binding. Up arms the
-        zone's motion override (and releases a look); down ends it. A config tap
-        holds every light of the room at the look while the lights are on.
+        Paddle on/off is the switch's own binding. Up arms the zone's motion
+        override (and releases a look); down ends it. A config tap holds every
+        light of the room at the look while the lights are on; a held paddle
+        dims each of the room's curves and holds the level.
         """
         room, lights = self._room_switches[base]
         origin_at = self._clock()
+        if action in RELEASE_ACTIONS:
+            await self._end_dim(base)
+            return
         mode = action_to_mode(action)
-        if mode is None or mode == HELD_MANUAL:
-            return  # a held dim is local; the next tick glides on
+        if mode is None:
+            return
+        if mode == HELD_MANUAL:
+            await self._start_dim(base, action)
+            return
         if mode in LOOK_KINDS:
             if self._look_tap_accepted(base, action):
                 self._bars.announce(base, LED_TOP)  # the top LED pulses, then stays
@@ -1542,6 +1559,7 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
                 self._bars.unannounce(base)
             return
         off = action.startswith("down")
+        self._dims.pop(base, None)
         self._set_paddle(base, on=not off)
         self._paddle_action_at[base] = origin_at
         released = [ref for _src, ref in lights if await self._modes.release(ref)]
@@ -1671,6 +1689,7 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         if mapping is None or not self.push_enabled:
             return  # a room-level switch: its binding acts, the state is tracked
         source_key, light_ref = mapping
+        self._dims.pop(base, None)
         if previous is None:
             # The first report after startup (retained): record it only. The
             # boot flood already staged every bulb, so re-staging each switched
@@ -1689,120 +1708,121 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
             await self._stage_off(source_key, light_ref)
         self._publish_snapshot()
 
-    # --- manual holds: read the level the user dimmed to --------------------
+    # --- held-paddle dimming: Light Man fades, so it knows the level ---------
 
-    def _schedule_manual_capture(self, room: str) -> None:
-        """After a held dim is released, read the room's bulbs for its level (A1)."""
-        bulbs = self._room_bulbs(room)
-        if not bulbs:
+    def _dim_groups(self, base: str) -> list[tuple[str, str, list[str]]]:
+        """Return (source, topic, light refs) for each fade a switch's hold runs.
+
+        One per curve: the consolidated topic when a room switch covers every
+        light of the source, else each light's own topic.
+        """
+        if base in self._room_switches:
+            lights = self._room_switches[base][1]
+        else:
+            lights = [self._switch_map[base]]
+        by_source: dict[str, list[str]] = {}
+        for source_key, ref in lights:
+            by_source.setdefault(source_key, []).append(ref)
+        groups: list[tuple[str, str, list[str]]] = []
+        for source_key, refs in by_source.items():
+            source = self._config[CONF_SOURCES][source_key]
+            rooms = source.get(CONF_ROOMS, {})
+            if base in self._room_switches and set(rooms) <= set(refs):
+                groups.append((source_key, source[CONF_CONSOLIDATED_TOPIC], refs))
+                continue
+            groups.extend(
+                (source_key, rooms[ref][CONF_SET_TOPIC], [ref])
+                for ref in refs
+                if ref in rooms and rooms[ref].get(CONF_SET_TOPIC)
+            )
+        return groups
+
+    async def _start_dim(self, base: str, action: str) -> None:
+        """Fade a held paddle's lights toward the floor or the ceiling.
+
+        The switches have no level binding, so this fade is the dim. It needs
+        the switch on (a held paddle never turns lights on) and holds the lights
+        as ``manual``; the level is set when the paddle is released.
+        """
+        if not self._paddle_on.get(base):
             return
-        self._capture_started[room] = self._clock()
-        previous = self._capture_tasks.pop(room, None)
-        if previous is not None and not previous.done():
-            previous.cancel()  # a newer dim of the same room supersedes it
-        self._capture_tasks[room] = self._entry.async_create_background_task(
-            self.hass, self._capture_manual_look(room, bulbs), name=f"lm_capture_{room}"
-        )
-
-    def _capture_pending(self, room: str) -> bool:
-        started = self._capture_started.get(room)
-        return (
-            started is not None and self._clock() - started < MANUAL_CAPTURE_TIMEOUT_S
-        )
-
-    async def _capture_manual_look(self, room: str, bulbs: list[str]) -> None:
-        """Ask each bulb in turn until one replies with its composite state."""
-        self._forget_capture(room)
-        await _pace_sleep(MANUAL_CAPTURE_DELAY_S)
-        for bulb in bulbs[:MANUAL_CAPTURE_TRIES]:
-            if self._closed or self._modes.mode_of(room) != HELD_MANUAL:
-                break
-            if self._modes.look_of(room) is not None:
-                break
-            if bulb not in self._bulb_unsubs:
-                unsub = await mqtt.async_subscribe(
-                    self.hass, f"{self._z2m_base}/{bulb}", self._handle_bulb_state
+        ended = await self._end_dim(base)  # a release that never arrived
+        target = DIM_FLOOR if action.startswith("down") else BRIGHTNESS_MAX
+        clock = self._clock()
+        now = dt_util.utcnow()
+        dims: list[_Dim] = []
+        for source_key, topic, refs in self._dim_groups(base):
+            shown = (
+                ended.get(topic)
+                or self._shown(topic)
+                or self._room_glide_target(source_key)
+            )
+            if shown is None or "brightness" not in shown:
+                continue
+            start = int(shown["brightness"])
+            span = abs(start - target)
+            if span < DIM_MIN_SPAN:
+                continue
+            duration = max(DIM_MIN_FADE_S, span / DIM_RATE)
+            dims.append(
+                _Dim(topic, refs, _strip(shown), start, target, duration, clock)
+            )
+            payload = cast("PushPayload", {**_strip(shown), "brightness": target})
+            self._interactive_send(
+                topic, payload, transition=round(duration, 2), origin_at=clock
+            )
+        for dim in dims:
+            for ref in dim.refs:
+                await self._modes.set_held(
+                    ref,
+                    kind=HELD_MANUAL,
+                    armed_at=now,
+                    expires_at=self._next_midnight(now),
                 )
-                if self._closed:
-                    unsub()  # unloaded while subscribing
-                    return
-                self._bulb_unsubs[bulb] = unsub
-            self._capture_room[bulb] = room
-            self._capture_asked[bulb] = self._clock()
-            await mqtt.async_publish(
-                self.hass, f"{self._z2m_base}/{bulb}/get", json.dumps({"state": ""})
-            )
-            await _pace_sleep(MANUAL_CAPTURE_REPLY_S)
-        self._forget_capture(room)
-        self._capture_started.pop(room, None)
-        if (
-            self._modes.mode_of(room) == HELD_MANUAL
-            and self._modes.look_of(room) is None
-        ):
-            _LOGGER.warning(
-                "could not read the dimmed level for %s; it stays per-room", room
-            )
+        if dims:
+            self._dims[base] = dims
+        self._publish_snapshot()
 
-    def _forget_capture(self, room: str) -> None:
-        """Drop every unanswered ``/get`` for ``room`` (no stale reply later)."""
-        for bulb in [b for b, r in self._capture_room.items() if r == room]:
-            self._capture_room.pop(bulb, None)
-            self._capture_asked.pop(bulb, None)
+    async def _end_dim(self, base: str) -> dict[str, PushPayload]:
+        """Stop each fade where it is (paddle released) and hold that level.
 
-    async def _handle_bulb_state(self, msg: mqtt.ReceiveMessage) -> None:
-        """Turn the reply to our ``/get`` into the room's persisted manual look.
-
-        Only a message that arrives after the ``/get`` was published counts, so a
-        cached or mid-dim report cannot become the look (review item 7).
+        Returns what each stopped topic now shows.
         """
-        bulb = msg.topic.removeprefix(f"{self._z2m_base}/")
-        room = self._capture_room.get(bulb)
-        asked = self._capture_asked.get(bulb)
-        data = _parse_json(str(msg.payload))
-        if room is None or asked is None or data is None:
-            return
-        if not isinstance(data.get("philips_raw"), str) or self._clock() < asked:
-            return
-        self._capture_room.pop(bulb, None)
-        self._capture_asked.pop(bulb, None)
-        if self._modes.mode_of(room) != HELD_MANUAL:
-            return
-        try:
-            frame = hue_frame.decode_hex(data["philips_raw"])
-        except ValueError:
-            return
-        look = _frame_to_payload(frame)
-        if look is None:
-            return
-        await self._modes.set_look(room, dict(look))
-        _LOGGER.debug("manual look for %s captured from %s: %s", room, bulb, look)
+        stopped: dict[str, PushPayload] = {}
+        dims = self._dims.pop(base, None)
+        if not dims:
+            return stopped
+        clock = self._clock()
+        for dim in dims:
+            held = [r for r in dim.refs if self._modes.mode_of(r) == HELD_MANUAL]
+            if not held:
+                continue  # a tap released the lights meanwhile
+            level = dim.level_at(clock + DIM_LEAD_S)
+            look = cast("PushPayload", {**dim.colour, "brightness": level})
+            stopped[dim.topic] = look
+            self._interactive_send(
+                dim.topic, look, transition=DIM_STOP_TRANSITION_S, origin_at=clock
+            )
+            for ref in held:
+                await self._modes.set_look(ref, dict(look))
+        self._publish_snapshot()
+        return stopped
 
-    def _room_bulbs(self, room: str) -> list[str]:
-        """Bulb names in ``room``: its device topic, or its group's members."""
-        topic = self._room_topic(room)
-        if topic is None:
-            return []
-        name = topic.removeprefix(f"{self._z2m_base}/").removesuffix("/set")
-        members = self._group_members.get(name)
-        if members is None:
-            return [name]  # the room is addressed by its device topic
-        return [self._device_names[i] for i in members if self._device_names.get(i)]
+    def _dim_pending(self, room: str) -> bool:
+        """Return True while a held paddle is fading ``room``."""
+        clock = self._clock()
+        return any(
+            room in dim.refs and clock - dim.began < DIM_TIMEOUT_S
+            for dims in self._dims.values()
+            for dim in dims
+        )
 
-    def _capture_restored_manual_holds(self) -> None:
-        """At startup, read the level of manual holds restored without a look.
-
-        Waits for both ``bridge/groups`` and ``bridge/devices``: without the
-        group list a group name would be mistaken for a bulb.
-        """
-        if not (self._groups_loaded and self._devices_loaded):
-            return
-        for room in self._modes.held_rooms():
-            if (
-                self._modes.mode_of(room) == HELD_MANUAL
-                and self._modes.look_of(room) is None
-                and room not in self._capture_started
-            ):
-                self._schedule_manual_capture(room)
+    async def _finish_stale_dims(self) -> None:
+        """End fades whose release never arrived (they have reached their end)."""
+        clock = self._clock()
+        for base, dims in list(self._dims.items()):
+            if any(clock - dim.began >= DIM_TIMEOUT_S for dim in dims):
+                await self._end_dim(base)
 
     # --- Z2M feedback (A2) --------------------------------------------------
 
@@ -1937,38 +1957,18 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
             self._enqueue_source(key, force=True)
 
     async def _handle_bridge_groups(self, msg: mqtt.ReceiveMessage) -> None:
-        """Learn which topics are groups (broadcasts) and their members."""
+        """Learn which topics are groups (broadcasts)."""
         try:
             groups = json.loads(str(msg.payload))
         except json.JSONDecodeError, ValueError:
             return
         if not isinstance(groups, list):
             return
-        members: dict[str, list[str]] = {}
-        for group in groups:
-            if isinstance(group, dict) and "friendly_name" in group:
-                members[group["friendly_name"]] = [
-                    m.get("ieee_address", "") for m in group.get("members", [])
-                ]
-        self._group_members = members
-        self._group_topics = {set_topic_for(self._z2m_base, name) for name in members}
-        self._groups_loaded = True
-        self._capture_restored_manual_holds()
-
-    async def _handle_bridge_devices(self, msg: mqtt.ReceiveMessage) -> None:
-        """IEEE → friendly name (manual-hold capture addresses a member bulb)."""
-        try:
-            devices = json.loads(str(msg.payload))
-        except json.JSONDecodeError, ValueError:
-            return
-        if isinstance(devices, list):
-            self._device_names = {
-                d["ieee_address"]: d.get("friendly_name", "")
-                for d in devices
-                if isinstance(d, dict) and "ieee_address" in d
-            }
-            self._devices_loaded = True
-            self._capture_restored_manual_holds()
+        self._group_topics = {
+            set_topic_for(self._z2m_base, group["friendly_name"])
+            for group in groups
+            if isinstance(group, dict) and "friendly_name" in group
+        }
 
     def _is_group(self, topic: str) -> bool:
         """Return True for group (broadcast) topics; all of them until groups load."""
@@ -2096,18 +2096,6 @@ def interactive_transition(last: PushPayload | None, new: PushPayload) -> float:
         d_mired = INTERACTIVE_MODE_CHANGE_MIRED
     seconds = INTERACTIVE_TRANSITION_MIN_S + 0.02 * d_pct + 0.004 * d_mired
     return round(min(INTERACTIVE_TRANSITION_MAX_S, seconds), 2)
-
-
-def _frame_to_payload(frame: hue_frame.HueFrame) -> PushPayload | None:
-    """Convert a captured bulb state into a look payload."""
-    if frame.brightness is None:
-        return None
-    payload: dict[str, Any] = {"brightness": frame.brightness}
-    if frame.mirek is not None:
-        payload["color_temp"] = frame.mirek
-    elif frame.xy is not None:
-        payload["color"] = {"x": frame.xy[0], "y": frame.xy[1]}
-    return cast("PushPayload", payload)
 
 
 def _parse_json(payload: str) -> dict[str, Any] | None:

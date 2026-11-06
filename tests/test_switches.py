@@ -189,7 +189,7 @@ async def test_room_switch_config_tap_holds_the_room_on_its_source_topic(
     assert hall.diagnostics["addressing"]["hallway_up"]["mode"] == "held"
 
 
-async def test_room_switch_ignores_held_dims_and_unknown_taps(
+async def test_room_switch_ignores_unknown_taps_and_holds_while_off(
     hass: HomeAssistant, hall: LightManCoordinator, mqtt_mock: Any
 ) -> None:
     for action in ("up_held", "up_release", "down_double"):
@@ -197,6 +197,27 @@ async def test_room_switch_ignores_held_dims_and_unknown_taps(
     assert hall._modes.held_rooms() == set()
     assert hall._modes.overrides() == {}
     assert published(mqtt_mock) == {}
+
+
+async def test_room_switch_hold_dims_the_whole_curve_and_holds_every_light(
+    hass: HomeAssistant, hall: LightManCoordinator, mqtt_mock: Any, clock: FakeClock
+) -> None:
+    await _send(hass, hall, MMWAVE_EAST, {"state": "ON"})
+    start = hall._shown(HALL_UP)
+    assert start is not None
+    mqtt_mock.async_publish.reset_mock()
+    await _send(hass, hall, MMWAVE_EAST, {"action": "down_held"})
+    pubs = published(mqtt_mock)
+    assert pubs[HALL_UP]["brightness"] == 3  # one fade on the curve's own group
+    assert HALL_CENTER_SET not in pubs
+    assert hall._modes.held_rooms() == {"hall.up_main", "hall.center"}
+    clock.advance(0.5)
+    await _send(hass, hall, MMWAVE_EAST, {"action": "down_release"})
+    look = hall._modes.look_of("hall.center")
+    assert look is not None
+    assert 3 < look["brightness"] < start["brightness"]
+    assert hall._modes.look_of("hall.up_main") == look
+    assert published(mqtt_mock)[HALL_UP]["brightness"] == look["brightness"]
 
 
 def test_plan_source_sends_a_uniform_whole_source_hold_on_the_group() -> None:

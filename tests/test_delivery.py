@@ -1,8 +1,7 @@
-"""0.8.0 delivery: Z2M feedback, outage replay, manual-hold capture, stagger, guards."""
+"""Delivery: Z2M feedback, outage replay, held-paddle dimming, stagger, guards."""
 
 from __future__ import annotations
 
-import asyncio
 import itertools
 import json
 import logging
@@ -13,12 +12,13 @@ from unittest.mock import patch
 from homeassistant.util import dt as dt_util
 from pytest_homeassistant_custom_component.common import async_fire_mqtt_message
 
-from custom_components.light_man import hue_frame
-from custom_components.light_man.const import MANUAL_CAPTURE_REPLY_S
-from custom_components.light_man.coordinator import (
-    _frame_to_payload,
-    interactive_transition,
+from custom_components.light_man.const import (
+    DIM_FLOOR,
+    DIM_LEAD_S,
+    DIM_RATE,
+    DIM_STOP_TRANSITION_S,
 )
+from custom_components.light_man.coordinator import _Dim, interactive_transition
 from custom_components.light_man.publisher import (
     PRIORITY_INTERACTIVE,
     PRIORITY_TICK,
@@ -28,6 +28,8 @@ from custom_components.light_man.publisher import (
 from .conftest import KIT_SET, LR_SET, LR_SWITCH, OVERHEAD_ALL, published, tick
 
 if TYPE_CHECKING:
+    import asyncio
+
     import pytest
     from homeassistant.core import HomeAssistant
 
@@ -62,7 +64,7 @@ async def _enabled(hass: HomeAssistant, coordinator: Coord, mqtt_mock: Any) -> N
     mqtt_mock.async_publish.reset_mock()
 
 
-# --- bridge/groups + bridge/devices ----------------------------------------
+# --- bridge/groups ----------------------------------------------------------
 
 
 async def test_group_topics_learned_from_bridge_groups(
@@ -84,19 +86,6 @@ async def test_group_topics_learned_from_bridge_groups(
     _fire(hass, "zigbee2mqtt/bridge/groups", {"not": "a list"})
     await hass.async_block_till_done()
     assert coordinator._is_group(LR_SET)  # unchanged by bad payloads
-
-
-async def test_device_names_learned_from_bridge_devices(
-    hass: HomeAssistant, coordinator: Coord
-) -> None:
-    _fire(
-        hass,
-        "zigbee2mqtt/bridge/devices",
-        [{"ieee_address": "0x1", "friendly_name": "LR Bulb 1"}, "junk", {"x": 1}],
-    )
-    _fire(hass, "zigbee2mqtt/bridge/devices", "not json")
-    await hass.async_block_till_done()
-    assert coordinator._device_names == {"0x1": "LR Bulb 1"}
 
 
 # --- bridge/logging feedback ----------------------------------------------
@@ -300,184 +289,6 @@ async def test_slow_publish_is_logged(
     assert "took 11 s" in caplog.text
 
 
-# --- manual holds -------------------------------------------------------------
-
-
-async def test_manual_hold_captures_the_dimmed_level_and_reasserts_it(
-    hass: HomeAssistant, coordinator: Coord, mqtt_mock: Any, clock: FakeClock
-) -> None:
-    await _enabled(hass, coordinator, mqtt_mock)
-    _fire(
-        hass,
-        "zigbee2mqtt/bridge/groups",
-        [{"friendly_name": "zgb_living_room", "members": [{"ieee_address": "0x1"}]}],
-    )
-    _fire(
-        hass,
-        "zigbee2mqtt/bridge/devices",
-        [{"ieee_address": "0x1", "friendly_name": "LR Bulb"}],
-    )
-    _fire(hass, LR_SWITCH, {"action": "up_held"})
-    await hass.async_block_till_done()
-    assert coordinator.data["held"]["living_room.overhead"]["mode"] == "manual"
-    assert published(mqtt_mock) == {}  # the binding moves the bulbs, not Light Man
-
-    # Before the level is known the source is addressed per-room, room untouched.
-    coordinator._invalidate_source("overhead")
-    await tick(hass, coordinator, clock)
-    assert LR_SET not in published(mqtt_mock)
-    assert KIT_SET in published(mqtt_mock)
-
-    _fire(hass, LR_SWITCH, {"action": "up_release"})
-    await hass.async_block_till_done()
-    gets = [c.args[0] for c in mqtt_mock.async_publish.call_args_list]
-    assert "zigbee2mqtt/LR Bulb/get" in gets
-    frame = hue_frame.encode(hue_frame.HueFrame(on=True, brightness=90, mirek=400))
-    _fire(hass, "zigbee2mqtt/LR Bulb", {"philips_raw": frame.hex()})
-    await hass.async_block_till_done()
-    assert coordinator._modes.look_of("living_room.overhead") == {
-        "brightness": 90,
-        "color_temp": 400,
-    }
-    mqtt_mock.async_publish.reset_mock()
-    await coordinator.async_force_push()
-    await hass.async_block_till_done()
-    pubs = published(mqtt_mock)
-    assert pubs[LR_SET] == {"brightness": 90, "color_temp": 400, "transition": 0.4}
-    assert OVERHEAD_ALL in pubs
-
-
-async def test_manual_capture_guards(
-    hass: HomeAssistant, coordinator: Coord, mqtt_mock: Any, clock: FakeClock
-) -> None:
-    await _enabled(hass, coordinator, mqtt_mock)
-    # Release while not manually held: nothing scheduled.
-    _fire(hass, LR_SWITCH, {"action": "down_release"})
-    await hass.async_block_till_done()
-    assert coordinator._capture_started == {}
-    # A room whose group members are unknown cannot be read.
-    _fire(
-        hass,
-        "zigbee2mqtt/bridge/groups",
-        [{"friendly_name": "zgb_living_room", "members": [{"ieee_address": "0x9"}]}],
-    )
-    await coordinator.async_hold("living_room.overhead", "manual")
-    await hass.async_block_till_done()
-    coordinator._schedule_manual_capture("living_room.overhead")
-    assert coordinator._capture_started == {}
-    assert coordinator._room_bulbs("ghost.room") == []
-    # Messages before our /get, malformed ones, or without brightness are ignored.
-    coordinator._capture_room["Lone Bulb"] = "living_room.overhead"
-    coordinator._capture_asked["Lone Bulb"] = clock.now + 5  # /get not yet sent
-    good = hue_frame.encode(hue_frame.HueFrame(brightness=10)).hex()
-    await coordinator._handle_bulb_state(
-        _msg("zigbee2mqtt/Lone Bulb", {"philips_raw": good})
-    )
-    assert coordinator._modes.look_of("living_room.overhead") is None
-    coordinator._capture_asked["Lone Bulb"] = clock.now
-    for payload in ({"no": "raw"}, {"philips_raw": "zz"}, {"philips_raw": "010001"}):
-        coordinator._capture_room["Lone Bulb"] = "living_room.overhead"
-        coordinator._capture_asked["Lone Bulb"] = clock.now
-        await coordinator._handle_bulb_state(_msg("zigbee2mqtt/Lone Bulb", payload))
-    assert coordinator._modes.look_of("living_room.overhead") is None
-    # Once the room is no longer manual, a late reply is dropped.
-    await coordinator.async_release_hold("living_room.overhead")
-    coordinator._capture_room["Lone Bulb"] = "living_room.overhead"
-    coordinator._capture_asked["Lone Bulb"] = clock.now
-    await coordinator._handle_bulb_state(
-        _msg("zigbee2mqtt/Lone Bulb", {"philips_raw": good})
-    )
-    assert coordinator._capture_room == {}
-
-
-async def test_restored_manual_hold_is_read_at_startup_and_defers_its_source(
-    hass: HomeAssistant, coordinator: Coord, mqtt_mock: Any, clock: FakeClock
-) -> None:
-    """Review item 6: a manual hold restored without a look is read, not fanned out."""
-    replied = asyncio.Event()
-
-    async def gated_sleep(seconds: float) -> None:
-        if seconds == MANUAL_CAPTURE_REPLY_S:
-            await replied.wait()  # the bulb's reply lands inside the 3 s wait
-        else:
-            await clock.sleep(seconds)
-
-    patcher = patch("custom_components.light_man.coordinator._pace_sleep", gated_sleep)
-    patcher.start()
-    await coordinator._modes.set_held(
-        "living_room.overhead",
-        kind="manual",
-        armed_at=dt_util.utcnow(),
-        expires_at=dt_util.utcnow() + timedelta(hours=4),
-    )
-    _fire(
-        hass,
-        "zigbee2mqtt/bridge/groups",
-        [{"friendly_name": "zgb_living_room", "members": [{"ieee_address": "0x1"}]}],
-    )
-    _fire(
-        hass,
-        "zigbee2mqtt/bridge/devices",
-        [{"ieee_address": "0x1", "friendly_name": "LR Bulb"}],
-    )
-    await hass.async_block_till_done()
-    assert "living_room.overhead" in coordinator._capture_started
-    await coordinator.async_set_push_enabled(enabled=True)
-    await hass.async_block_till_done()
-    pubs = published(mqtt_mock)
-    assert OVERHEAD_ALL not in pubs  # deferred while the level is read
-    assert LR_SET not in pubs
-    gets = [c.args[0] for c in mqtt_mock.async_publish.call_args_list]
-    assert "zigbee2mqtt/LR Bulb/get" in gets
-    frame = hue_frame.encode(hue_frame.HueFrame(on=True, brightness=40, mirek=420))
-    _fire(hass, "zigbee2mqtt/LR Bulb", {"philips_raw": frame.hex()})
-    await hass.async_block_till_done()
-    replied.set()
-    patcher.stop()
-    assert coordinator._modes.look_of("living_room.overhead") == {
-        "brightness": 40,
-        "color_temp": 420,
-    }
-
-
-async def test_capture_gives_up_after_its_tries(
-    hass: HomeAssistant,
-    coordinator: Coord,
-    mqtt_mock: Any,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    await coordinator.async_hold("living_room.overhead", "manual")
-    await hass.async_block_till_done()
-    _fire(
-        hass,
-        "zigbee2mqtt/bridge/groups",
-        [{"friendly_name": "zgb_living_room", "members": [{"ieee_address": "0x1"}]}],
-    )
-    _fire(
-        hass,
-        "zigbee2mqtt/bridge/devices",
-        [{"ieee_address": "0x1", "friendly_name": "Silent Bulb"}],
-    )
-    await hass.async_block_till_done(wait_background_tasks=True)
-    assert "could not read the dimmed level" in caplog.text
-    assert not coordinator._capture_pending("living_room.overhead")
-
-
-class _Msg:
-    def __init__(self, topic: str, payload: Any) -> None:
-        self.topic = topic
-        self.payload = json.dumps(payload)
-
-
-def _msg(topic: str, payload: Any) -> Any:
-    return _Msg(topic, payload)
-
-
-async def test_device_topic_room_reads_its_own_bulb(coordinator: Coord) -> None:
-    coordinator._group_members = {}
-    assert coordinator._room_bulbs("living_room.overhead") == ["zgb_living_room"]
-
-
 # --- engine guards, stagger, helpers ----------------------------------------
 
 
@@ -549,25 +360,6 @@ def test_interactive_transition_scales_with_the_change() -> None:
     assert mode_change == 0.8
 
 
-def test_frame_to_payload() -> None:
-    assert _frame_to_payload(hue_frame.HueFrame(on=True)) is None
-    assert _frame_to_payload(hue_frame.HueFrame(brightness=5, xy=(0.3, 0.2))) == {
-        "brightness": 5,
-        "color": {"x": 0.3, "y": 0.2},
-    }
-    assert _frame_to_payload(hue_frame.HueFrame(brightness=5)) == {"brightness": 5}
-
-
-async def test_bulb_report_without_a_pending_capture_is_ignored(
-    coordinator: Coord,
-) -> None:
-    frame = hue_frame.encode(hue_frame.HueFrame(brightness=10))
-    await coordinator._handle_bulb_state(
-        _msg("zigbee2mqtt/Unasked Bulb", {"philips_raw": frame.hex()})
-    )
-    assert coordinator._capture_room == {}
-
-
 async def test_stagger_spreads_sources_over_the_interval(
     hass: HomeAssistant, coordinator: Coord, mqtt_mock: Any, clock: FakeClock
 ) -> None:
@@ -594,21 +386,6 @@ async def test_stagger_spreads_sources_over_the_interval(
 
 
 # --- review-fix coverage ------------------------------------------------------
-
-
-async def test_unload_tears_down_bulb_subscriptions_and_stops_sending(
-    hass: HomeAssistant, coordinator: Coord, mqtt_mock: Any
-) -> None:
-    calls: list[str] = []
-    coordinator._bulb_unsubs["LR Bulb"] = lambda: calls.append("unsub")
-    coordinator.shutdown_subscriptions()
-    assert calls == ["unsub"]
-    assert coordinator._bulb_unsubs == {}
-    mqtt_mock.async_publish.reset_mock()
-    coordinator._enqueue([Send(LR_SET, {"brightness": 1})], priority=PRIORITY_TICK)
-    await coordinator._resend(LR_SET)
-    await hass.async_block_till_done()
-    assert published(mqtt_mock) == {}
 
 
 async def test_per_room_fallback_is_split_into_budget_sized_units(
@@ -684,21 +461,6 @@ async def test_resend_after_unload_is_dropped(
     ):
         await coordinator._resend(LR_SET)
     assert published(mqtt_mock) == {}
-
-
-async def test_capture_stops_when_the_hold_ends_or_a_look_arrives(
-    hass: HomeAssistant, coordinator: Coord, mqtt_mock: Any
-) -> None:
-    await coordinator.async_hold("living_room.overhead", "manual")
-    await coordinator._modes.set_look("living_room.overhead", {"brightness": 5})
-    mqtt_mock.async_publish.reset_mock()
-    await coordinator._capture_manual_look("living_room.overhead", ["A", "B"])
-    assert published(mqtt_mock) == {}  # a look already exists: nothing asked
-    await coordinator.async_release_hold("living_room.overhead")
-    await coordinator._capture_manual_look("living_room.overhead", ["A"])
-    gets = [c.args[0] for c in mqtt_mock.async_publish.call_args_list]
-    assert "zigbee2mqtt/A/get" not in gets
-    assert await coordinator._modes.set_look("ghost", {"brightness": 1}) is False
 
 
 # --- gate re-review (N1-N7) ---------------------------------------------------
@@ -777,43 +539,6 @@ async def test_busy_replans_of_a_flood_are_capped_per_interval(
     assert len(sends) == 2
 
 
-async def test_restored_capture_waits_for_the_group_list(
-    hass: HomeAssistant, coordinator: Coord
-) -> None:
-    """N6: bridge/devices before bridge/groups does not start a capture yet."""
-    await coordinator._modes.set_held(
-        "living_room.overhead",
-        kind="manual",
-        armed_at=dt_util.utcnow(),
-        expires_at=dt_util.utcnow() + timedelta(hours=4),
-    )
-    _fire(
-        hass,
-        "zigbee2mqtt/bridge/devices",
-        [{"ieee_address": "0x1", "friendly_name": "LR Bulb"}],
-    )
-    await hass.async_block_till_done()
-    assert "living_room.overhead" not in coordinator._capture_started
-    _fire(
-        hass,
-        "zigbee2mqtt/bridge/groups",
-        [{"friendly_name": "zgb_living_room", "members": [{"ieee_address": "0x1"}]}],
-    )
-    await hass.async_block_till_done()
-    assert "living_room.overhead" in coordinator._capture_started
-
-
-async def test_unanswered_gets_are_forgotten(coordinator: Coord) -> None:
-    """N7: a bulb that never answered cannot supply a look later."""
-    coordinator._capture_room["Slow Bulb"] = "living_room.overhead"
-    coordinator._capture_asked["Slow Bulb"] = 0.0
-    coordinator._capture_room["Other Bulb"] = "kitchen.overhead"
-    coordinator._forget_capture("living_room.overhead")
-    assert "Slow Bulb" not in coordinator._capture_room
-    assert "Slow Bulb" not in coordinator._capture_asked
-    assert coordinator._capture_room == {"Other Bulb": "kitchen.overhead"}
-
-
 # --- 0.8.1 ------------------------------------------------------------------
 
 
@@ -858,63 +583,6 @@ async def test_state_updates_do_not_postpone_the_tick_timer(
         await hass.async_block_till_done()
     reschedule.assert_not_called()
     assert coordinator.data["held"] == {}
-
-
-async def test_a_newer_capture_cancels_the_older_one(
-    hass: HomeAssistant, coordinator: Coord, mqtt_mock: Any
-) -> None:
-    gate = asyncio.Event()
-
-    async def blocked(_seconds: float) -> None:
-        await gate.wait()
-
-    _fire(
-        hass,
-        "zigbee2mqtt/bridge/groups",
-        [{"friendly_name": "zgb_living_room", "members": [{"ieee_address": "0x1"}]}],
-    )
-    _fire(
-        hass,
-        "zigbee2mqtt/bridge/devices",
-        [{"ieee_address": "0x1", "friendly_name": "LR Bulb"}],
-    )
-    await hass.async_block_till_done()
-    with patch("custom_components.light_man.coordinator._pace_sleep", blocked):
-        coordinator._schedule_manual_capture("living_room.overhead")
-        first = coordinator._capture_tasks["living_room.overhead"]
-        coordinator._schedule_manual_capture("living_room.overhead")
-        second = coordinator._capture_tasks["living_room.overhead"]
-        await asyncio.sleep(0)
-        assert first.cancelled() or first.cancelling()
-        assert second is not first
-        coordinator.shutdown_subscriptions()  # unload cancels the running one
-        await asyncio.sleep(0)
-        assert second.cancelled() or second.cancelling()
-        assert coordinator._capture_tasks == {}
-        gate.set()
-
-
-async def test_capture_unloaded_while_subscribing_drops_its_subscription(
-    hass: HomeAssistant, coordinator: Coord
-) -> None:
-    calls: list[str] = []
-
-    async def subscribe(*_a: Any, **_k: Any) -> Any:
-        coordinator._closed = True  # unload lands during the subscribe
-        return lambda: calls.append("unsub")
-
-    await coordinator._modes.set_held(
-        "living_room.overhead",
-        kind="manual",
-        armed_at=dt_util.utcnow(),
-        expires_at=dt_util.utcnow() + timedelta(hours=4),
-    )
-    with patch(
-        "custom_components.light_man.coordinator.mqtt.async_subscribe", subscribe
-    ):
-        await coordinator._capture_manual_look("living_room.overhead", ["LR Bulb"])
-    assert calls == ["unsub"]
-    assert "LR Bulb" not in coordinator._bulb_unsubs
 
 
 async def test_an_older_unit_does_not_clear_a_newer_force(
@@ -1026,3 +694,189 @@ async def test_stale_off_right_after_an_up_tap_is_ignored(
     _fire(hass, LR_SWITCH, {"state": "OFF"})
     await hass.async_block_till_done()
     assert published(mqtt_mock)[LR_SET]["state"] == "OFF"
+
+
+# --- held-paddle dimming ------------------------------------------------------
+
+LR = "living_room.overhead"
+LR_COLOUR = {"color_temp": 300}
+
+
+async def _lit_at(
+    hass: HomeAssistant,
+    coordinator: Coord,
+    mqtt_mock: Any,
+    clock: FakeClock,
+    level: int,
+) -> None:
+    """Living room on, showing ``level``; nothing published yet."""
+    await _enabled(hass, coordinator, mqtt_mock)
+    _fire(hass, LR_SWITCH, {"state": "ON"})
+    await hass.async_block_till_done()
+    coordinator._last_published[LR_SET] = {"brightness": level, **LR_COLOUR}  # type: ignore[typeddict-item]
+    coordinator._marked_at[LR_SET] = clock.now
+    mqtt_mock.async_publish.reset_mock()
+
+
+async def _action(hass: HomeAssistant, action: str) -> None:
+    _fire(hass, LR_SWITCH, {"action": action})
+    await hass.async_block_till_done()
+
+
+async def test_held_paddle_fades_and_the_release_holds_the_level(
+    hass: HomeAssistant, coordinator: Coord, mqtt_mock: Any, clock: FakeClock
+) -> None:
+    await _lit_at(hass, coordinator, mqtt_mock, clock, 183)
+    held_at = clock.now
+    await _action(hass, "down_held")
+    duration = (183 - DIM_FLOOR) / DIM_RATE  # 2.0 s
+    assert published(mqtt_mock)[LR_SET] == {
+        "brightness": DIM_FLOOR,
+        **LR_COLOUR,
+        "transition": duration,
+    }
+    assert coordinator.data["held"][LR]["mode"] == "manual"
+    assert coordinator._modes.look_of(LR) is None
+    assert coordinator._dim_pending(LR)
+
+    # While the paddle is held the source's flood waits.
+    mqtt_mock.async_publish.reset_mock()
+    await coordinator.async_force_push()
+    await hass.async_block_till_done()
+    assert OVERHEAD_ALL not in published(mqtt_mock)
+    assert coordinator.diagnostics["addressing"]["overhead"]["mode"] == "deferred"
+    await coordinator._finish_stale_dims()  # not stale yet
+    assert coordinator._dim_pending(LR)
+
+    clock.advance(0.5)
+    mqtt_mock.async_publish.reset_mock()
+    done = (clock.now - held_at + DIM_LEAD_S) / duration
+    assert 0.3 < done < 1.0  # released part-way down
+    level = round(183 + (DIM_FLOOR - 183) * done)
+    await _action(hass, "down_release")
+    look = {"brightness": level, **LR_COLOUR}
+    assert published(mqtt_mock)[LR_SET] == {
+        **look,
+        "transition": DIM_STOP_TRANSITION_S,
+    }
+    assert coordinator._modes.look_of(LR) == look
+    assert not coordinator._dim_pending(LR)
+
+    # The level is held: every flood is followed by its re-assert.
+    mqtt_mock.async_publish.reset_mock()
+    await coordinator.async_force_push()
+    await hass.async_block_till_done()
+    pubs = published(mqtt_mock)
+    assert pubs[LR_SET] == {**look, "transition": 0.4}
+    assert OVERHEAD_ALL in pubs
+
+
+async def test_hold_up_runs_to_the_ceiling_and_a_new_hold_starts_from_the_level(
+    hass: HomeAssistant, coordinator: Coord, mqtt_mock: Any, clock: FakeClock
+) -> None:
+    await _lit_at(hass, coordinator, mqtt_mock, clock, 164)
+    await _action(hass, "up_held")
+    assert published(mqtt_mock)[LR_SET]["brightness"] == 254
+    assert published(mqtt_mock)[LR_SET]["transition"] == 1.0
+    clock.advance(5.0)  # held past the end of the fade
+    await _action(hass, "up_release")
+    assert coordinator._modes.look_of(LR) == {"brightness": 254, **LR_COLOUR}
+
+    # A second hold with no release in between ends the first one where it is.
+    held_at = clock.now
+    await _action(hass, "down_held")
+    clock.advance(1.0)
+    done = (clock.now - held_at + DIM_LEAD_S) / (251 / DIM_RATE)
+    assert done < 1.0
+    first_stop = round(254 + (DIM_FLOOR - 254) * done)
+    await _action(hass, "down_held")
+    fade = published(mqtt_mock)[LR_SET]
+    assert fade["brightness"] == DIM_FLOOR
+    assert fade["transition"] == round((first_stop - DIM_FLOOR) / DIM_RATE, 2)
+
+
+async def test_held_paddle_guards(
+    hass: HomeAssistant, coordinator: Coord, mqtt_mock: Any, clock: FakeClock
+) -> None:
+    await _enabled(hass, coordinator, mqtt_mock)
+    await _action(hass, "down_held")  # the switch is not known to be on
+    await _action(hass, "down_release")  # no fade to stop
+    assert published(mqtt_mock) == {}
+    assert not coordinator._modes.is_held(LR)
+
+    await _lit_at(hass, coordinator, mqtt_mock, clock, DIM_FLOOR)
+    await _action(hass, "down_held")  # already at the floor
+    assert published(mqtt_mock) == {}
+    assert not coordinator._modes.is_held(LR)
+
+    with (
+        patch.object(coordinator, "_shown", return_value=None),
+        patch.object(coordinator, "_room_glide_target", return_value=None),
+    ):
+        await _action(hass, "up_held")  # nothing known about the room's level
+    assert published(mqtt_mock) == {}
+    assert not coordinator._modes.is_held(LR)
+
+
+async def test_a_tap_or_a_release_service_during_a_hold_ends_the_dim(
+    hass: HomeAssistant, coordinator: Coord, mqtt_mock: Any, clock: FakeClock
+) -> None:
+    await _lit_at(hass, coordinator, mqtt_mock, clock, 183)
+    await _action(hass, "down_held")
+    await _action(hass, "up_single")  # back to the curve
+    assert not coordinator._modes.is_held(LR)
+    assert coordinator._dims == {}
+
+    coordinator._last_published[LR_SET] = {"brightness": 183, **LR_COLOUR}  # type: ignore[typeddict-item]
+    coordinator._marked_at[LR_SET] = clock.now
+    await _action(hass, "down_held")
+    await coordinator.async_release_hold(LR)
+    await hass.async_block_till_done()
+    mqtt_mock.async_publish.reset_mock()
+    await _action(hass, "down_release")  # the lights are no longer held
+    assert published(mqtt_mock) == {}
+    assert not coordinator._modes.is_held(LR)
+
+
+async def test_a_lost_release_holds_the_end_of_the_fade(
+    hass: HomeAssistant, coordinator: Coord, mqtt_mock: Any, clock: FakeClock
+) -> None:
+    await _lit_at(hass, coordinator, mqtt_mock, clock, 183)
+    await _action(hass, "down_held")
+    await tick(hass, coordinator, clock)
+    assert coordinator._dims == {}
+    assert coordinator._modes.look_of(LR) == {"brightness": DIM_FLOOR, **LR_COLOUR}
+
+
+def test_a_fade_is_linear_and_stays_inside_its_ends() -> None:
+    dim = _Dim("t/set", ["r"], {"color_temp": 300}, 183, 3, 2.0, 100.0)
+    assert dim.level_at(99.0) == 183  # before it began
+    assert dim.level_at(101.0) == 93
+    assert dim.level_at(109.0) == 3  # past its end
+
+
+async def test_a_manual_hold_without_a_level_is_left_alone_by_the_flood(
+    hass: HomeAssistant, coordinator: Coord, mqtt_mock: Any
+) -> None:
+    await _enabled(hass, coordinator, mqtt_mock)
+    now = dt_util.utcnow()
+    await coordinator._modes.set_held(
+        LR, kind="manual", armed_at=now, expires_at=now + timedelta(hours=1)
+    )
+    await coordinator.async_force_push()
+    await hass.async_block_till_done()
+    pubs = published(mqtt_mock)
+    assert LR_SET not in pubs  # addressed per room, the held room skipped
+    assert KIT_SET in pubs
+    assert coordinator._room_topic("no_such.light") is None
+
+
+async def test_unload_stops_sending(
+    hass: HomeAssistant, coordinator: Coord, mqtt_mock: Any
+) -> None:
+    coordinator.shutdown_subscriptions()
+    mqtt_mock.async_publish.reset_mock()
+    coordinator._enqueue([Send(LR_SET, {"brightness": 1})], priority=PRIORITY_TICK)
+    await coordinator._resend(LR_SET)
+    await hass.async_block_till_done()
+    assert published(mqtt_mock) == {}

@@ -306,7 +306,14 @@ step, tap and boot. 0.8.0 replaces it:
 
 - **Addressing:** the source's consolidated flood, then a re-assert of each held room's look, sent as one
   unit (verified live: a held bulb moves ≤ 1 point / 1 mired between the two frames because the flood is
-  a long glide). Per-room addressing remains only while a manual hold's level is still unknown.
+  a long glide). A source waits one tick while one of its rooms is being dimmed by a held paddle.
+- **Held-paddle dimming (0.8.8):** the switches' level binding (`genLevelCtrl` → the room's lights) is
+  removed; only on/off is bound. On `up_held`/`down_held` (switch on) Light Man fades the governed lights
+  toward 254 or 3 at 90 points/s; on the release it sends the level the fade has reached (computed from
+  the elapsed time, 0.2 s) and holds it as the room's `manual` look. No bulb is read. Why: with the level
+  binding the switch put the bulbs at its *own* level on release (measured 2026-11-06: bulbs landed on
+  the switch's reported level 5 of 5 times — a jump whenever the two differed), and the bulb read that
+  captured the level took Z2M's cached frame (wrong level stored 5 of 5 times).
 - **Pacing** (`publisher.py`): every send goes through one queue; tick traffic ≤ 6 and all traffic ≤ 8
   group sends per 10 s; interactive sends first; units contiguous.
 - **Glide + stagger:** each tick sends `target(t + interval)` with `transition = interval`, sources on
@@ -357,8 +364,9 @@ step, tap and boot. 0.8.0 replaces it:
   via the `multiColor` bitmask (write-only Philips cluster). Trust **brightness** reports for
   verification; color HA-state can be an optimistic echo. Mixed-bulb groups clamp HA color range to the
   narrowest member, but the MQTT path clamps per-bulb.
-- **Inovelli SBM binding:** the switch's bulb-control binding (`genOnOff` + `genLevelCtrl` → the room
-  group) lives on its dimming endpoint; `EP1` carries the reporting binding to the coordinator. (Live read
+- **Inovelli SBM binding:** the switch's bulb-control binding (`genOnOff` → the room group; the
+  `genLevelCtrl` binding to lights was removed 2026-11-06, see held-paddle dimming) lives on its dimming
+  endpoint; `EP1` carries the reporting binding to the coordinator. (Live read
   of the office VZM31: `EP2 → group 7` for control, `EP1 → coordinator` for reporting; the older note's
   "VZM31 binds from EP1" referred to the reporting endpoint.) `bindingOffToOnSyncLevel` is **Disabled** on
   all switches since v0.7.6 (it was Enabled under the old tick stack, where tap-on replayed a
