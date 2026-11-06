@@ -262,7 +262,7 @@ class LightManPanel extends HTMLElement {
         const switches = (room.switches || [])
           .map(
             (s) =>
-              `<tr><td class="mono">${short(s.topic)}</td><td>governs → ${esc(s.governs)}</td></tr>`,
+              `<tr><td class="mono">${short(s.topic)}</td><td>governs → ${esc([].concat(s.governs).join(", "))}</td></tr>`,
           )
           .join("");
         const sensors = Object.entries(room.sensors || {})

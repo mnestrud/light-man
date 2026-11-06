@@ -1,5 +1,5 @@
 {
-  "seed_version": 12,
+  "seed_version": 13,
   "push_interval_s": 120,
   "curves": {
     "daylight_standard": {
@@ -300,7 +300,17 @@
       "switches": [
         {
           "topic": "zigbee2mqtt/Primary Bath Front Smart Switch",
-          "governs": "primary_bath.overhead"
+          "governs": [
+            "primary_bath.overhead",
+            "primary_bath.under_vanity"
+          ]
+        },
+        {
+          "topic": "zigbee2mqtt/Primary Bath Toilet Smart Switch",
+          "governs": [
+            "primary_bath.overhead",
+            "primary_bath.under_vanity"
+          ]
         },
         {
           "topic": "zigbee2mqtt/Primary Bath Shower Smart Switch",
@@ -488,11 +498,13 @@
       "switches": [
         {
           "topic": "zigbee2mqtt/Hallway Light Switch East New New mmwave",
-          "governs": "hallway"
+          "governs": "hallway",
+          "bar_follows": "hallway.east_down"
         },
         {
           "topic": "zigbee2mqtt/Hall Smart Switch West New mmwave",
-          "governs": "hallway"
+          "governs": "hallway",
+          "bar_follows": "hallway.east_down"
         }
       ],
       "sensors": {

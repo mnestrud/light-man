@@ -77,7 +77,7 @@ progress** (Phase 3 — see `docs/DASHBOARD-PLAN.md`). For now the topology load
 | `sources.<group>.curve_ref` | the curve this source group follows |
 | `sources.<group>.transition_s` | optional per-group transition time (seconds; default 1.0) |
 | `rooms.<room>.lights[]` | a fixture `{id, set_topic, source}` — its curve = its source group's |
-| `rooms.<room>.switches[]` | an Inovelli switch `{topic, governs}` — the light group it holds |
+| `rooms.<room>.switches[]` | an Inovelli switch `{topic, governs, bar_follows?}` — the light group(s) it holds: a light ref, a list of light refs, or a room id; `bar_follows` names the light its LED bar shows (default the first) |
 | `rooms.<room>.sensors.<name>` | an mmwave sensor `{topic, occupancy_key}` mounted in the room |
 | `occupancy_zones.<zone>` | references room sensors, a per-sensor directional sweep, and off-lights |
 | `sleep` | global sleep-ramp timing (`ramp_in_s` / `ramp_out_s`) |

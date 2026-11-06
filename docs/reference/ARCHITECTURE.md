@@ -320,9 +320,15 @@ step, tap and boot. 0.8.0 replaces it:
   safe in any state. *Height:* when a switch reports itself **on** at a level ≥ 3 points from what its
   lights show, Light Man writes that level to the switch (`brightness`, 0.5 s) and ignores the switch's
   reports for 3 s. It is never written on a timer, during a held dim, or to a switch that still has a
-  level binding (read from `bridge/devices`; today only Primary Bath Front). Why the limits: a level
+  level binding (read from `bridge/devices`; none since 2026-11-06). Why the limits: a level
   written to an **off** switch turns the switch on without its lights, and the next paddle-on then does
   nothing (measured 2026-11-06, upstairs bath; `execute_if_off` was already true).
+- **Several lights, bound pairs (0.8.10):** a switch may govern a list of lights (both primary bath
+  switches: the overhead and the under-vanity strip); a tap, a hold or a config tap acts on each. The bar
+  shows the `bar_follows` light (hallway: the downlights). Two switches sharing a light (the primary bath
+  front + toilet pair, bound to each other on/off; the hallway pair) do not report a partner's held dim
+  or config tap, so after one Light Man sets the partner's bar height too — from the partner's last
+  report, only while that report has it on, under the same limits.
 - **Pacing** (`publisher.py`): every send goes through one queue; tick traffic ≤ 6 and all traffic ≤ 8
   group sends per 10 s; interactive sends first; units contiguous.
 - **Glide + stagger:** each tick sends `target(t + interval)` with `transition = interval`, sources on

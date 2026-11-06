@@ -230,8 +230,12 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         self.stored = validated.stored  # the data-model shape (read by the panel)
         self._modes = modes
         self._switch_map = validated.switch_map
+        # light-level switches: base -> every (source, ref) it governs
+        self._switch_lights = validated.switch_lights
         # room-level switches (the hallway pair): base -> (room, [(source, ref)])
         self._room_switches = validated.room_switch_map
+        self._bar_lights = validated.bar_lights  # base -> the light its bar follows
+        self._switch_height: dict[str, int] = {}  # base -> its last reported level
         self._on_since: dict[str, float] = {}  # switch -> when it last turned on
         self._expect_echo: dict[str, tuple[str, float]] = {}  # our switch writes
         self._override_timers: dict[str, Callable[[], None]] = {}
@@ -1012,12 +1016,15 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
 
     # --- LED bars (status for the switch's own room, animations, level) -----
 
+    def _governed(self, base: str) -> list[tuple[str, str]]:
+        """Return every (source, light ref) a switch governs."""
+        if base in self._room_switches:
+            return self._room_switches[base][1]
+        return self._switch_lights[base]
+
     def _bar_source(self, base: str) -> str:
         """Return the source whose curve a switch's bar follows."""
-        mapping = self._switch_map.get(base)
-        if mapping is not None:
-            return mapping[0]
-        return self._room_switches[base][1][0][0]
+        return self._bar_lights[base][0]
 
     def _bar_fraction(self, source_key: str) -> float | None:
         """Where the source's curve sits, 0 (dark) to 1 (its brightest), if known."""
@@ -1029,11 +1036,7 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
 
     def _bar_leds(self, base: str) -> dict[str, int | None]:
         """Status lights of a switch: a held look on top, the override below."""
-        mapping = self._switch_map.get(base)
-        if mapping is not None:
-            refs = [mapping[1]]
-        else:
-            refs = [ref for _source, ref in self._room_switches[base][1]]
+        refs = [ref for _source, ref in self._governed(base)]
         kinds = {self._modes.mode_of(ref) for ref in refs}
         top = next((c for kind, c in LOOK_COLORS.items() if kind in kinds), None)
         leds: dict[str, int | None] = {LED_TOP: top}
@@ -1063,8 +1066,10 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         return int(level) if level is not None else None
 
     def _lights_level(self, base: str) -> int | None:
-        """Return the level a switch's lights show (or are being sent to)."""
-        _source, topic, _refs = self._dim_groups(base)[0]
+        """Return the level a switch's bar light shows (or is being sent to)."""
+        bar_ref = self._bar_lights[base][1]
+        groups = self._dim_groups(base)
+        topic = next((t for _s, t, refs in groups if bar_ref in refs), groups[0][1])
         payload: Mapping[str, Any] | None = self._shown(topic)
         consolidated = self._topic_source_consolidated.get(topic, topic)
         marked = max(
@@ -1085,10 +1090,30 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         that still has a level binding is skipped: it would forward the level.
         """
         level = data.get(KEY_HEIGHT)
+        if not isinstance(level, int) or data.get("state") != STATE_ON:
+            return
+        self._switch_height[base] = level
+        self._write_height(base, level)
+
+    def _follow_partners(self, base: str) -> None:
+        """Bring the bars of switches sharing a light with ``base`` to its lights.
+
+        A switch bound to another (the primary bath pair, the hallway pair) does
+        not report when its partner dims or holds a look, so its bar is set here,
+        from its last report — only while that report has it on.
+        """
+        refs = {ref for _source, ref in self._governed(base)}
+        for other in self._all_switches():
+            if other == base or not refs & {r for _s, r in self._governed(other)}:
+                continue
+            level = self._switch_height.get(other)
+            if level is not None:
+                self._write_height(other, level)
+
+    def _write_height(self, base: str, level: int) -> None:
+        """Set a switch's own level to its lights' when it is off by a step."""
         if (
-            not isinstance(level, int)
-            or data.get("state") != STATE_ON
-            or not self._paddle_on.get(base)
+            not self._paddle_on.get(base)
             or not self.push_enabled
             or base in self._dims
             or self._level_bound is None
@@ -1100,6 +1125,7 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         if target is None or abs(target - level) < HEIGHT_STEP:
             return
         self._bar_quiet[base] = self._clock() + BAR_HEIGHT_QUIET_S
+        self._switch_height[base] = target
         self._bars.height(base, target)
 
     def _bar_play(
@@ -1503,11 +1529,10 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         if base in self._room_switches:
             await self._on_room_action(base, action)
             return
-        mapping = self._switch_map.get(base)
-        if mapping is None:
+        lights = self._switch_lights.get(base)
+        if lights is None:
             return
         origin_at = self._clock()
-        light_ref = mapping[1]
         if action in RELEASE_ACTIONS:
             await self._end_dim(base)
             return
@@ -1515,29 +1540,37 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         if mode is None:
             return
         if mode == MODE_ADAPTIVE:
-            await self._on_paddle_tap(base, action, mapping, origin_at)
+            await self._on_paddle_tap(base, action, lights, origin_at)
         elif mode not in LOOK_KINDS:
             await self._start_dim(base, action)
         elif self._look_tap_accepted(base, action):
             self._bars.announce(base, LED_TOP)  # the top LED pulses, then stays
-            await self.async_hold(light_ref, mode, origin_at=origin_at)
+            for _source, light_ref in lights:
+                await self.async_hold(light_ref, mode, origin_at=origin_at)
             self._bars.unannounce(base)
+            self._follow_partners(base)
 
     async def _on_paddle_tap(
-        self, base: str, action: str, mapping: tuple[str, str], origin_at: float
+        self,
+        base: str,
+        action: str,
+        lights: list[tuple[str, str]],
+        origin_at: float,
     ) -> None:
         """Handle a single up/down tap: track the paddle and release any hold."""
-        source_key, light_ref = mapping
         off = action.startswith("down")
         self._dims.pop(base, None)
         self._set_paddle(base, on=not off)
         self._paddle_action_at[base] = self._clock()
-        released = await self._modes.release(light_ref)
-        if off:
-            self._forget_lit(light_ref)
-            await self._stage_off(source_key, light_ref)
-        elif released:
-            self._release_room(light_ref, origin_at=origin_at)
+        released = False
+        for source_key, light_ref in lights:
+            freed = await self._modes.release(light_ref)
+            released = released or freed
+            if off:
+                self._forget_lit(light_ref)
+                await self._stage_off(source_key, light_ref)
+            elif freed:
+                self._release_room(light_ref, origin_at=origin_at)
         self._publish_snapshot()
         if released and not off:
             self._bar_play(base, EFFECT_PULSE, COLOR_BAR)  # back to automatic
@@ -1620,6 +1653,7 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
                 self._bars.announce(base, LED_TOP)  # the top LED pulses, then stays
                 await self._hold_lights(lights, mode, origin_at=origin_at)
                 self._bars.unannounce(base)
+                self._follow_partners(base)
             return
         off = action.startswith("down")
         self._dims.pop(base, None)
@@ -1748,28 +1782,35 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
             # off 0.37 s later); a real paddle change arrives as an action.
             return
         self._set_paddle(base, on=on)
-        mapping = self._switch_map.get(base)
-        if mapping is None or not self.push_enabled:
+        lights = self._switch_lights.get(base)
+        if lights is None or not self.push_enabled:
             return  # a room-level switch: its binding acts, the state is tracked
-        source_key, light_ref = mapping
         self._dims.pop(base, None)
-        if previous is None:
+        for source_key, light_ref in lights:
+            await self._follow_paddle(
+                source_key, light_ref, on=on, boot=previous is None
+            )
+        self._publish_snapshot()
+
+    async def _follow_paddle(
+        self, source_key: str, light_ref: str, *, on: bool, boot: bool
+    ) -> None:
+        """Apply a switch's reported on/off to one light it governs."""
+        if boot:
             # The first report after startup (retained): record it only. The
             # boot flood already staged every bulb, so re-staging each switched
             # off room would be a burst of sends for nothing.
             if not on and await self._modes.release(light_ref):
                 _LOGGER.info("hold released by switch-off for %s", light_ref)
-                self._publish_snapshot()
             return
         if on:
             if await self._modes.release(light_ref):
                 self._release_room(light_ref)
-        else:
-            if await self._modes.release(light_ref):
-                _LOGGER.info("hold released by switch-off for %s", light_ref)
-            self._forget_lit(light_ref)
-            await self._stage_off(source_key, light_ref)
-        self._publish_snapshot()
+            return
+        if await self._modes.release(light_ref):
+            _LOGGER.info("hold released by switch-off for %s", light_ref)
+        self._forget_lit(light_ref)
+        await self._stage_off(source_key, light_ref)
 
     # --- held-paddle dimming: Light Man fades, so it knows the level ---------
 
@@ -1779,12 +1820,8 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         One per curve: the consolidated topic when a room switch covers every
         light of the source, else each light's own topic.
         """
-        if base in self._room_switches:
-            lights = self._room_switches[base][1]
-        else:
-            lights = [self._switch_map[base]]
         by_source: dict[str, list[str]] = {}
-        for source_key, ref in lights:
+        for source_key, ref in self._governed(base):
             by_source.setdefault(source_key, []).append(ref)
         groups: list[tuple[str, str, list[str]]] = []
         for source_key, refs in by_source.items():
@@ -1869,6 +1906,7 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
             for ref in held:
                 await self._modes.set_look(ref, dict(look))
         self._publish_snapshot()
+        self._follow_partners(base)
         return stopped
 
     def _dim_pending(self, room: str) -> bool:

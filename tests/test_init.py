@@ -203,6 +203,9 @@ def test_bundled_seed_is_valid() -> None:
         "hallway_up",
         "hallway_down",
     }
-    # under_vanity is addressable but not holdable (no switch governs it).
+    # Both primary bath paddles govern the overhead and the under-vanity strip.
     accent_rooms = result.config["sources"]["accent"]["rooms"]
-    assert accent_rooms["primary_bath.under_vanity"]["switches"] == []
+    assert accent_rooms["primary_bath.under_vanity"]["switches"] == [
+        "zigbee2mqtt/Primary Bath Front Smart Switch",
+        "zigbee2mqtt/Primary Bath Toilet Smart Switch",
+    ]

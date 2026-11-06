@@ -26,7 +26,7 @@ MODES_STORE_VERSION: Final = 1
 # top-level objects merged across groups; occupancy moved to `occupancy_zones`
 # referencing room-owned sensors; sleep ramp became a top-level block. The loader
 # derives the unchanged runtime view from this shape, so addressing is identical.
-BUNDLED_SEED_VERSION: Final = 12
+BUNDLED_SEED_VERSION: Final = 13
 
 # --- Seed-config JSON keys --------------------------------------------------
 CONF_PUSH_INTERVAL: Final = "push_interval_s"
@@ -44,6 +44,7 @@ CONF_ROOMS: Final = "rooms"
 CONF_NAME: Final = "name"
 CONF_ID: Final = "id"
 CONF_GOVERNS: Final = "governs"
+CONF_BAR_FOLLOWS: Final = "bar_follows"  # the light a switch's bar tracks
 CONF_ANIMATIONS: Final = "animations"  # a switch's tap -> bar animation map
 CONF_SET_TOPIC: Final = "set_topic"
 CONF_SWITCHES: Final = "switches"

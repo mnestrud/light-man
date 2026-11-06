@@ -24,6 +24,7 @@ from typing import cast
 
 from .const import (
     CONF_ANIMATIONS,
+    CONF_BAR_FOLLOWS,
     CONF_CONSOLIDATED_TOPIC,
     CONF_CURVE_REF,
     CONF_CURVES,
@@ -103,6 +104,19 @@ class ValidatedConfig:
     )
     # switch base -> tap action -> the bar animation it plays (shade taps)
     switch_animations: dict[str, dict[str, BarAnimation]] = field(default_factory=dict)
+    # light-level switches: base -> every (source, light_ref) it governs
+    switch_lights: dict[str, list[tuple[str, str]]] = field(default_factory=dict)
+    # every switch: base -> the (source, light_ref) its LED bar follows
+    bar_lights: dict[str, tuple[str, str]] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class _SwitchEntry:
+    """A switch as listed in a room: what it governs and what its bar follows."""
+
+    base: str
+    governs: str | list[str]
+    bar_follows: str | None
 
 
 @dataclass(slots=True)
@@ -114,8 +128,7 @@ class _RoomScan:
     light_index: dict[str, dict[str, str]] = field(default_factory=dict)
     # sensor ref "<room>.<name>" -> {topic, occupancy_key}
     sensor_index: dict[str, RoomSensor] = field(default_factory=dict)
-    # (switch base topic, governed light ref)
-    switch_entries: list[tuple[str, str]] = field(default_factory=list)
+    switch_entries: list[_SwitchEntry] = field(default_factory=list)
     switch_topics: set[str] = field(default_factory=set)
     switch_animations: dict[str, dict[str, BarAnimation]] = field(default_factory=dict)
     # light refs whose set_topic was missing/empty (flagged after switch scan)
@@ -267,6 +280,21 @@ def _switch_animations(
     return animations
 
 
+def _switch_governs(
+    topic: str, governs: object, issues: list[str]
+) -> str | list[str] | None:
+    """Return a switch's ``governs`` (a ref or a list of refs), or None + issue."""
+    if isinstance(governs, list) and governs:
+        if all(isinstance(ref, str) and ref for ref in governs):
+            return [str(ref) for ref in governs]
+        issues.append(f"switch {topic!r}: 'governs' list must hold light refs")
+        return None
+    if isinstance(governs, str) and governs:
+        return governs
+    issues.append(f"switch {topic!r}: missing 'governs'")
+    return None
+
+
 def _scan_room_switches(
     room_id: str, room_raw: dict[str, object], scan: _RoomScan, issues: list[str]
 ) -> list[RoomSwitch]:
@@ -285,12 +313,18 @@ def _scan_room_switches(
         if not isinstance(topic, str) or not topic:
             issues.append(f"room {room_id!r}: switch missing topic")
             continue
-        if not isinstance(governs, str) or not governs:
-            issues.append(f"switch {topic!r}: missing 'governs'")
+        governs = _switch_governs(topic, governs, issues)
+        if governs is None:
             continue
-        scan.switch_entries.append((topic, governs))
+        follows = entry.get(CONF_BAR_FOLLOWS)
+        if follows is not None and not isinstance(follows, str):
+            issues.append(f"switch {topic!r}: 'bar_follows' must be a light ref")
+            follows = None
+        scan.switch_entries.append(_SwitchEntry(topic, governs, follows or None))
         scan.switch_topics.add(topic)
         switch = RoomSwitch(topic=topic, governs=governs)
+        if follows:
+            switch[CONF_BAR_FOLLOWS] = follows
         animations = _switch_animations(topic, entry.get(CONF_ANIMATIONS), issues)
         if animations:
             switch[CONF_ANIMATIONS] = animations
@@ -352,52 +386,96 @@ def _scan_rooms(
     return scan
 
 
-def _build_switch_map(
-    scan: _RoomScan,
-    issues: list[str],
-    room_switches: dict[str, tuple[str, list[tuple[str, str]]]],
-) -> tuple[dict[str, tuple[str, str]], dict[str, list[str]]]:
-    """Resolve switch bases to ``(group, light_ref)`` + reverse governs index.
+def _governed_lights(
+    entry: _SwitchEntry, scan: _RoomScan, issues: list[str]
+) -> tuple[str | None, list[tuple[str, str]]] | None:
+    """Resolve what a switch governs: ``(room id or None, [(source, ref)])``.
+
+    A room id covers every light of that room; a light ref or a list of light
+    refs covers those lights. None (with an issue) when it does not resolve.
+    """
+    base, governs = entry.base, entry.governs
+    if isinstance(governs, str) and governs not in scan.light_index:
+        if governs not in scan.rooms:
+            issues.append(f"switch {base!r}: governs unknown light {governs!r}")
+            return None
+        prefix = f"{governs}."
+        lights = [
+            (light[CONF_SOURCE], ref)
+            for ref, light in scan.light_index.items()
+            if ref.startswith(prefix)
+        ]
+        if not lights:
+            issues.append(f"switch {base!r}: room {governs!r} has no lights")
+            return None
+        return governs, lights
+    refs = [governs] if isinstance(governs, str) else governs
+    unknown = [ref for ref in refs if ref not in scan.light_index]
+    if unknown:
+        issues.append(f"switch {base!r}: governs unknown light {unknown[0]!r}")
+        return None
+    if len(set(refs)) != len(refs):
+        issues.append(f"switch {base!r}: governs a light twice")
+        return None
+    return None, [(scan.light_index[ref][CONF_SOURCE], ref) for ref in refs]
+
+
+@dataclass(slots=True)
+class _SwitchMaps:
+    """The switch indices handed on to :class:`ValidatedConfig`."""
+
+    switch_map: dict[str, tuple[str, str]] = field(default_factory=dict)
+    switch_lights: dict[str, list[tuple[str, str]]] = field(default_factory=dict)
+    room_switch_map: dict[str, tuple[str, list[tuple[str, str]]]] = field(
+        default_factory=dict
+    )
+    bar_lights: dict[str, tuple[str, str]] = field(default_factory=dict)
+    governs_by_light: dict[str, list[str]] = field(default_factory=dict)
+
+
+def _build_switch_map(scan: _RoomScan, issues: list[str]) -> _SwitchMaps:
+    """Resolve switch bases to the lights they govern + reverse governs index.
 
     A switch governing a whole room (``governs`` is a room id) goes to
-    ``room_switches`` instead, with every light of that room.
+    ``room_switch_map`` with every light of that room; any other switch goes to
+    ``switch_map`` (its bar light) and ``switch_lights`` (every light it governs).
     """
-    switch_map: dict[str, tuple[str, str]] = {}
-    governs_by_light: dict[str, list[str]] = {}
-    for base, governs in scan.switch_entries:
-        info = scan.light_index.get(governs)
-        if info is None and governs in scan.rooms:
-            prefix = f"{governs}."
-            lights = [
-                (light[CONF_SOURCE], ref)
-                for ref, light in scan.light_index.items()
-                if ref.startswith(prefix)
-            ]
-            if not lights:
-                issues.append(f"switch {base!r}: room {governs!r} has no lights")
-            elif base in switch_map or base in room_switches:
-                issues.append(f"switch {base!r} is listed twice")
+    validated = _SwitchMaps()
+    governs_by_light = validated.governs_by_light
+    for entry in scan.switch_entries:
+        base = entry.base
+        resolved = _governed_lights(entry, scan, issues)
+        if resolved is None:
+            continue
+        if base in validated.bar_lights:
+            issues.append(f"switch {base!r} is listed twice")
+            continue
+        room, lights = resolved
+        bar = lights[0]
+        if entry.bar_follows is not None:
+            match = [light for light in lights if light[1] == entry.bar_follows]
+            if match:
+                bar = match[0]
             else:
-                room_switches[base] = (governs, lights)
+                issues.append(
+                    f"switch {base!r}: bar_follows {entry.bar_follows!r} "
+                    "is not a light it governs"
+                )
+        validated.bar_lights[base] = bar
+        if room is not None:
+            validated.room_switch_map[base] = (room, lights)
             continue
-        if info is None:
-            issues.append(f"switch {base!r}: governs unknown light {governs!r}")
-            continue
-        mapping = (info[CONF_SOURCE], governs)
-        if base in switch_map or base in room_switches:
-            issues.append(
-                f"switch {base!r} maps to both {switch_map[base]} and {mapping}"
-            )
-            continue
-        switch_map[base] = mapping
-        governs_by_light.setdefault(governs, []).append(base)
+        validated.switch_map[base] = bar
+        validated.switch_lights[base] = lights
+        for _source, ref in lights:
+            governs_by_light.setdefault(ref, []).append(base)
     # A light a switch governs must be addressable around (else a hold hits it).
     for ref in scan.empty_topic_refs:
         if ref in governs_by_light:
             issues.append(f"light {ref}: holdable light has no set_topic")
         else:
             issues.append(f"light {ref}: light has no set_topic")
-    return switch_map, governs_by_light
+    return validated
 
 
 def _build_runtime_sources(
@@ -617,9 +695,10 @@ def validate_config(raw: object) -> ValidatedConfig:
     curves = _validate_curves(raw, issues)
     groups = _validate_groups(raw, curves)
     scan = _scan_rooms(raw, set(groups), issues)
-    room_switches: dict[str, tuple[str, list[tuple[str, str]]]] = {}
-    switch_map, governs_by_light = _build_switch_map(scan, issues, room_switches)
-    runtime_sources = _build_runtime_sources(groups, curves, scan, governs_by_light)
+    maps = _build_switch_map(scan, issues)
+    runtime_sources = _build_runtime_sources(
+        groups, curves, scan, maps.governs_by_light
+    )
     runtime_zones, stored_zones = _validate_zones(raw, scan, issues)
     sleep = _validate_sleep(raw)
 
@@ -641,8 +720,10 @@ def validate_config(raw: object) -> ValidatedConfig:
     return ValidatedConfig(
         config=config,
         stored=stored,
-        switch_map=switch_map,
+        switch_map=maps.switch_map,
         issues=issues,
-        room_switch_map=room_switches,
+        room_switch_map=maps.room_switch_map,
         switch_animations=scan.switch_animations,
+        switch_lights=maps.switch_lights,
+        bar_lights=maps.bar_lights,
     )

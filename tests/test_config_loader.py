@@ -198,7 +198,64 @@ def test_duplicate_switch_is_flagged() -> None:
     cfg = _seed()
     cfg["rooms"]["kitchen"]["switches"][0]["topic"] = LR_SWITCH
     result = validate_config(cfg)
-    assert any("maps to both" in i for i in result.issues)
+    assert any("listed twice" in i for i in result.issues)
+
+
+def test_switch_governs_a_list_of_lights() -> None:
+    cfg = _seed()
+    switch = {"topic": "zigbee2mqtt/Porch Switch", "governs": ["porch.a1", "porch.a2"]}
+    cfg["rooms"]["porch"]["switches"] = [switch]
+    result = validate_config(cfg)
+    assert result.issues == []
+    pair = [("overhead", "porch.a1"), ("overhead", "porch.a2")]
+    assert result.switch_lights["zigbee2mqtt/Porch Switch"] == pair
+    assert result.switch_map["zigbee2mqtt/Porch Switch"] == pair[0]
+    assert result.bar_lights["zigbee2mqtt/Porch Switch"] == pair[0]
+    rooms = result.config["sources"]["overhead"]["rooms"]
+    assert rooms["porch.a2"]["switches"] == ["zigbee2mqtt/Porch Switch"]
+    assert result.stored["rooms"]["porch"]["switches"][0]["governs"] == [
+        "porch.a1",
+        "porch.a2",
+    ]
+
+
+def test_bar_follows_picks_the_bar_light() -> None:
+    cfg = _seed()
+    cfg["rooms"]["porch"]["switches"] = [
+        {
+            "topic": "zigbee2mqtt/Porch Switch",
+            "governs": ["porch.a1", "porch.a2"],
+            "bar_follows": "porch.a2",
+        },
+        {
+            "topic": "zigbee2mqtt/Porch Room",
+            "governs": "porch",
+            "bar_follows": "porch.a2",
+        },
+    ]
+    result = validate_config(cfg)
+    assert result.issues == []
+    assert result.switch_map["zigbee2mqtt/Porch Switch"] == ("overhead", "porch.a2")
+    assert result.bar_lights["zigbee2mqtt/Porch Room"] == ("overhead", "porch.a2")
+    stored = result.stored["rooms"]["porch"]["switches"][0]
+    assert stored["bar_follows"] == "porch.a2"
+
+
+@pytest.mark.parametrize(
+    ("entry", "issue"),
+    [
+        ({"governs": ["porch.a1", 3]}, "must hold light refs"),
+        ({"governs": ["porch.a1", "porch.ghost"]}, "governs unknown light"),
+        ({"governs": ["porch.a1", "porch.a1"]}, "governs a light twice"),
+        ({"governs": "porch.a1", "bar_follows": 7}, "'bar_follows' must be"),
+        ({"governs": "porch.a1", "bar_follows": "porch.a2"}, "is not a light it"),
+    ],
+)
+def test_bad_switch_lists_are_flagged(entry: dict[str, Any], issue: str) -> None:
+    cfg = _seed()
+    cfg["rooms"]["porch"]["switches"] = [{"topic": "zigbee2mqtt/Porch Switch", **entry}]
+    result = validate_config(cfg)
+    assert any(issue in i for i in result.issues), result.issues
 
 
 def test_switch_governs_unknown_light_is_flagged() -> None:

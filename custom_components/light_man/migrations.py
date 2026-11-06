@@ -18,6 +18,10 @@ Versions:
   v11 -> v12 the shade taps' bar animations move from the HA blueprint into the
             switch entries (``animations``), with the blueprint's values. Added
             only to a shipped switch that has no ``animations`` yet.
+  v12 -> v13 the primary bath front switch and the toilet switch (new to Light
+            Man) each govern the bath overhead and the under-vanity strip; the
+            hallway switches' bars follow the downlights (``bar_follows``).
+            Applied only where the stored rooms still have them as shipped.
 """
 
 from __future__ import annotations
@@ -137,11 +141,54 @@ def _v11_to_v12(raw: dict[str, Any]) -> dict[str, Any]:
     return raw
 
 
+BATH_FRONT = "zigbee2mqtt/Primary Bath Front Smart Switch"
+BATH_TOILET = "zigbee2mqtt/Primary Bath Toilet Smart Switch"
+V13_BATH_LIGHTS = ["primary_bath.overhead", "primary_bath.under_vanity"]
+V13_HALL_BAR = "hallway.east_down"
+
+
+def _v12_to_v13(raw: dict[str, Any]) -> dict[str, Any]:
+    rooms = raw.get("rooms") or {}
+    bath = rooms.get("primary_bath")
+    switches = bath.get("switches") if isinstance(bath, dict) else None
+    if isinstance(switches, list):
+        front = next(
+            (
+                sw
+                for sw in switches
+                if isinstance(sw, dict) and sw.get("topic") == BATH_FRONT
+            ),
+            None,
+        )
+        toilet = any(
+            isinstance(sw, dict) and sw.get("topic") == BATH_TOILET for sw in switches
+        )
+        if front is not None and front.get("governs") == V13_BATH_LIGHTS[0]:
+            front["governs"] = list(V13_BATH_LIGHTS)
+            if not toilet:
+                index = switches.index(front) + 1
+                switches.insert(
+                    index, {"topic": BATH_TOILET, "governs": list(V13_BATH_LIGHTS)}
+                )
+    hallway = rooms.get("hallway")
+    for switch in (
+        hallway.get("switches") if isinstance(hallway, dict) else None
+    ) or []:
+        if (
+            isinstance(switch, dict)
+            and switch.get("topic") in (HALL_EAST, HALL_WEST)
+            and switch.get("governs") == "hallway"
+        ):
+            switch.setdefault("bar_follows", V13_HALL_BAR)
+    return raw
+
+
 MIGRATIONS: dict[int, Callable[[dict[str, Any]], dict[str, Any]]] = {
     8: _v8_to_v9,
     9: _v9_to_v10,
     10: _v10_to_v11,
     11: _v11_to_v12,
+    12: _v12_to_v13,
 }
 
 

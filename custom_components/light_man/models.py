@@ -214,13 +214,17 @@ class RoomSwitch(TypedDict, total=False):
     """An Inovelli switch in a room and the lights it governs (holds).
 
     ``governs`` is a light ref ``"<room_id>.<light_id>"`` — the group the switch is
-    SBM-bound to and whose hold its taps drive — or a room id, for a switch bound
-    to every light of the room (the hallway pair). ``animations`` maps a tap
-    (``up_double`` ...) to the bar animation it plays — the shade taps.
+    SBM-bound to and whose hold its taps drive — a list of light refs (a switch
+    bound to several lights of a room), or a room id, for a switch bound to every
+    light of the room (the hallway pair). ``bar_follows`` is the governed light
+    whose curve and level the switch's LED bar shows (default: the first).
+    ``animations`` maps a tap (``up_double`` ...) to the bar animation it plays —
+    the shade taps.
     """
 
     topic: str
-    governs: str
+    governs: str | list[str]
+    bar_follows: str
     animations: dict[str, BarAnimation]
 
 
