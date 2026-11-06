@@ -3,7 +3,7 @@
 Hass-free. The coordinator decides what each switch's bar should show; this
 module turns that into Zigbee2MQTT commands and paces them (one unicast each).
 
-Three things are written to a bar, all on ``<switch>/set``:
+Five things are written to a switch, all on ``<switch>/set``:
 
 - **Level** — ``ledIntensityWhenOn`` follows the room's brightness curve, from
   ``BAR_PEAK_LEVEL`` at the curve's brightest down. Written only when it has
@@ -18,6 +18,15 @@ Three things are written to a bar, all on ``<switch>/set``:
 - **Animations** — a timed whole-bar ``led_effect`` (shades, look released). It
   hides the status LEDs while it plays; they show again when it ends (checked
   on a VZM31-SN, 2026-11-05).
+
+- **Start-up height** — ``defaultLevelLocal`` / ``defaultLevelRemote`` follow the
+  level the switch's lights will wake at, so the bar comes on at the lights'
+  height. A parameter write: it never switches anything and is safe while off.
+- **Height** — the switch's own level (``brightness``), which the bar shows as
+  its height. The switches have no level binding, so this moves the bar only.
+  It is written only while the switch is on: a level written to an off switch
+  turns the switch (not its lights) on, and the next paddle-on then does nothing
+  (measured 2026-11-06).
 
 Status and animation brightness scale with the same curve fraction as the level.
 """
@@ -67,7 +76,16 @@ EFFECT_BLINK = "fast_blink"
 KEY_LEVEL = "ledIntensityWhenOn"
 KEY_EFFECT = "led_effect"
 KEY_LED = "individual_led_effect"
-BAR_KEYS = frozenset({KEY_LEVEL, KEY_EFFECT, KEY_LED})
+KEY_DEFAULT_LOCAL = "defaultLevelLocal"
+KEY_DEFAULT_REMOTE = "defaultLevelRemote"
+KEY_HEIGHT = "brightness"  # the switch's own level: the bar's height
+BAR_KEYS = frozenset(
+    {KEY_LEVEL, KEY_EFFECT, KEY_LED, KEY_DEFAULT_LOCAL, KEY_DEFAULT_REMOTE}
+)
+DEFAULT_LEVEL_STEP = 8  # write the start-up height once it has moved this far
+HEIGHT_STEP = 3  # correct the height once it is this far from the lights
+HEIGHT_TRANSITION_S = 0.5  # the switch ramps its bar to the new height
+HEIGHT_MIN, HEIGHT_MAX = 1, 254
 
 
 def bar_level(fraction: float) -> int:
@@ -115,6 +133,7 @@ class BarManager:
         # (switch, slot) -> command; a newer command for a slot replaces the older
         self._pending: dict[tuple[str, str], dict[str, Any]] = {}
         self._level: dict[str, int] = {}  # switch -> on-level it shows
+        self._default: dict[str, int] = {}  # switch -> its start-up height
         self._leds: dict[str, dict[str, int | None]] = {}  # switch -> led -> colour
         self._status_level: dict[str, int] = {}  # switch -> level its status shows at
         self._announce: set[tuple[str, str]] = set()  # (switch, led) to pulse next
@@ -126,9 +145,29 @@ class BarManager:
         """Take the switch's own reported on-level as the start (first report only)."""
         self._level.setdefault(base, level)
 
+    def seed_default(self, base: str, level: int) -> None:
+        """Take the switch's own reported start-up height (first report only)."""
+        self._default.setdefault(base, level)
+
+    def default_level(self, base: str, level: int) -> None:
+        """Keep the switch's start-up height at the level its lights wake at."""
+        level = max(HEIGHT_MIN, min(HEIGHT_MAX, level))
+        shown = self._default.get(base)
+        if shown is None or abs(level - shown) >= DEFAULT_LEVEL_STEP:
+            self._default[base] = level
+            command = {KEY_DEFAULT_LOCAL: level, KEY_DEFAULT_REMOTE: level}
+            self._queue(base, "default", command)
+
+    def height(self, base: str, level: int) -> None:
+        """Ramp the bar to ``level`` (the caller knows the switch is on)."""
+        level = max(HEIGHT_MIN, min(HEIGHT_MAX, level))
+        command = {KEY_HEIGHT: level, "transition": HEIGHT_TRANSITION_S}
+        self._queue(base, "height", command)
+
     def forget(self, base: str) -> None:
         """Forget what a bar shows (a command failed): the next sync re-sends it."""
         self._level.pop(base, None)
+        self._default.pop(base, None)
         self._leds.pop(base, None)
         self._status_level.pop(base, None)
 

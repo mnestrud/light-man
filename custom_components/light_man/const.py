@@ -189,6 +189,7 @@ DIM_MIN_FADE_S: Final = 0.3
 DIM_LEAD_S: Final = 0.1  # aim the stop where the bulbs will be when it lands
 DIM_STOP_TRANSITION_S: Final = 0.2
 DIM_TIMEOUT_S: Final = 15.0  # a release that never arrives ends the dim here
+BAR_HEIGHT_QUIET_S: Final = 3.0  # ignore the switch's level reports after our write
 FAILURE_LOG_INTERVAL_S: Final = 600.0
 MQTT_SLOW_PUBLISH_S: Final = 10.0
 PADDLE_STATE_GRACE_S: Final = 3.0  # ignore a contradicting switch state after a tap

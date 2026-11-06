@@ -171,6 +171,9 @@ unnecessary.
   the switch's reported `brightness` 5 of 5 times), and a level written to the switch is forwarded to the
   bulbs within ~0.5 s. The level bindings to lights are removed; Light Man fades the lights itself (0.8.8).
   With the binding gone a level write to a switch moves only its LED bar (checked on the kitchen switch).
+  **Never write a level to an off switch:** it turns the switch's own state on (the bar lights, the bulbs
+  stay off) and the next paddle-up is then ignored (upstairs bath, 2026-11-06). `defaultLevelLocal` /
+  `defaultLevelRemote` writes are silent in either state.
 - **Z2M's cached `philips_raw`**: Z2M polls bound bulbs 1 s after a switch command and republishes the
   cached frame with the fresh `brightness`; the first message after a `/get` is therefore often stale. Use
   the `brightness` field of a `{"brightness": ""}` read, not the first frame.

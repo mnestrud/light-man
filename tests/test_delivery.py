@@ -12,7 +12,9 @@ from unittest.mock import patch
 from homeassistant.util import dt as dt_util
 from pytest_homeassistant_custom_component.common import async_fire_mqtt_message
 
+from custom_components.light_man.bars import HEIGHT_TRANSITION_S
 from custom_components.light_man.const import (
+    BAR_HEIGHT_QUIET_S,
     DIM_FLOOR,
     DIM_LEAD_S,
     DIM_RATE,
@@ -25,7 +27,15 @@ from custom_components.light_man.publisher import (
     Send,
 )
 
-from .conftest import KIT_SET, LR_SET, LR_SWITCH, OVERHEAD_ALL, published, tick
+from .conftest import (
+    KIT_SET,
+    KIT_SWITCH,
+    LR_SET,
+    LR_SWITCH,
+    OVERHEAD_ALL,
+    published,
+    tick,
+)
 
 if TYPE_CHECKING:
     import asyncio
@@ -715,7 +725,27 @@ async def _lit_at(
     await hass.async_block_till_done()
     coordinator._last_published[LR_SET] = {"brightness": level, **LR_COLOUR}  # type: ignore[typeddict-item]
     coordinator._marked_at[LR_SET] = clock.now
+    _fire(hass, "zigbee2mqtt/bridge/devices", _DEVICES)
+    await hass.async_block_till_done()
     mqtt_mock.async_publish.reset_mock()
+
+
+def _switch(name: str, *targets: dict[str, Any]) -> dict[str, Any]:
+    bindings = [{"cluster": "genLevelCtrl", "target": t} for t in targets]
+    bindings.append({"cluster": "genOnOff", "target": {"type": "group", "id": 2}})
+    return {"friendly_name": name, "endpoints": {"2": {"bindings": bindings}}}
+
+
+_COORDINATOR = {"type": "endpoint", "ieee_address": "0xc0", "endpoint": 1}
+# The living room switch reports to the coordinator only; the kitchen one still
+# has a level binding to its lights.
+_DEVICES: list[Any] = [
+    {"type": "Coordinator", "ieee_address": "0xc0", "endpoints": {}},
+    _switch("Living Room Switch", _COORDINATOR),
+    _switch("Kitchen Switch", _COORDINATOR, {"type": "group", "id": 2}),
+    {"friendly_name": "A sensor"},
+    "junk",
+]
 
 
 async def _action(hass: HomeAssistant, action: str) -> None:
@@ -869,6 +899,90 @@ async def test_a_manual_hold_without_a_level_is_left_alone_by_the_flood(
     assert LR_SET not in pubs  # addressed per room, the held room skipped
     assert KIT_SET in pubs
     assert coordinator._room_topic("no_such.light") is None
+
+
+# --- the bar's height follows the lights ---------------------------------------
+
+LR_SWITCH_SET = f"{LR_SWITCH}/set"
+
+
+async def _report(hass: HomeAssistant, mqtt_mock: Any, payload: Any) -> Any:
+    """Fire one switch message; return what was then written to the switch."""
+    mqtt_mock.async_publish.reset_mock()
+    _fire(hass, LR_SWITCH, payload)
+    await hass.async_block_till_done()
+    return published(mqtt_mock).get(LR_SWITCH_SET)
+
+
+async def test_the_bar_follows_the_lights_on_the_switch_own_on_report(
+    hass: HomeAssistant, coordinator: Coord, mqtt_mock: Any, clock: FakeClock
+) -> None:
+    await _lit_at(hass, coordinator, mqtt_mock, clock, 76)
+    on_at_229 = {"state": "ON", "brightness": 229, "defaultLevelLocal": 229}
+    assert await _report(hass, mqtt_mock, on_at_229) == {
+        "brightness": 76,
+        "transition": HEIGHT_TRANSITION_S,
+    }
+    assert coordinator._bars._default[LR_SWITCH] == 229  # its own start-up height
+    # The switch's reports while it ramps to our level are not answered.
+    assert await _report(hass, mqtt_mock, {"state": "ON", "brightness": 150}) is None
+    clock.advance(BAR_HEIGHT_QUIET_S)
+    assert await _report(hass, mqtt_mock, {"state": "ON", "brightness": 77}) is None
+    # A tap's message carries the switch's cached level: never answered.
+    tap = {"action": "config_double", "state": "ON", "brightness": 229}
+    assert await _report(hass, mqtt_mock, tap) is None
+
+    # After a config tap the bar goes to the look the lights were sent.
+    look = coordinator._last_planned[LR_SET]["brightness"]
+    assert look != 76
+    assert await _report(hass, mqtt_mock, {"state": "ON", "brightness": 76}) == {
+        "brightness": look,
+        "transition": HEIGHT_TRANSITION_S,
+    }
+
+
+async def test_the_bar_is_left_alone_when_writing_its_height_is_not_safe(
+    hass: HomeAssistant, coordinator: Coord, mqtt_mock: Any, clock: FakeClock
+) -> None:
+    await _lit_at(hass, coordinator, mqtt_mock, clock, 183)
+    await _action(hass, "down_held")  # the switch is ramping its own bar
+    assert await _report(hass, mqtt_mock, {"state": "ON", "brightness": 150}) is None
+    await _action(hass, "down_release")
+    await _action(hass, "up_single")
+
+    # Off: a level written now would turn the switch on without its lights.
+    assert await _report(hass, mqtt_mock, {"state": "OFF", "brightness": 40}) is None
+    assert await _report(hass, mqtt_mock, {"brightness": 40}) is None
+
+    _fire(hass, LR_SWITCH, {"state": "ON"})
+    await hass.async_block_till_done()
+    coordinator._last_published.clear()
+    coordinator._last_planned.clear()
+    coordinator._planned_at.clear()  # nothing known about the lights' level
+    assert await _report(hass, mqtt_mock, {"state": "ON", "brightness": 40}) is None
+
+
+async def test_a_switch_that_still_forwards_its_level_keeps_its_bar(
+    hass: HomeAssistant, coordinator: Coord, mqtt_mock: Any, clock: FakeClock
+) -> None:
+    await _enabled(hass, coordinator, mqtt_mock)
+    on_at_40 = {"state": "ON", "brightness": 40}
+    _fire(hass, LR_SWITCH, on_at_40)  # Z2M's device list not seen yet
+    await hass.async_block_till_done()
+    assert LR_SWITCH_SET not in published(mqtt_mock)
+
+    await _lit_at(hass, coordinator, mqtt_mock, clock, 183)
+    for bad in ("not json", {"devices": []}):
+        _fire(hass, "zigbee2mqtt/bridge/devices", bad)
+    await hass.async_block_till_done()
+    assert coordinator._level_bound == {KIT_SWITCH}
+    coordinator._last_published[KIT_SET] = {"brightness": 183, **LR_COLOUR}  # type: ignore[typeddict-item]
+    coordinator._marked_at[KIT_SET] = clock.now
+    mqtt_mock.async_publish.reset_mock()
+    _fire(hass, KIT_SWITCH, on_at_40)
+    await hass.async_block_till_done()
+    assert f"{KIT_SWITCH}/set" not in published(mqtt_mock)  # it would reach the lights
+    assert await _report(hass, mqtt_mock, on_at_40) is not None  # living room: safe
 
 
 async def test_unload_stops_sending(

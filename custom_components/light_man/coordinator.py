@@ -41,6 +41,9 @@ from .bars import (
     EFFECT_PULSE,
     FEEDBACK_LEVEL,
     FEEDBACK_S,
+    HEIGHT_STEP,
+    KEY_DEFAULT_LOCAL,
+    KEY_HEIGHT,
     KEY_LEVEL,
     LED_BOTTOM,
     LED_TOP,
@@ -48,6 +51,7 @@ from .bars import (
     BarManager,
 )
 from .const import (
+    BAR_HEIGHT_QUIET_S,
     BRIGHTNESS_MAX,
     COLOR_MODE_COLOR_TEMP,
     COLOR_MODE_RGB,
@@ -122,7 +126,7 @@ from .solar import day_profile, solar_inputs
 from .z2m import RESEND_KINDS, parse_publish_failure, set_topic_for, z2m_base_topic
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable
+    from collections.abc import Callable, Iterable, Mapping
 
     from homeassistant.config_entries import ConfigEntry
     from homeassistant.core import HomeAssistant
@@ -255,6 +259,10 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         self._force_seq = 0
         self._failed_at: dict[str, float] = {}  # topic -> last Z2M failure
         self._dims: dict[str, list[_Dim]] = {}  # switch -> fades it is running
+        self._bar_quiet: dict[str, float] = {}  # switch -> ignore its level until
+        # switches whose level binding still reaches a light or another switch;
+        # None until Z2M's device list has been seen (then nothing is written)
+        self._level_bound: set[str] | None = None
         self._plan_diag: dict[str, tuple[dict[str, Any], int]] = {}
         self._replanned_at: dict[str, float] = {}  # source -> last BUSY re-plan
         self._publisher = PacedPublisher(
@@ -404,6 +412,7 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
             ("logging", self._handle_bridge_logging),
             ("state", self._handle_bridge_state),
             ("groups", self._handle_bridge_groups),
+            ("devices", self._handle_bridge_devices),
         ):
             self._unsubs.append(
                 await mqtt.async_subscribe(self.hass, f"{bridge}/{suffix}", handler)
@@ -1042,6 +1051,56 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
             fraction = self._bar_fraction(self._bar_source(base))
             if fraction is not None:
                 self._bars.sync(base, self._bar_leds(base), fraction)
+            staged = self._staged_level(base)
+            if staged is not None:
+                self._bars.default_level(base, staged)
+
+    def _staged_level(self, base: str) -> int | None:
+        """Return the level a switch's lights wake at: its curve's last flood."""
+        source = self._config[CONF_SOURCES][self._bar_source(base)]
+        flood = self._last_published.get(source[CONF_CONSOLIDATED_TOPIC])
+        level = flood.get("brightness") if flood else None
+        return int(level) if level is not None else None
+
+    def _lights_level(self, base: str) -> int | None:
+        """Return the level a switch's lights show (or are being sent to)."""
+        _source, topic, _refs = self._dim_groups(base)[0]
+        payload: Mapping[str, Any] | None = self._shown(topic)
+        consolidated = self._topic_source_consolidated.get(topic, topic)
+        marked = max(
+            self._marked_at.get(topic, float("-inf")),
+            self._marked_at.get(consolidated, float("-inf")),
+        )
+        if self._planned_at.get(topic, float("-inf")) >= marked:
+            payload = self._last_planned.get(topic, payload)
+        level = payload.get("brightness") if payload else None
+        return int(level) if level is not None else None
+
+    def _follow_bar(self, base: str, data: dict[str, Any]) -> None:
+        """Bring a switch's own level (its bar's height) to what its lights show.
+
+        Runs only on the switch's own report that it is on at another height
+        (after a paddle-on, a held dim, a config tap) — never on a timer: a level
+        written to an off switch turns the switch on without its lights. A switch
+        that still has a level binding is skipped: it would forward the level.
+        """
+        level = data.get(KEY_HEIGHT)
+        if (
+            not isinstance(level, int)
+            or data.get("state") != STATE_ON
+            or not self._paddle_on.get(base)
+            or not self.push_enabled
+            or base in self._dims
+            or self._level_bound is None
+            or base in self._level_bound
+            or self._clock() < self._bar_quiet.get(base, 0.0)
+        ):
+            return
+        target = self._lights_level(base)
+        if target is None or abs(target - level) < HEIGHT_STEP:
+            return
+        self._bar_quiet[base] = self._clock() + BAR_HEIGHT_QUIET_S
+        self._bars.height(base, target)
 
     def _bar_play(
         self,
@@ -1418,6 +1477,9 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         level = data.get(KEY_LEVEL)
         if isinstance(level, int):
             self._bars.seed_level(msg.topic, level)
+        default = data.get(KEY_DEFAULT_LOCAL)
+        if isinstance(default, int):
+            self._bars.seed_default(msg.topic, default)
         action = data.get("action")
         if isinstance(action, str) and action:
             await self._on_action(msg.topic, action)
@@ -1425,6 +1487,7 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         state = data.get("state")
         if isinstance(state, str):
             await self._on_state(msg.topic, state)
+        self._follow_bar(msg.topic, data)
 
     async def _on_action(self, base: str, action: str) -> None:
         """Apply a tap: a config hold, a held-dim freeze, or an on/off release.
@@ -1969,6 +2032,31 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
             for group in groups
             if isinstance(group, dict) and "friendly_name" in group
         }
+
+    async def _handle_bridge_devices(self, msg: mqtt.ReceiveMessage) -> None:
+        """Learn which switches still forward their level (a level binding)."""
+        try:
+            devices = json.loads(str(msg.payload))
+        except json.JSONDecodeError, ValueError:
+            return
+        if not isinstance(devices, list):
+            return
+        devices = [d for d in devices if isinstance(d, dict)]
+        coordinators = {
+            d.get("ieee_address") for d in devices if d.get("type") == "Coordinator"
+        }
+        bound: set[str] = set()
+        for device in devices:
+            for endpoint in (device.get("endpoints") or {}).values():
+                for binding in endpoint.get("bindings", []):
+                    target = binding.get("target", {})
+                    if (
+                        binding.get("cluster") == "genLevelCtrl"
+                        and target.get("ieee_address") not in coordinators
+                    ):
+                        name = device.get("friendly_name", "")
+                        bound.add(f"{self._z2m_base}/{name}")
+        self._level_bound = bound
 
     def _is_group(self, topic: str) -> bool:
         """Return True for group (broadcast) topics; all of them until groups load."""

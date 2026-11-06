@@ -314,6 +314,15 @@ step, tap and boot. 0.8.0 replaces it:
   binding the switch put the bulbs at its *own* level on release (measured 2026-11-06: bulbs landed on
   the switch's reported level 5 of 5 times — a jump whenever the two differed), and the bulb read that
   captured the level took Z2M's cached frame (wrong level stored 5 of 5 times).
+- **Bar height (0.8.9):** a switch's LED bar shows the switch's own level. Light Man keeps it at the
+  lights' level two ways. *Start-up height:* `defaultLevelLocal` / `defaultLevelRemote` follow the level
+  the lights wake at (the curve's last flood), written when it has moved 8 points — a parameter write,
+  safe in any state. *Height:* when a switch reports itself **on** at a level ≥ 3 points from what its
+  lights show, Light Man writes that level to the switch (`brightness`, 0.5 s) and ignores the switch's
+  reports for 3 s. It is never written on a timer, during a held dim, or to a switch that still has a
+  level binding (read from `bridge/devices`; today only Primary Bath Front). Why the limits: a level
+  written to an **off** switch turns the switch on without its lights, and the next paddle-on then does
+  nothing (measured 2026-11-06, upstairs bath; `execute_if_off` was already true).
 - **Pacing** (`publisher.py`): every send goes through one queue; tick traffic ≤ 6 and all traffic ≤ 8
   group sends per 10 s; interactive sends first; units contiguous.
 - **Glide + stagger:** each tick sends `target(t + interval)` with `transition = interval`, sources on
@@ -371,7 +380,8 @@ step, tap and boot. 0.8.0 replaces it:
   "VZM31 binds from EP1" referred to the reporting endpoint.) `bindingOffToOnSyncLevel` is **Disabled** on
   all switches since v0.7.6 (it was Enabled under the old tick stack, where tap-on replayed a
   `defaultLevelLocal` written each tick) — tap-on now sends a plain `On` and the bulb wakes at its own
-  hue-native-staged value. Light Man never writes to a switch.
+  hue-native-staged value. Light Man's writes to a switch: `state` (zone sync switches), the LED
+  parameters, the start-up level and — only while the switch is on — its own level (bar height).
 - **Hold-dim emits `Move`, not `Move-to-Level`:** press-hold ramps the bound bulbs from their **own current
   level** (rate-based), so the switch's internal level register drifting from the adaptively-flooded bulb
   does **not** cause a jump — no register sync is needed (verified by divergence test 2026-06-13; see §5.3).

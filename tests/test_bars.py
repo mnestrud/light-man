@@ -18,8 +18,12 @@ from custom_components.light_man.bars import (
     COLOR_RED,
     COLOR_WHITE,
     FEEDBACK_S,
+    HEIGHT_TRANSITION_S,
     INDEFINITE,
+    KEY_DEFAULT_LOCAL,
+    KEY_DEFAULT_REMOTE,
     KEY_EFFECT,
+    KEY_HEIGHT,
     KEY_LED,
     KEY_LEVEL,
     LED_BOTTOM,
@@ -153,6 +157,31 @@ async def test_the_switch_own_level_seeds_the_start_once() -> None:
     bars.manager.seed_level("sw", 25)  # only the first report counts
     bars.manager.sync("sw", {LED_TOP: None}, 0.5)
     assert await bars.drain() == [("sw/set", led_command(LED_TOP, None, 30))]
+
+
+async def test_start_up_height_is_written_once_it_has_moved() -> None:
+    bars = _Bars()
+    bars.manager.seed_default("sw", 229)
+    bars.manager.seed_default("sw", 76)  # only the first report counts
+    bars.manager.default_level("sw", 225)  # within the step
+    assert await bars.drain() == []
+    bars.manager.default_level("sw", 120)
+    bars.manager.default_level("other", 300)  # never reported: written, clamped
+    assert await bars.drain() == [
+        ("sw/set", {KEY_DEFAULT_LOCAL: 120, KEY_DEFAULT_REMOTE: 120}),
+        ("other/set", {KEY_DEFAULT_LOCAL: 254, KEY_DEFAULT_REMOTE: 254}),
+    ]
+    bars.manager.forget("sw")
+    bars.manager.default_level("sw", 120)  # forgotten: written again
+    assert len(await bars.drain()) == 1
+
+
+async def test_height_ramps_the_bar_within_the_switch_range() -> None:
+    bars = _Bars()
+    bars.manager.height("sw", 0)
+    assert await bars.drain() == [
+        ("sw/set", {KEY_HEIGHT: 1, "transition": HEIGHT_TRANSITION_S})
+    ]
 
 
 async def test_forget_makes_the_next_sync_send_everything_again() -> None:
