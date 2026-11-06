@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import itertools
 import json
 import logging
@@ -19,6 +20,7 @@ from custom_components.light_man.const import (
     DIM_LEAD_S,
     DIM_RATE,
     DIM_STOP_TRANSITION_S,
+    DIM_TIMEOUT_S,
 )
 from custom_components.light_man.coordinator import _Dim, interactive_transition
 from custom_components.light_man.publisher import (
@@ -38,8 +40,6 @@ from .conftest import (
 )
 
 if TYPE_CHECKING:
-    import asyncio
-
     import pytest
     from homeassistant.core import HomeAssistant
 
@@ -904,6 +904,7 @@ async def test_a_manual_hold_without_a_level_is_left_alone_by_the_flood(
 # --- the bar's height follows the lights ---------------------------------------
 
 LR_SWITCH_SET = f"{LR_SWITCH}/set"
+PADDLE_GRACE_PLUS = 3.5  # past the stale-state grace after a tap
 
 
 async def _report(hass: HomeAssistant, mqtt_mock: Any, payload: Any) -> Any:
@@ -983,6 +984,102 @@ async def test_a_switch_that_still_forwards_its_level_keeps_its_bar(
     await hass.async_block_till_done()
     assert f"{KIT_SWITCH}/set" not in published(mqtt_mock)  # it would reach the lights
     assert await _report(hass, mqtt_mock, on_at_40) is not None  # living room: safe
+
+
+# --- a hold must last; a hold on an off switch is undone ------------------------
+
+
+class _Gate:
+    """Stands in for the dim start's wait: it ends when the test opens it."""
+
+    def __init__(self) -> None:
+        self.event = asyncio.Event()
+
+    async def sleep(self, _seconds: float) -> None:
+        await self.event.wait()
+
+
+async def test_a_hold_released_before_the_delay_does_not_dim(
+    hass: HomeAssistant, coordinator: Coord, mqtt_mock: Any, clock: FakeClock
+) -> None:
+    await _lit_at(hass, coordinator, mqtt_mock, clock, 183)
+    gate = _Gate()
+    with patch("custom_components.light_man.coordinator._dim_sleep", gate.sleep):
+        _fire(hass, LR_SWITCH, {"action": "down_held"})
+        await asyncio.sleep(0)
+        assert LR_SWITCH in coordinator._dim_starts
+        await _action(hass, "down_release")  # a press that lingered
+        assert coordinator._dim_starts == {}
+        assert published(mqtt_mock) == {}
+        assert not coordinator._modes.is_held(LR)
+
+        # A tap also ends a hold that has not begun; so does unloading.
+        _fire(hass, LR_SWITCH, {"action": "down_held"})
+        await asyncio.sleep(0)
+        await _action(hass, "up_single")
+        assert coordinator._dim_starts == {}
+        _fire(hass, LR_SWITCH, {"action": "up_held"})
+        await asyncio.sleep(0)
+        task = coordinator._dim_starts[LR_SWITCH]
+        coordinator.shutdown_subscriptions()
+        await hass.async_block_till_done()
+        assert task.cancelled()
+        assert coordinator._dim_starts == {}
+
+
+async def test_a_hold_past_the_delay_dims(
+    hass: HomeAssistant, coordinator: Coord, mqtt_mock: Any, clock: FakeClock
+) -> None:
+    await _lit_at(hass, coordinator, mqtt_mock, clock, 183)
+    gate = _Gate()
+    with patch("custom_components.light_man.coordinator._dim_sleep", gate.sleep):
+        _fire(hass, LR_SWITCH, {"action": "down_held"})
+        await asyncio.sleep(0)
+        assert published(mqtt_mock) == {}
+        gate.event.set()
+        await hass.async_block_till_done()
+    assert published(mqtt_mock)[LR_SET]["brightness"] == DIM_FLOOR
+    assert coordinator._dim_starts == {}
+
+
+async def test_a_hold_on_an_off_switch_turns_the_switch_back_off(
+    hass: HomeAssistant, coordinator: Coord, mqtt_mock: Any, clock: FakeClock
+) -> None:
+    await _lit_at(hass, coordinator, mqtt_mock, clock, 183)
+    await _action(hass, "down_single")
+    clock.advance(5.0)
+    mqtt_mock.async_publish.reset_mock()
+
+    await _action(hass, "up_held")
+    assert published(mqtt_mock) == {LR_SWITCH_SET: {"state": "OFF"}}
+    # The switch reports itself on under the held paddle: not a press.
+    clock.advance(PADDLE_GRACE_PLUS)
+    mqtt_mock.async_publish.reset_mock()
+    assert await _report(hass, mqtt_mock, {"state": "ON", "brightness": 200}) is None
+    assert coordinator._paddle_on[LR_SWITCH] is False
+    assert LR_SET not in published(mqtt_mock)
+
+    mqtt_mock.async_publish.reset_mock()
+    await _action(hass, "up_release")
+    assert published(mqtt_mock) == {LR_SWITCH_SET: {"state": "OFF"}}
+    assert coordinator._off_holds == {}
+    assert not coordinator._modes.is_held(LR)
+    await _report(hass, mqtt_mock, {"state": "OFF"})  # the write's echo
+    assert coordinator._paddle_on[LR_SWITCH] is False
+
+
+async def test_an_off_hold_whose_release_is_lost_stops_hiding_reports(
+    hass: HomeAssistant, coordinator: Coord, mqtt_mock: Any, clock: FakeClock
+) -> None:
+    await _lit_at(hass, coordinator, mqtt_mock, clock, 183)
+    await _action(hass, "down_single")
+    clock.advance(5.0)
+    await _action(hass, "down_held")
+    assert LR_SWITCH in coordinator._off_holds
+    clock.advance(DIM_TIMEOUT_S)
+    await _report(hass, mqtt_mock, {"state": "ON"})  # a real paddle-on, later
+    assert coordinator._paddle_on[LR_SWITCH] is True
+    assert coordinator._off_holds == {}
 
 
 async def test_unload_stops_sending(

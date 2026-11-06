@@ -86,6 +86,7 @@ from .const import (
     DIM_MIN_FADE_S,
     DIM_MIN_SPAN,
     DIM_RATE,
+    DIM_START_DELAY_S,
     DIM_STOP_TRANSITION_S,
     DIM_TIMEOUT_S,
     FAILURE_LOG_INTERVAL_S,
@@ -155,6 +156,7 @@ def _monotonic() -> float:
 # Pacing sleep, looked up at call time so tests can patch it.
 _pace_sleep = asyncio.sleep
 _bar_sleep = asyncio.sleep  # the LED bars' own pacing (separate so tests can idle it)
+_dim_sleep = asyncio.sleep  # the wait before a held paddle dims (tests idle it)
 
 
 @dataclass(slots=True)
@@ -263,6 +265,8 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         self._force_seq = 0
         self._failed_at: dict[str, float] = {}  # topic -> last Z2M failure
         self._dims: dict[str, list[_Dim]] = {}  # switch -> fades it is running
+        self._dim_starts: dict[str, asyncio.Task[None]] = {}  # holds not yet dimming
+        self._off_holds: dict[str, float] = {}  # switch held while off -> since
         self._bar_quiet: dict[str, float] = {}  # switch -> ignore its level until
         # switches whose level binding still reaches a light or another switch;
         # None until Z2M's device list has been seen (then nothing is written)
@@ -470,6 +474,9 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         while self._unsubs:
             self._unsubs.pop()()
         self._dims.clear()
+        for task in self._dim_starts.values():
+            task.cancel()
+        self._dim_starts.clear()
         for cancel in self._override_timers.values():
             cancel()
         self._override_timers.clear()
@@ -1559,7 +1566,7 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
     ) -> None:
         """Handle a single up/down tap: track the paddle and release any hold."""
         off = action.startswith("down")
-        self._dims.pop(base, None)
+        self._drop_dim(base)
         self._set_paddle(base, on=not off)
         self._paddle_action_at[base] = self._clock()
         released = False
@@ -1656,7 +1663,7 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
                 self._follow_partners(base)
             return
         off = action.startswith("down")
-        self._dims.pop(base, None)
+        self._drop_dim(base)
         self._set_paddle(base, on=not off)
         self._paddle_action_at[base] = origin_at
         released = [ref for _src, ref in lights if await self._modes.release(ref)]
@@ -1773,6 +1780,9 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
             del self._expect_echo[base]
             self._set_paddle(base, on=on)
             return
+        held_off = self._off_holds.get(base)
+        if held_off is not None and self._clock() - held_off < DIM_TIMEOUT_S:
+            return  # the switch turned itself on under a held paddle: not a press
         tapped = self._paddle_action_at.get(base)
         if tapped is not None and self._clock() - tapped < PADDLE_STATE_GRACE_S:
             # Z2M republishes the switch's *cached* state with any attribute report
@@ -1785,7 +1795,7 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         lights = self._switch_lights.get(base)
         if lights is None or not self.push_enabled:
             return  # a room-level switch: its binding acts, the state is tracked
-        self._dims.pop(base, None)
+        self._drop_dim(base)
         for source_key, light_ref in lights:
             await self._follow_paddle(
                 source_key, light_ref, on=on, boot=previous is None
@@ -1844,8 +1854,26 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         the switch on (a held paddle never turns lights on) and holds the lights
         as ``manual``; the level is set when the paddle is released.
         """
-        if not self._paddle_on.get(base):
+        on = self._paddle_on.get(base)
+        if on is False:
+            self._off_holds[base] = self._clock()
+            self._turn_back_off(base)
             return
+        if not on:
+            return
+        self._cancel_dim_start(base)
+        self._dim_starts[base] = self.hass.async_create_task(
+            self._dim_after_delay(base, action), "lm_dim_start", eager_start=True
+        )
+
+    async def _dim_after_delay(self, base: str, action: str) -> None:
+        """Start the dim once the paddle has stayed held past the delay."""
+        await _dim_sleep(DIM_START_DELAY_S)
+        self._dim_starts.pop(base, None)
+        await self._begin_dim(base, action)
+
+    async def _begin_dim(self, base: str, action: str) -> None:
+        """Send the fades of a held paddle and hold its lights as ``manual``."""
         ended = await self._end_dim(base)  # a release that never arrived
         target = DIM_FLOOR if action.startswith("down") else BRIGHTNESS_MAX
         clock = self._clock()
@@ -1889,6 +1917,10 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         Returns what each stopped topic now shows.
         """
         stopped: dict[str, PushPayload] = {}
+        if self._off_holds.pop(base, None) is not None:
+            self._turn_back_off(base)
+            return stopped
+        self._cancel_dim_start(base)  # released before the dim began: nothing
         dims = self._dims.pop(base, None)
         if not dims:
             return stopped
@@ -1908,6 +1940,33 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         self._publish_snapshot()
         self._follow_partners(base)
         return stopped
+
+    def _cancel_dim_start(self, base: str) -> None:
+        """Forget a hold that has not started dimming yet."""
+        task = self._dim_starts.pop(base, None)
+        if task is not None:
+            task.cancel()
+
+    def _drop_dim(self, base: str) -> None:
+        """Forget a switch's hold (a tap or a paddle change ended it)."""
+        self._cancel_dim_start(base)
+        self._dims.pop(base, None)
+        self._off_holds.pop(base, None)
+
+    def _turn_back_off(self, base: str) -> None:
+        """Turn off a switch whose paddle was held while it was off.
+
+        A hold on an off switch turns the switch itself on and ramps its bar,
+        while its lights stay off (no level binding; seen 2026-11-06, primary
+        bath). Sent on the hold and again on the release; the switch's state
+        reports in between are not paddle presses.
+        """
+        now = self._clock()
+        self._paddle_action_at[base] = now
+        self._expect_echo[base] = (STATE_OFF, now)
+        self._enqueue(
+            [Send(f"{base}/set", {"state": STATE_OFF})], priority=PRIORITY_INTERACTIVE
+        )
 
     def _dim_pending(self, room: str) -> bool:
         """Return True while a held paddle is fading ``room``."""

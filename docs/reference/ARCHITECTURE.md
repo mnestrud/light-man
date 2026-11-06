@@ -323,6 +323,11 @@ step, tap and boot. 0.8.0 replaces it:
   level binding (read from `bridge/devices`; none since 2026-11-06). Why the limits: a level
   written to an **off** switch turns the switch on without its lights, and the next paddle-on then does
   nothing (measured 2026-11-06, upstairs bath; `execute_if_off` was already true).
+- **Hold delay, hold while off (0.8.11):** the dim starts 0.4 s after the switch's `*_held` (a release
+  before that does nothing), so a press that lingers past the switch's own hold threshold does not dim.
+  A hold on an **off** switch turns the switch itself on and ramps its bar while its lights stay off
+  (seen 2026-11-06, primary bath front); Light Man writes `state: OFF` to that switch on the hold and
+  again on the release, and its state reports in between are not taken as a paddle-on.
 - **Several lights, bound pairs (0.8.10):** a switch may govern a list of lights (both primary bath
   switches: the overhead and the under-vanity strip); a tap, a hold or a config tap acts on each. The bar
   shows the `bar_follows` light (hallway: the downlights). Two switches sharing a light (the primary bath

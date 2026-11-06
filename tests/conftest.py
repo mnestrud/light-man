@@ -243,6 +243,7 @@ def clock() -> Iterator[FakeClock]:
         patch("custom_components.light_man.coordinator._monotonic", fake),
         patch("custom_components.light_man.coordinator._pace_sleep", fake.sleep),
         patch("custom_components.light_man.coordinator._bar_sleep", fake.idle),
+        patch("custom_components.light_man.coordinator._dim_sleep", fake.idle),
     ):
         yield fake
 
