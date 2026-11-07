@@ -146,6 +146,12 @@ BATH_TOILET = "zigbee2mqtt/Primary Bath Toilet Smart Switch"
 V13_BATH_LIGHTS = ["primary_bath.overhead", "primary_bath.under_vanity"]
 V13_HALL_BAR = "hallway.east_down"
 
+# v13 -> v14: curve sends every 4 min with a 4-min fade (was 2 min); an edited
+# interval is kept.
+PUSH_INTERVAL_KEY = "push_interval_s"
+V13_PUSH_INTERVAL_S = 120
+V14_PUSH_INTERVAL_S = 240
+
 
 def _v12_to_v13(raw: dict[str, Any]) -> dict[str, Any]:
     rooms = raw.get("rooms") or {}
@@ -183,12 +189,19 @@ def _v12_to_v13(raw: dict[str, Any]) -> dict[str, Any]:
     return raw
 
 
+def _v13_to_v14(raw: dict[str, Any]) -> dict[str, Any]:
+    if raw.get(PUSH_INTERVAL_KEY) == V13_PUSH_INTERVAL_S:
+        raw[PUSH_INTERVAL_KEY] = V14_PUSH_INTERVAL_S
+    return raw
+
+
 MIGRATIONS: dict[int, Callable[[dict[str, Any]], dict[str, Any]]] = {
     8: _v8_to_v9,
     9: _v9_to_v10,
     10: _v10_to_v11,
     11: _v11_to_v12,
     12: _v12_to_v13,
+    13: _v13_to_v14,
 }
 
 

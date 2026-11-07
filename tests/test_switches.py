@@ -88,8 +88,7 @@ async def hall(
     await hass.async_block_till_done()
     mqtt_mock.async_publish.reset_mock()
     yield coord
-    for cancel in coord._override_timers.values():
-        cancel()  # idle clocks a test left running
+    coord.shutdown_subscriptions()  # idle and off-stage clocks a test left running
 
 
 def _fire(hass: HomeAssistant, topic: str, payload: dict[str, Any]) -> None:

@@ -23,6 +23,6 @@ async def test_diagnostics_shape(hass: HomeAssistant, mqtt_mock: Any) -> None:
     assert diag["push_enabled"] is True  # Light Man is the default on startup
     assert diag["mqtt_available"] is True
     assert "kitchen.overhead" in diag["held"]
-    assert diag["config"]["push_interval_s"] == 120  # v9 test seed migrated to v10
+    assert diag["config"]["push_interval_s"] == 240  # bundled seed (v14)
     assert set(diag["config"]["sources"]) == {"overhead", "hallway_up"}
     assert "dedup_skips" in diag["push_health"]

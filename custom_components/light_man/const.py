@@ -26,7 +26,7 @@ MODES_STORE_VERSION: Final = 1
 # top-level objects merged across groups; occupancy moved to `occupancy_zones`
 # referencing room-owned sensors; sleep ramp became a top-level block. The loader
 # derives the unchanged runtime view from this shape, so addressing is identical.
-BUNDLED_SEED_VERSION: Final = 13
+BUNDLED_SEED_VERSION: Final = 14
 
 # --- Seed-config JSON keys --------------------------------------------------
 CONF_PUSH_INTERVAL: Final = "push_interval_s"
@@ -193,6 +193,9 @@ DIM_TIMEOUT_S: Final = 15.0  # a release that never arrives ends the dim here
 # A paddle must stay held this long after the switch reports the hold before the
 # dim starts: a press that lingers just past the switch's own threshold does nothing.
 DIM_START_DELAY_S: Final = 0.4
+# A held light switched off gets its curve value staged this long after the off:
+# the bound bulbs report off 0.1-1.4 s after the tap (median 0.9 s, 2026-11 capture).
+OFF_STAGE_DELAY_S: Final = 1.5
 BAR_HEIGHT_QUIET_S: Final = 3.0  # ignore the switch's level reports after our write
 FAILURE_LOG_INTERVAL_S: Final = 600.0
 MQTT_SLOW_PUBLISH_S: Final = 10.0

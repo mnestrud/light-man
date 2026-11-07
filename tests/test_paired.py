@@ -75,6 +75,7 @@ async def pair(
     clock.advance(CONFIG_TAP_MIN_ON_S + 3.0)  # on long enough, bars not quiet
     mqtt_mock.async_publish.reset_mock()
     yield coord
+    coord.shutdown_subscriptions()
 
 
 def _show(coord: LightManCoordinator, clock: FakeClock, *, a1: int, strip: int) -> None:
@@ -161,14 +162,12 @@ async def test_paddle_taps_and_reports_reach_every_light(
 
     mqtt_mock.async_publish.reset_mock()
     await _press(hass, FRONT, {"action": "down_single"})
-    pubs = published(mqtt_mock)
-    assert pubs[A1_SET]["state"] == "OFF"
-    assert pubs[STRIP_SET]["state"] == "OFF"
+    assert not {A1_SET, STRIP_SET} & set(published(mqtt_mock))  # bindings act
 
-    # The partner turns off through its binding: its report stages its lights.
+    # The partner turns off through its binding: its report sends nothing either.
     mqtt_mock.async_publish.reset_mock()
     await _press(hass, SIDE, {"state": "OFF"})
-    assert published(mqtt_mock)[STRIP_SET]["state"] == "OFF"
+    assert STRIP_SET not in published(mqtt_mock)
     clock.advance(3.0)
     await _press(hass, SIDE, {"action": "config_double"})
     mqtt_mock.async_publish.reset_mock()

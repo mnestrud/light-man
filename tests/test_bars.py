@@ -456,7 +456,7 @@ async def test_bar_level_follows_the_curve_at_the_tick(
 ) -> None:
     mqtt_mock.async_publish.reset_mock()
     peak = house._config["sources"]["overhead"]["profile"]["max_br"]
-    house.diagnostics["engine"]["overhead"]["brightness_pct"] = peak / 5
+    house._bar_pct["overhead"] = peak / 5
     house._sync_bars()
     await hass.async_block_till_done()
     assert (LR_SET_TOPIC, {KEY_LEVEL: 5}) in bar_published(mqtt_mock)
@@ -468,7 +468,7 @@ async def test_the_switch_report_seeds_the_level_so_it_is_not_rewritten(
     coord = await _coordinator(hass, _bar_seed())
     _fire(hass, LR_SWITCH, {"state": "OFF", KEY_LEVEL: 25})
     await hass.async_block_till_done()
-    coord.diagnostics["engine"]["overhead"] = {"brightness_pct": 1000.0}
+    coord._bar_pct["overhead"] = 1000.0
     coord.push_enabled = True
     coord._sync_bars()
     await hass.async_block_till_done()
@@ -538,7 +538,7 @@ def test_loader_keeps_valid_animations_and_flags_bad_ones() -> None:
 def test_v11_fixture_migrates_to_the_shipped_bundle() -> None:
     raw = json.loads((FIXTURES / "seed_v11.json").read_text())
     migrated, steps = migrate(raw)
-    assert steps == [11, 12]
+    assert steps == [11, 12, 13]
     assert migrated == json.loads(BUNDLE.read_text())
     assert migrated["seed_version"] == BUNDLED_SEED_VERSION
     result = validate_config(migrated)

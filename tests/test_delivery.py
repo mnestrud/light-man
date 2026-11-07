@@ -122,28 +122,6 @@ async def test_busy_on_a_consolidated_topic_replans_flood_with_reasserts(
     assert stats["last"]["kind"] == "busy"
 
 
-async def test_busy_on_a_room_topic_is_resent_once_without_state(
-    hass: HomeAssistant, coordinator: Coord, mqtt_mock: Any
-) -> None:
-    await _enabled(hass, coordinator, mqtt_mock)
-    _fire(hass, LR_SWITCH, {"state": "ON"})  # first report after start: recorded
-    await hass.async_block_till_done()
-    _fire(hass, LR_SWITCH, {"state": "OFF"})  # stage-off carries state: OFF
-    await hass.async_block_till_done()
-    mqtt_mock.async_publish.reset_mock()
-    for _ in range(2):
-        _fire(
-            hass,
-            "zigbee2mqtt/bridge/logging",
-            _failure("zgb_living_room", "status=BUSY"),
-        )
-        await hass.async_block_till_done()
-    pubs = published(mqtt_mock)
-    assert set(pubs) == {LR_SET}
-    assert "state" not in pubs[LR_SET]  # a stale OFF is never re-sent
-    assert len(mqtt_mock.async_publish.call_args_list) == 1  # once
-
-
 async def test_stale_failure_for_an_old_room_send_is_not_resent(
     hass: HomeAssistant, coordinator: Coord, mqtt_mock: Any, clock: FakeClock
 ) -> None:
@@ -578,7 +556,8 @@ async def test_switch_off_after_the_first_report_releases_and_stages(
     mqtt_mock.async_publish.reset_mock()
     _fire(hass, LR_SWITCH, {"state": "OFF"})
     await hass.async_block_till_done()
-    assert published(mqtt_mock)[LR_SET]["state"] == "OFF"
+    assert published(mqtt_mock) == {}  # the curve is staged later
+    assert "living_room.overhead" in coordinator._off_stages
     assert not coordinator._modes.is_held("living_room.overhead")
 
 
@@ -700,10 +679,12 @@ async def test_stale_off_right_after_an_up_tap_is_ignored(
     _fire(hass, LR_SWITCH, {"state": "OFF", "power": 0.2})  # stale cache
     await hass.async_block_till_done()
     assert LR_SET not in published(mqtt_mock)
+    assert coordinator._paddle_on[LR_SWITCH]
     clock.advance(3.0)  # after the grace window a real OFF report still counts
     _fire(hass, LR_SWITCH, {"state": "OFF"})
     await hass.async_block_till_done()
-    assert published(mqtt_mock)[LR_SET]["state"] == "OFF"
+    assert not coordinator._paddle_on[LR_SWITCH]
+    assert LR_SET not in published(mqtt_mock)
 
 
 # --- held-paddle dimming ------------------------------------------------------

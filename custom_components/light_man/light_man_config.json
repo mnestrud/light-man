@@ -1,6 +1,6 @@
 {
-  "seed_version": 13,
-  "push_interval_s": 120,
+  "seed_version": 14,
+  "push_interval_s": 240,
   "curves": {
     "daylight_standard": {
       "min_br": 30,

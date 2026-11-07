@@ -277,7 +277,9 @@ async def seed_states(hass: HomeAssistant) -> None:
 
 
 @pytest.fixture
-async def coordinator(hass: HomeAssistant, mqtt_mock: Any) -> LightManCoordinator:
+async def coordinator(
+    hass: HomeAssistant, mqtt_mock: Any
+) -> AsyncIterator[LightManCoordinator]:
     """A constructed + set-up coordinator (push starts disabled)."""
     await seed_states(hass)
     entry = MockConfigEntry(domain=DOMAIN, title="Light Man")
@@ -288,7 +290,8 @@ async def coordinator(hass: HomeAssistant, mqtt_mock: Any) -> LightManCoordinato
     await coord._async_setup()  # exercise subscribe + reconcile
     await coord.async_refresh()
     await hass.async_block_till_done()
-    return coord
+    yield coord
+    coord.shutdown_subscriptions()  # cancels pending timers (off-stage, override)
 
 
 async def setup_lightman(hass: HomeAssistant, seed: Any = SEED) -> MockConfigEntry:

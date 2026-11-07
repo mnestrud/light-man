@@ -80,7 +80,6 @@ from .const import (
     DEFAULT_OVERRIDE_IDLE_S,
     DEFAULT_SLEEP_RAMP_IN_S,
     DEFAULT_SLEEP_RAMP_OUT_S,
-    DEFAULT_TRANSITION_S,
     DIM_FLOOR,
     DIM_LEAD_S,
     DIM_MIN_FADE_S,
@@ -102,6 +101,7 @@ from .const import (
     LOOK_KINDS,
     MODE_ADAPTIVE,
     MQTT_SLOW_PUBLISH_S,
+    OFF_STAGE_DELAY_S,
     PADDLE_STATE_GRACE_S,
     RELEASE_ACTIONS,
     STATE_OFF,
@@ -241,6 +241,8 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         self._on_since: dict[str, float] = {}  # switch -> when it last turned on
         self._expect_echo: dict[str, tuple[str, float]] = {}  # our switch writes
         self._override_timers: dict[str, Callable[[], None]] = {}
+        self._off_stages: dict[str, Callable[[], None]] = {}  # light ref -> cancel
+        self._bar_pct: dict[str, float] = {}  # source -> curve % of its last send
         self._zone_lit: dict[str, set[str]] = {}  # zone -> topics lit this episode
         self._room_source: dict[str, str] = {
             room: source_key
@@ -258,7 +260,6 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         topics = [s[CONF_CONSOLIDATED_TOPIC] for s in config[CONF_SOURCES].values()]
         self._z2m_base, _disagree = z2m_base_topic(topics)
         self._group_topics: set[str] | None = None
-        self._state_resend: set[str] = set()  # topics whose OFF a retry keeps
         # source -> generation of the latest force request (cleared when a unit
         # planned with that generation is actually sent)
         self._force_pending: dict[str, int] = {}
@@ -477,9 +478,10 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         for task in self._dim_starts.values():
             task.cancel()
         self._dim_starts.clear()
-        for cancel in self._override_timers.values():
+        for cancel in [*self._override_timers.values(), *self._off_stages.values()]:
             cancel()
         self._override_timers.clear()
+        self._off_stages.clear()
         self._publisher.cancel()
         self._bars.cancel()
 
@@ -685,6 +687,9 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
             used[0] = self._force_pending.get(key)
             sends = self._plan_source(key, source, t_end, force=used[0] is not None)
             self._note_planned(sends, PRIORITY_TICK)
+            engine = self.diagnostics["engine"].get(key)
+            if sends and engine:
+                self._bar_pct[key] = float(engine["brightness_pct"])  # bars follow
             return sends
 
         future = self._publisher.enqueue_planned(
@@ -894,7 +899,6 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
             if self._outage:
                 self._outage_topics.add(send.topic)
             self._interactive_recent[send.topic] = (now, 0)  # retries per plan
-            self._state_resend.discard(send.topic)
 
     def _on_sent(self, future: asyncio.Future[list[Send]]) -> None:
         """Mark exactly what the broker acked (coalesced sends are not marked).
@@ -980,7 +984,6 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         topic: str,
         payload: PushPayload,
         *,
-        state: str | None = None,
         transition: float | None = None,
         origin_at: float | None = None,
     ) -> None:
@@ -989,8 +992,6 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         if transition is None:
             transition = interactive_transition(self._shown(topic), payload)
         body["transition"] = transition
-        if state is not None:
-            body["state"] = state
         self._enqueue(
             [Send(topic, body)], priority=PRIORITY_INTERACTIVE, origin_at=origin_at
         )
@@ -1034,12 +1035,16 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         return self._bar_lights[base][0]
 
     def _bar_fraction(self, source_key: str) -> float | None:
-        """Where the source's curve sits, 0 (dark) to 1 (its brightest), if known."""
-        engine = self.diagnostics["engine"].get(source_key)
+        """Where the source's last curve send sits, 0 (dark) to 1 (its brightest).
+
+        Follows the curve sends only: the bar level changes when a tick sends,
+        never between sends. None until the source has sent.
+        """
         peak = self._config[CONF_SOURCES][source_key]["profile"].get("max_br")
-        if not engine or not peak:
+        sent = self._bar_pct.get(source_key)
+        if sent is None or not peak:
             return None
-        return max(0.0, min(1.0, float(engine["brightness_pct"]) / peak))
+        return max(0.0, min(1.0, sent / peak))
 
     def _bar_leds(self, base: str) -> dict[str, int | None]:
         """Status lights of a switch: a held look on top, the override below."""
@@ -1304,7 +1309,6 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         sends = [Send(topic, off) for topic in zone.get(CONF_OFF_LIGHTS, [])]
         if sends:
             self._enqueue(sends, priority=PRIORITY_INTERACTIVE)
-            self._state_resend.update(send.topic for send in sends)
         self._write_switches(sync, STATE_OFF)  # bars follow (lights already off)
 
     def _write_switches(self, bases: Iterable[str], state: str) -> None:
@@ -1365,30 +1369,6 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
             self.diagnostics["occupancy"][zone_key] = False
             self._clear_zone(zone_key)
         self._publish_snapshot()
-
-    async def _stage_off(self, source_key: str, light_ref: str) -> None:
-        """Turn a room off + stage its adaptive value in one deterministic command.
-
-        A paddle-off must NOT flood the consolidated group state-less: the MQTT
-        round-trip beats the switch's local Zigbee binding OFF, so the brightness
-        lands while the bulb is still on and re-brightens it (the multi-tap bug).
-        Instead, address the room with an explicit ``state: OFF`` carrying the
-        staged adaptive value (at the glide end) — it goes off regardless of the
-        race and is pre-loaded for the next turn-on.
-        """
-        rooms = self._config[CONF_SOURCES][source_key].get(CONF_ROOMS, {})
-        room = rooms.get(light_ref)
-        if room is None or not room.get(CONF_SET_TOPIC):
-            return
-        payload = self._room_glide_target(source_key)
-        if payload is None:
-            return
-        self._interactive_send(
-            room[CONF_SET_TOPIC],
-            payload,
-            state=STATE_OFF,
-            transition=DEFAULT_TRANSITION_S,
-        )
 
     # --- modes --------------------------------------------------------------
 
@@ -1467,6 +1447,34 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         payload = self._room_glide_target(source_key)
         if payload is not None:
             self._interactive_send(topic, payload, origin_at=origin_at)
+
+    def _schedule_off_stage(self, light_ref: str) -> None:
+        """Stage a released light's curve value once its bulbs are off.
+
+        A switch-off sends nothing: the switch's binding turns the bulbs off.
+        Only a light that was held (a look or a held dim) still carries that
+        value; ``OFF_STAGE_DELAY_S`` after the off, one state-less send stages
+        the curve so the next turn-on comes up right. Sent earlier, it would
+        land on bulbs that are still on.
+        """
+        self._cancel_off_stage(light_ref)
+        self._off_stages[light_ref] = async_call_later(
+            self.hass, OFF_STAGE_DELAY_S, partial(self._off_stage_due, light_ref)
+        )
+
+    def _cancel_off_stage(self, light_ref: str) -> bool:
+        """Drop a pending off-stage; True if one was pending."""
+        cancel = self._off_stages.pop(light_ref, None)
+        if cancel is None:
+            return False
+        cancel()
+        return True
+
+    @callback
+    def _off_stage_due(self, light_ref: str, _now: datetime) -> None:
+        self._off_stages.pop(light_ref, None)
+        if not self._closed:
+            self._release_room(light_ref)
 
     async def async_clear_holds(self) -> None:
         """Resume adaptive everywhere: one release send per held room (#5)."""
@@ -1570,13 +1578,14 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         self._set_paddle(base, on=not off)
         self._paddle_action_at[base] = self._clock()
         released = False
-        for source_key, light_ref in lights:
+        for _source, light_ref in lights:
             freed = await self._modes.release(light_ref)
             released = released or freed
             if off:
                 self._forget_lit(light_ref)
-                await self._stage_off(source_key, light_ref)
-            elif freed:
+                if freed:
+                    self._schedule_off_stage(light_ref)
+            elif self._cancel_off_stage(light_ref) or freed:
                 self._release_room(light_ref, origin_at=origin_at)
         self._publish_snapshot()
         if released and not off:
@@ -1670,19 +1679,30 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         zones = self._override_zones.get(base, [])
         feedback: int | None = None
         if off:
-            for zone in zones:
-                await self._end_override(zone)
-                self._zone_lit.pop(zone, None)
-            for source_key in {src for src, _ref in lights}:
-                self._invalidate_source(source_key)
+            await self._room_off(lights, zones, released)
         else:
-            shown = [(src, ref) for src, ref in lights if ref in released]
+            pending = [ref for _src, ref in lights if self._cancel_off_stage(ref)]
+            shown = [
+                (src, ref) for src, ref in lights if ref in released or ref in pending
+            ]
             feedback = await self._room_tap_up(base, zones, shown, origin_at)
         _LOGGER.debug("%s on %s (room %s)", action, base, room)
         self._publish_snapshot()
         self._bars.unannounce(base)
         if feedback is not None:
             self._bar_play(base, EFFECT_PULSE, feedback)
+
+    async def _room_off(
+        self, lights: list[tuple[str, str]], zones: list[str], released: list[str]
+    ) -> None:
+        """Handle a room switch going off: end overrides, stage released looks."""
+        for zone in zones:
+            await self._end_override(zone)
+            self._zone_lit.pop(zone, None)
+        for source_key in {src for src, _ref in lights}:
+            self._invalidate_source(source_key)
+        for ref in released:
+            self._schedule_off_stage(ref)
 
     async def _room_tap_up(
         self,
@@ -1759,12 +1779,11 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
                 self._interactive_send(topic, payload, origin_at=origin_at)
 
     async def _on_state(self, base: str, state: str) -> None:
-        """Track the paddle: on invalidates the source; off stages the room off.
+        """Track the paddle; off **releases any hold** and sends nothing then.
 
-        Off **releases any hold** (a look must not linger to next turn-on) and
-        stages the room with an explicit ``state: OFF`` rather than the state-less
-        flood — the flood would race the local binding and re-brighten the bulb
-        (see :meth:`_stage_off`).
+        The switch's binding turns the bulbs off. A light that was held (a look
+        or a held dim) gets its curve value staged once the bulbs are off
+        (:meth:`_schedule_off_stage`); otherwise the regular sends keep it staged.
         """
         on = state == STATE_ON
         previous = self._paddle_on.get(base)
@@ -1814,13 +1833,14 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
                 _LOGGER.info("hold released by switch-off for %s", light_ref)
             return
         if on:
-            if await self._modes.release(light_ref):
+            pending = self._cancel_off_stage(light_ref)
+            if await self._modes.release(light_ref) or pending:
                 self._release_room(light_ref)
             return
+        self._forget_lit(light_ref)
         if await self._modes.release(light_ref):
             _LOGGER.info("hold released by switch-off for %s", light_ref)
-        self._forget_lit(light_ref)
-        await self._stage_off(source_key, light_ref)
+            self._schedule_off_stage(light_ref)
 
     # --- held-paddle dimming: Light Man fades, so it knows the level ---------
 
@@ -2021,9 +2041,7 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         - A source's consolidated topic: re-plan the whole source (flood plus
           held-room re-asserts) as one unit — never the flood alone.
         - Any other topic: only if Light Man itself published it in the last
-          ``INTERACTIVE_RETRY_WINDOW_S`` and only once per plan. A zone-clear
-          OFF is re-sent as an OFF; a paddle-off's staging without ``state``
-          (the paddle may already be back on).
+          ``INTERACTIVE_RETRY_WINDOW_S`` and only once per plan, unchanged.
         """
         source_key = self._consolidated_source.get(topic)
         if source_key is not None:
@@ -2047,11 +2065,8 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         await _pace_sleep(INTERACTIVE_RETRY_DELAY_S)
         if self._closed:
             return
-        body = dict(payload)
-        if body.get("state") == STATE_OFF and topic not in self._state_resend:
-            body.pop("state")  # a paddle-off's staging: the paddle owns on/off
         future = self._publisher.enqueue(
-            [Send(topic, body)], priority=PRIORITY_INTERACTIVE
+            [Send(topic, dict(payload))], priority=PRIORITY_INTERACTIVE
         )
         future.add_done_callback(self._on_sent)
 

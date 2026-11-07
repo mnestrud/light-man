@@ -224,6 +224,20 @@ stale bulb NVRAM groups; the **runtime** integration just never uses it. See §8
 > this is `state:**OFF**` (and only on the paddle-off edge, mirroring the occupancy all-clear which already
 > sends `state:OFF`). Tap **up** / turn-**on** floods as before.
 
+> **4-minute curve sends; bars follow the sends (0.8.13, 2026-11-07).** `push_interval_s` 120 -> 240
+> (seed v14 migrates an unedited 120): each source sends every 4 min with a 4-min fade aimed at the
+> curve's value at the fade's end. The LED bar level (`ledIntensityWhenOn`) and start-up height
+> (`defaultLevelLocal/Remote`) follow the curve sends only: the bar level uses the curve value
+> recorded when a source's tick actually sends (`_bar_pct`), never the live curve between sends.
+
+> **Paddle-off sends nothing (0.8.12, 2026-11-07; replaces the v0.7.4 staging below).** A switch-off,
+> by tap or by report, publishes nothing at the off: the switch's binding turns the bulbs off, and the
+> regular state-less sends keep off bulbs staged. The one exception is a light that was **held** (a
+> config-tap look or a held dim) — its bulbs still carry the held value, so `_schedule_off_stage` sends
+> the curve once, state-less, `OFF_STAGE_DELAY_S` (1.5 s) after the off. The delay comes from the
+> 2026-11 capture: bound bulbs report off 0.1-1.4 s after the tap (median 0.9 s, n=67). A turn-on inside
+> the delay cancels it and sends the curve at once. The `_stage_off` explicit `state:OFF` send is gone.
+
 > **Never send `brightness` to an SBM switch (v0.7.5, 2026-06-11).** `_inovelli_plan` used to write the LED-bar
 > `brightness` to a switch while its paddle read on. But on a Smart-Bulb-Mode VZM31 `brightness` is a **live
 > dimmer-level command the local Zigbee bind relays to the bound bulb, turning it on** — and the switch's relay

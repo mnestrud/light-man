@@ -63,7 +63,7 @@ status boxes as items are picked up. Last reviewed: **2026-06-11**.
   consolidated flood — the flood's MQTT round-trip beat the local Zigbee binding's OFF and re-brightened the
   still-on bulb (the "4–5 taps to turn off" bug, masked under the old slower AL stack). The lone exception to
   the state-less adaptive push; does not reinstate the LR latch (that was `state:ON`). See `ARCHITECTURE.md`
-  §5.3.
+  §5.3. *Superseded 2026-11-07 (0.8.12): paddle-off sends nothing; a held light is staged 1.5 s later.*
 - [ ] **Web control panel — editing + persistence (Phase 3).** The write API (config `POST` → Store),
   curve/sweep/assignment editors, Save & Export / Save As / Load config / Reset, the in-place Store
   migration (M1) + `/XF light_man_config.json` deploy exclusion, and the live linter. Replaces the static

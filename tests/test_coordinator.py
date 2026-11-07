@@ -13,10 +13,11 @@ from homeassistant.util import dt as dt_util
 from pytest_homeassistant_custom_component.common import (
     MockConfigEntry,
     async_fire_mqtt_message,
+    async_fire_time_changed,
 )
 
 from custom_components.light_man.config_loader import validate_config
-from custom_components.light_man.const import DOMAIN
+from custom_components.light_man.const import DOMAIN, OFF_STAGE_DELAY_S
 from custom_components.light_man.coordinator import (
     LightManCoordinator,
     _curve_inflections,
@@ -66,6 +67,16 @@ DAY = {"brightness": 229, "transition": 5.0, "color_temp": 234}
 # the day look only moves 80 mired -> 0.72 s.
 NIGHT = {"brightness": 76, "transition": 2.0, "color_temp": 370}
 DAY_LOOK = {"brightness": 229, "transition": 0.72, "color_temp": 154}
+
+
+def _sends_to(mqtt_mock: Any, topic: str) -> int:
+    """Count publishes to one topic."""
+    return sum(1 for c in mqtt_mock.async_publish.call_args_list if c.args[0] == topic)
+
+
+def _later(hass: HomeAssistant, seconds: float) -> None:
+    """Fire HA's timers as if ``seconds`` had passed."""
+    async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=seconds))
 
 
 def _lit(coordinator: Coord, base: str = LR_SWITCH) -> None:
@@ -212,15 +223,10 @@ async def test_down_single_also_releases(
     assert coordinator.data["held_count"] == 0
 
 
-async def test_paddle_off_stages_room_off(
+async def test_paddle_off_sends_nothing(
     hass: HomeAssistant, coordinator: Coord, mqtt_mock: Any
 ) -> None:
-    """Switching a room off stages it with an explicit state:OFF, not the flood.
-
-    A state-less consolidated flood here would race the local binding (MQTT beats
-    the bind) and re-brighten the still-on bulb; the explicit off + staged value
-    is deterministic and pre-loads the next turn-on.
-    """
+    """Switching an unheld room off sends nothing, then or later."""
     await coordinator.async_set_push_enabled(enabled=True)
     await hass.async_block_till_done()
     _fire(hass, LR_SWITCH, {"state": "ON"})  # first report after start: recorded
@@ -229,43 +235,89 @@ async def test_paddle_off_stages_room_off(
 
     _fire(hass, LR_SWITCH, {"state": "OFF"})
     await hass.async_block_till_done()
-    pubs = published(mqtt_mock)
-    assert OVERHEAD_ALL not in pubs  # no racing state-less flood
-    assert pubs[LR_SET]["state"] == "OFF"  # explicit off
-    assert pubs[LR_SET]["brightness"] == 229  # staged adaptive value for next on
-
-
-async def test_stage_off_guards(
-    hass: HomeAssistant, coordinator: Coord, mqtt_mock: Any
-) -> None:
-    """_stage_off no-ops for an unknown room and when solar is unavailable."""
-    await coordinator.async_set_push_enabled(enabled=True)
-    await hass.async_block_till_done()
-    mqtt_mock.async_publish.reset_mock()
-    await coordinator._stage_off("overhead", "ghost.room")  # unknown ref → no publish
-    with patch(
-        "custom_components.light_man.coordinator.solar_inputs",
-        side_effect=ValueError("polar night"),
-    ):
-        await coordinator._stage_off("overhead", "living_room.overhead")  # no payload
+    _later(hass, OFF_STAGE_DELAY_S + 1)
     await hass.async_block_till_done()
     assert published(mqtt_mock) == {}
+    assert coordinator._off_stages == {}
 
 
-async def test_down_single_stages_off(
+async def test_down_single_sends_nothing(
     hass: HomeAssistant, coordinator: Coord, mqtt_mock: Any
 ) -> None:
-    """A down-tap (off intent) releases the hold and stages the room off."""
+    """A down-tap on an unheld room sends nothing, then or later."""
     await coordinator.async_set_push_enabled(enabled=True)
     await hass.async_block_till_done()
     mqtt_mock.async_publish.reset_mock()
 
     _fire(hass, LR_SWITCH, {"action": "down_single"})
     await hass.async_block_till_done()
+    _later(hass, OFF_STAGE_DELAY_S + 1)
+    await hass.async_block_till_done()
+    assert published(mqtt_mock) == {}
+
+
+async def test_off_after_a_look_stages_the_curve_once_later(
+    hass: HomeAssistant, coordinator: Coord, mqtt_mock: Any
+) -> None:
+    """Off after a look: nothing at the off, one state-less curve send later."""
+    await coordinator.async_set_push_enabled(enabled=True)
+    _lit(coordinator)
+    _fire(hass, LR_SWITCH, {"action": "config_single"})
+    await hass.async_block_till_done()
+    mqtt_mock.async_publish.reset_mock()
+
+    _fire(hass, LR_SWITCH, {"action": "down_single"})
+    await hass.async_block_till_done()
+    assert published(mqtt_mock) == {}  # nothing while the bulbs turn off
+    assert "living_room.overhead" in coordinator._off_stages
+    _later(hass, OFF_STAGE_DELAY_S + 0.1)
+    await hass.async_block_till_done()
     pubs = published(mqtt_mock)
-    assert OVERHEAD_ALL not in pubs
-    assert pubs[LR_SET]["state"] == "OFF"
+    assert set(pubs) == {LR_SET}
+    assert "state" not in pubs[LR_SET]
     assert pubs[LR_SET]["brightness"] == 229
+    assert _sends_to(mqtt_mock, LR_SET) == 1
+
+
+async def test_on_before_the_stage_sends_the_curve_at_once(
+    hass: HomeAssistant, coordinator: Coord, mqtt_mock: Any
+) -> None:
+    """Back on inside the delay: the pending stage goes out now, only once."""
+    await coordinator.async_set_push_enabled(enabled=True)
+    _lit(coordinator)
+    _fire(hass, LR_SWITCH, {"action": "config_single"})
+    await hass.async_block_till_done()
+    _fire(hass, LR_SWITCH, {"action": "down_single"})
+    await hass.async_block_till_done()
+    mqtt_mock.async_publish.reset_mock()
+
+    _fire(hass, LR_SWITCH, {"action": "up_single"})
+    await hass.async_block_till_done()
+    assert published(mqtt_mock)[LR_SET]["brightness"] == 229
+    _later(hass, OFF_STAGE_DELAY_S + 1)
+    await hass.async_block_till_done()
+    assert _sends_to(mqtt_mock, LR_SET) == 1
+
+
+async def test_switch_report_off_after_a_look_stages_later(
+    hass: HomeAssistant, coordinator: Coord, mqtt_mock: Any
+) -> None:
+    """A reported off (no tap) of a held room stages later; a reported on sends."""
+    await coordinator.async_set_push_enabled(enabled=True)
+    _fire(hass, LR_SWITCH, {"state": "ON"})  # first report after start: recorded
+    await hass.async_block_till_done()
+    await coordinator.async_hold("living_room.overhead", "night")
+    await hass.async_block_till_done()
+    mqtt_mock.async_publish.reset_mock()
+
+    _fire(hass, LR_SWITCH, {"state": "OFF"})
+    await hass.async_block_till_done()
+    assert published(mqtt_mock) == {}
+    assert "living_room.overhead" in coordinator._off_stages
+    _fire(hass, LR_SWITCH, {"state": "ON"})
+    await hass.async_block_till_done()
+    assert published(mqtt_mock)[LR_SET]["brightness"] == 229
+    assert coordinator._off_stages == {}
 
 
 async def test_setup_prunes_orphaned_holds(hass: HomeAssistant, mqtt_mock: Any) -> None:
@@ -866,7 +918,7 @@ async def test_no_switch_writes_on_paddle_and_holds(
         {"action": "config_double"},  # -> held day
         {"action": "up_held"},  # -> held manual
         {"action": "up_single"},  # release -> on
-        {"action": "down_single"},  # release -> off (stage_off path)
+        {"action": "down_single"},  # release -> off
         {"state": "OFF"},
     ):
         if event is None:
