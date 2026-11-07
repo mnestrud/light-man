@@ -32,6 +32,7 @@ CAP = 8
 TAP_LATENCY_S = 1.0
 TAP_SEND_WINDOW_S = 2.0
 TAP_REPORT_WINDOW_S = 12.0
+HOLD_DELAY_S = 0.4  # const.DIM_START_DELAY_S: a held dim starts this long after *_held
 REPORT_CADENCE_S = 10.0
 SPACING_FRACTION = 0.9
 GLIDE_MIN_TRANSITION_S = 30.0
@@ -87,7 +88,9 @@ def load(
     for room_key, room in config["rooms"].items():
         lights = {f"{room_key}.{light['id']}": light for light in room["lights"]}
         for switch in room.get("switches", []):
-            light = lights.get(switch["governs"])
+            governs = switch["governs"]
+            first = governs[0] if isinstance(governs, list) else governs
+            light = lights.get(first)
             if light is not None:
                 switch_room[switch["topic"]] = light["set_topic"]
     sources = {k: s["consolidated_topic"] for k, s in config["sources"].items()}
@@ -173,7 +176,8 @@ def tap_latency(
         if send is None:
             look_without_send += rec["action"] in LOOK_ACTIONS
             continue  # paddle on/off: the switch's binding acts, Light Man does not
-        sends.append(send["t"] - rec["t"])
+        delay = HOLD_DELAY_S if rec["action"].endswith("_held") else 0.0
+        sends.append(send["t"] - rec["t"] - delay)
         bulbs = house.bulbs_of(room)
         recent = any(
             r["kind"] == "report"
@@ -195,7 +199,7 @@ def tap_latency(
             None,
         )
         if first is not None:
-            reported.append(first["t"] - rec["t"])
+            reported.append(first["t"] - rec["t"] - delay)
     slow = [x for x in reported if x > TAP_LATENCY_S]
     worst_send = max(sends, default=0.0)
     return [
@@ -228,6 +232,7 @@ def _transition(send: dict[str, Any]) -> float:
 def bulb_jumps(records: list[dict[str, Any]], house: House) -> list[Row]:
     """Report-to-report rate on lit bulbs, judged by the send that caused it."""
     last_report: dict[str, dict[str, Any]] = {}
+    first_lit: set[str] = set()  # bulbs whose last report was the first after off
     sends_to: dict[str, list[dict[str, Any]]] = {}  # topic -> sends so far
     jumps: list[str] = []
     checked = 0
@@ -239,8 +244,12 @@ def bulb_jumps(records: list[dict[str, Any]], house: House) -> list[Row]:
             continue
         prev = last_report.get(rec["bulb"])
         last_report[rec["bulb"]] = rec
-        if prev is None or not (prev["on"] and rec["on"]):
-            continue
+        after_on = rec["bulb"] in first_lit
+        first_lit.discard(rec["bulb"])
+        if rec["on"] and (prev is None or not prev["on"]):
+            first_lit.add(rec["bulb"])
+        if prev is None or not (prev["on"] and rec["on"]) or after_on:
+            continue  # the first lit report can land mid power-on fade
         causes = [
             s
             for t in house.topics_of(rec["bulb"])
