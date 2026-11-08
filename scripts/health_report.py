@@ -25,7 +25,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
+import urllib.request
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -44,6 +46,32 @@ def _stamp(text: str | None) -> float | None:
     return (
         None if text is None else datetime.fromisoformat(text).astimezone().timestamp()
     )
+
+
+def ha_starts() -> list[float]:
+    """When HA core started, every time since the host booted.
+
+    Each start is the first stamped line after a container start (``s6-overlay``
+    preinit) in the host boot's core log.
+    """
+    request = urllib.request.Request(
+        f"https://{ha_ws.HOST}/api/hassio/core/logs/boots/0",
+        headers={
+            "Authorization": f"Bearer {ha_ws.TOKEN_FILE.read_text().strip()}",
+            "Range": "entries=:-1000000:",
+        },
+    )
+    with urllib.request.urlopen(request, timeout=300) as response:  # noqa: S310
+        text = response.read().decode(errors="replace")
+    text = re.sub(r"\x1b\[[0-9;]*m", "", text)  # ANSI colours
+    starts: list[float] = []
+    for chunk in text.split("s6-overlay/libexec/preinit")[1:]:
+        match = re.search(r"^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)", chunk, re.M)
+        if match is not None:
+            stamp = datetime.fromisoformat(match.group(1)).astimezone().timestamp()
+            if not starts or stamp != starts[-1]:
+                starts.append(stamp)
+    return starts
 
 
 def light_man_state() -> dict[str, Any]:
@@ -125,23 +153,28 @@ def main() -> None:
     ]
     p95 = latency.get("p95_ms")
     rows = rows_missing + rows
-    taps = 0
+    taps: list[float] = []
+    starts: list[float] = []
     if args.capture:
         config = json.loads(args.store.read_text())["data"]
+        starts = ha_starts()
         capture_rows, taps = capture_checks.all_rows(
             args.capture,
             config,
             _stamp(args.start),
             _stamp(args.end),
             float(config["push_interval_s"]),
-            int(state.get("ignored_config_taps", 0)),
+            starts,
         )
         rows += capture_rows
+    started = starts[-1] if starts else None
+    taps_since = sum(1 for t in taps if started is None or t >= started)
     rows.append(
         (
-            f"interactive latency p95 = {p95} ms (Light Man, since HA start)",
+            f"interactive latency p95 = {p95} ms (Light Man, since HA start; "
+            f"{taps_since} switch taps in the capture since then)",
             "<= 300 ms; no samples only if no taps",
-            p95 <= 300 if p95 is not None else taps == 0,
+            p95 <= 300 if p95 is not None else taps_since == 0,
         )
     )
     width = max(len(r[0]) for r in rows)

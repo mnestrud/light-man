@@ -12,7 +12,9 @@ or a switch shows up in one of two places:
    MQTT does not say who published, so a message is called "not Light Man" from
    its shape: Light Man's light sends always carry ``transition`` with a
    brightness (or are a zone-clear OFF), its switch writes are a bare ``state`` to
-   a sync switch, and its bar commands go to the switch by name (the HA LED
+   a sync switch or an OFF right after a hold on that switch (0.8.11), and its bar
+   commands (LED effects, start-up height ``defaultLevel*``, bar height
+   ``brightness`` with a 0.5 s transition) go to the switch by name (the HA LED
    script addresses the switch by IEEE address). This also catches a service
    call that changed no state (e.g. turning on a light that is on).
 
@@ -39,7 +41,16 @@ HOST = os.environ.get("HA_WS_HOST", "meddle.home.botworth.net")
 TOKEN_FILE = Path(os.environ.get("HA_TOKEN_FILE", "~/.ha-token")).expanduser()
 STORE = Path("/mnt/ha-config/.storage/light_man_config")
 Z2M = "zigbee2mqtt/"
-BAR_KEYS = {"ledIntensityWhenOn", "led_effect", "individual_led_effect"}
+BAR_KEYS = {
+    "ledIntensityWhenOn",
+    "led_effect",
+    "individual_led_effect",
+    "defaultLevelLocal",
+    "defaultLevelRemote",
+}
+HEIGHT_TRANSITION_S = 0.5  # bars.HEIGHT_TRANSITION_S: Light Man's bar-height write
+HOLD_ACTIONS = ("_held", "_release")
+HOLD_ANSWER_S = 1.0  # Light Man turns a held off switch back off within this
 DOMAINS = ("light", "switch")
 OWN_ENTITIES = ("switch.light_man_", "switch.tech_closet_light_man_")
 CHUNK = timedelta(hours=24)
@@ -128,16 +139,32 @@ def _light_man_topics() -> tuple[set[str], set[str], set[str], set[str]]:
 
 
 def _from_light_man(
-    topic: str, payload: dict[str, Any], owned: tuple[set[str], ...]
+    topic: str,
+    payload: dict[str, Any],
+    owned: tuple[set[str], ...],
+    since_hold: float | None = None,
 ) -> bool | None:
-    """Say whether Light Man sent a ``/set``; None when the device is not its own."""
+    """Say whether Light Man sent a ``/set``; None when the device is not its own.
+
+    ``since_hold`` is how long ago a paddle was held or released on that switch.
+    """
     lights, off, switches, sync = owned
     base = topic.removesuffix("/set")
     keys = set(payload)
     if base in switches:
         if keys <= BAR_KEYS:
             return True
-        return keys == {"state"} and base in sync
+        if keys == {"brightness", "transition"}:
+            return bool(payload["transition"] == HEIGHT_TRANSITION_S)
+        if keys != {"state"}:
+            return False
+        if base in sync:
+            return True
+        return (
+            payload["state"] == "OFF"
+            and since_hold is not None
+            and since_hold <= HOLD_ANSWER_S
+        )
     if topic in lights:
         if "transition" not in keys:
             return False
@@ -150,11 +177,16 @@ def capture_report(path: Path, start: datetime, end: datetime) -> None:
     owned = _light_man_topics()
     names: dict[str, str] = {}
     found: dict[tuple[str, str, str], list[datetime]] = defaultdict(list)
+    held_at: dict[str, float] = {}  # switch topic -> last *_held / *_release
     with path.open(encoding="utf-8") as rows:
         for line in rows:
             row = json.loads(line)
             if row.get("kind") == "devices":
                 names = row.get("names", {})
+            if row.get("kind") == "action" and str(row.get("action", "")).endswith(
+                HOLD_ACTIONS
+            ):
+                held_at[row["topic"]] = row["t"]
             if row.get("kind") != "set" or not isinstance(row.get("payload"), dict):
                 continue
             when = datetime.fromtimestamp(row["t"]).astimezone()
@@ -162,7 +194,10 @@ def capture_report(path: Path, start: datetime, end: datetime) -> None:
                 continue
             device = row["topic"].removeprefix(Z2M).removesuffix("/set")
             topic = f"{Z2M}{names.get(device, device)}/set"
-            verdict = _from_light_man(topic, row["payload"], owned)
+            hold = held_at.get(topic.removesuffix("/set"))
+            verdict = _from_light_man(
+                topic, row["payload"], owned, None if hold is None else row["t"] - hold
+            )
             if verdict and device.startswith("0x"):
                 verdict = False  # Light Man addresses devices by name only
             if verdict:

@@ -33,6 +33,10 @@ TAP_LATENCY_S = 1.0
 TAP_SEND_WINDOW_S = 2.0
 TAP_REPORT_WINDOW_S = 12.0
 HOLD_DELAY_S = 0.4  # const.DIM_START_DELAY_S: a held dim starts this long after *_held
+OFF_STAGE_DELAY_S = 1.5  # const.OFF_STAGE_DELAY_S: a released hold's send after an off
+OFF_ACTIONS = {"down_single"}
+RESTART_SEND_S = 120.0  # Light Man's start-up send lands within this of HA's start
+IGNORED_TAP_WINDOW_S = 1.0  # an ignored config tap's red blink follows within this
 REPORT_CADENCE_S = 10.0
 SPACING_FRACTION = 0.9
 GLIDE_MIN_TRANSITION_S = 30.0
@@ -55,6 +59,11 @@ class House:
     groups: dict[str, set[str]]  # group /set topic -> member bulb names
     switch_room: dict[str, str]  # switch topic -> room /set topic
     sources: dict[str, str] = field(default_factory=dict)  # source -> consolidated
+    switch_topics: dict[str, set[str]] = field(default_factory=dict)  # -> governed
+
+    def switch_bulbs(self, switch: str) -> set[str]:
+        """Bulb names every light a switch governs reaches."""
+        return {b for t in self.switch_topics.get(switch, ()) for b in self.bulbs_of(t)}
 
     def bulbs_of(self, topic: str) -> set[str]:
         """Bulb names a /set topic reaches (a group's members, or the device)."""
@@ -85,20 +94,27 @@ def load(
         for g in (groups_rec["groups"] if groups_rec else [])
     }
     switch_room: dict[str, str] = {}
+    switch_topics: dict[str, set[str]] = {}
     for room_key, room in config["rooms"].items():
         lights = {f"{room_key}.{light['id']}": light for light in room["lights"]}
         for switch in room.get("switches", []):
             governs = switch["governs"]
-            first = governs[0] if isinstance(governs, list) else governs
-            light = lights.get(first)
+            refs = governs if isinstance(governs, list) else [governs]
+            light = lights.get(refs[0])
             if light is not None:
                 switch_room[switch["topic"]] = light["set_topic"]
+            topics = switch_topics.setdefault(switch["topic"], set())
+            for ref in refs:
+                if ref in lights:  # a light ref
+                    topics.add(lights[ref]["set_topic"])
+                elif ref == room_key:  # the whole room
+                    topics.update(light["set_topic"] for light in room["lights"])
     sources = {k: s["consolidated_topic"] for k, s in config["sources"].items()}
     lo = start if start is not None else float("-inf")
     hi = end if end is not None else float("inf")
     window = [r for r in records if r["kind"] in {"set", "action", "report"}]
     window = [r for r in window if lo <= r["t"] < hi]
-    return window, House(groups, switch_room, sources)
+    return window, House(groups, switch_room, sources, switch_topics)
 
 
 def group_window(records: list[dict[str, Any]], house: House) -> list[Row]:
@@ -113,19 +129,44 @@ def group_window(records: list[dict[str, Any]], house: House) -> list[Row]:
     return [(f"capture: worst 10 s group window = {worst}", f"<= {CAP}", worst <= CAP)]
 
 
+def _restart_sends(times: list[float], starts: list[float]) -> set[float]:
+    """Return the first send after each HA start (Light Man sends at once)."""
+    out: set[float] = set()
+    for start in starts:
+        first = next((t for t in times if t >= start), None)
+        if first is not None and first - start <= RESTART_SEND_S:
+            out.add(first)
+    return out
+
+
 def source_spacing(
-    records: list[dict[str, Any]], house: House, interval: float
+    records: list[dict[str, Any]],
+    house: House,
+    interval: float,
+    starts: list[float] | None = None,
 ) -> list[Row]:
-    """Each source goes out at most once per interval (would have caught 0.8.2)."""
+    """Each source goes out at most once per interval (would have caught 0.8.2).
+
+    The first send after each HA start is left out (and counted): Light Man
+    sends every source at once when HA starts, whatever the last tick was.
+    """
     rows: list[Row] = []
     floor = SPACING_FRACTION * interval
     for key, topic in sorted(house.sources.items()):
         times = [r["t"] for r in records if r["kind"] == "set" and r["topic"] == topic]
-        close = sum(1 for a, b in itertools.pairwise(times) if b - a < floor)
+        restart = _restart_sends(times, starts or [])
+        close = sum(
+            1
+            for a, b in itertools.pairwise(times)
+            if b - a < floor and b not in restart
+        )
+        excused = sum(
+            1 for a, b in itertools.pairwise(times) if b - a < floor and b in restart
+        )
         rows.append(
             (
                 f"capture: {key} sends closer than {floor:.0f} s = {close} "
-                f"(of {len(times)})",
+                f"(of {len(times)}; {excused} restart sends left out)",
                 "0",
                 close == 0,
             )
@@ -144,18 +185,41 @@ def _first(
     return None
 
 
-def tap_latency(
-    records: list[dict[str, Any]], house: House, ignored: int = 0
-) -> list[Row]:
+def _red_blink(records: list[dict[str, Any]], i: int, switch: str) -> bool:
+    """Return True if Light Man blinked a switch's top LED red right after tap ``i``.
+
+    That blink is how Light Man shows a config tap it ignores on purpose (light
+    off or on < 0.5 s, 0.8.5).
+    """
+    tap = records[i]
+    blink = _first(
+        records,
+        i,
+        tap["t"] + IGNORED_TAP_WINDOW_S,
+        lambda r: (
+            r["kind"] == "set"
+            and r["topic"] == f"{switch}/set"
+            and (r["payload"].get("individual_led_effect") or {}).get("effect")
+            == "fast_blink"
+            and r["payload"]["individual_led_effect"].get("color") == 0
+        ),
+    )
+    return blink is not None
+
+
+def tap_latency(records: list[dict[str, Any]], house: House) -> list[Row]:
     """Tap → Light Man's send → the tapped room's bulbs report it.
 
-    ``ignored`` is Light Man's count of config taps it dropped on purpose (light
-    off or on < 0.5 s, 0.8.5); that many unanswered config taps are expected.
+    A down tap that released a hold is answered by the curve send 1.5 s later
+    (0.8.12); that delay is taken off, and the bulbs are off then, so no report
+    is measured for it.
     """
     sends: list[float] = []
     reported: list[float] = []
     skipped = 0
+    off_stages = 0
     look_without_send = 0
+    ignored = 0
     for i, rec in enumerate(records):
         if rec["kind"] != "action" or rec["topic"] not in house.switch_room:
             continue
@@ -174,9 +238,17 @@ def tap_latency(
             lambda r, room=room: r["kind"] == "set" and r["topic"] == room,
         )
         if send is None:
-            look_without_send += rec["action"] in LOOK_ACTIONS
+            if rec["action"] in LOOK_ACTIONS:
+                if _red_blink(records, i, rec["topic"]):
+                    ignored += 1
+                else:
+                    look_without_send += 1
             continue  # paddle on/off: the switch's binding acts, Light Man does not
         delay = HOLD_DELAY_S if rec["action"].endswith("_held") else 0.0
+        if rec["action"] in OFF_ACTIONS:
+            sends.append(send["t"] - rec["t"] - OFF_STAGE_DELAY_S)
+            off_stages += 1
+            continue  # the bulbs are off: nothing to see in their reports
         sends.append(send["t"] - rec["t"] - delay)
         bulbs = house.bulbs_of(room)
         recent = any(
@@ -205,7 +277,8 @@ def tap_latency(
     return [
         (
             f"capture: tap → Light Man send, n={len(sends)}, "
-            f"max {worst_send * 1000:.0f} ms",
+            f"max {worst_send * 1000:.0f} ms ({off_stages} after an off, "
+            f"less the {OFF_STAGE_DELAY_S} s delay)",
             "<= 300 ms",
             worst_send <= 0.3,  # the plan's interactive target
         ),
@@ -218,15 +291,27 @@ def tap_latency(
         ),
         (
             f"capture: config taps Light Man did not answer = {look_without_send} "
-            f"(ignored on purpose: {ignored})",
-            "<= ignored (light off)",
-            look_without_send <= ignored,
+            f"(ignored on purpose with the red blink: {ignored})",
+            "0",
+            look_without_send == 0,
         ),
     ]
 
 
 def _transition(send: dict[str, Any]) -> float:
     return float(send["payload"].get("transition", 0) or 0)
+
+
+def _paddle_times(
+    records: list[dict[str, Any]], house: House
+) -> dict[str, list[float]]:
+    """Bulb name -> the times a switch governing it acted."""
+    times: dict[str, list[float]] = {}
+    for rec in records:
+        if rec["kind"] == "action":
+            for bulb in house.switch_bulbs(rec["topic"]):
+                times.setdefault(bulb, []).append(rec["t"])
+    return times
 
 
 def bulb_jumps(records: list[dict[str, Any]], house: House) -> list[Row]:
@@ -236,6 +321,7 @@ def bulb_jumps(records: list[dict[str, Any]], house: House) -> list[Row]:
     sends_to: dict[str, list[dict[str, Any]]] = {}  # topic -> sends so far
     jumps: list[str] = []
     checked = 0
+    paddled = _paddle_times(records, house)
     for rec in records:
         if rec["kind"] == "set":
             sends_to.setdefault(rec["topic"], []).append(rec)
@@ -250,6 +336,8 @@ def bulb_jumps(records: list[dict[str, Any]], house: House) -> list[Row]:
             first_lit.add(rec["bulb"])
         if prev is None or not (prev["on"] and rec["on"]) or after_on:
             continue  # the first lit report can land mid power-on fade
+        if any(prev["t"] < t <= rec["t"] for t in paddled.get(rec["bulb"], [])):
+            continue  # a paddle acted in between: its binding moved the bulb
         causes = [
             s
             for t in house.topics_of(rec["bulb"])
@@ -338,17 +426,19 @@ def all_rows(
     start: float | None,
     end: float | None,
     interval: float,
-    ignored_config_taps: int = 0,
-) -> tuple[list[Row], int]:
-    """Every capture row, and how many Light Man switch taps were in the window."""
+    starts: list[float] | None = None,
+) -> tuple[list[Row], list[float]]:
+    """Every capture row, and the times of the Light Man switch taps in the window."""
     records, house = load(path, config, start, end)
-    taps = sum(
-        1 for r in records if r["kind"] == "action" and r["topic"] in house.switch_room
-    )
+    taps = [
+        r["t"]
+        for r in records
+        if r["kind"] == "action" and r["topic"] in house.switch_room
+    ]
     rows = (
         group_window(records, house)
-        + source_spacing(records, house, interval)
-        + tap_latency(records, house, ignored_config_taps)
+        + source_spacing(records, house, interval, starts)
+        + tap_latency(records, house)
         + bulb_jumps(records, house)
         + held_drift(records, house)
     )
