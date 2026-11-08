@@ -35,6 +35,8 @@ TAP_REPORT_WINDOW_S = 12.0
 HOLD_DELAY_S = 0.4  # const.DIM_START_DELAY_S: a held dim starts this long after *_held
 OFF_STAGE_DELAY_S = 1.5  # const.OFF_STAGE_DELAY_S: a released hold's send after an off
 OFF_ACTIONS = {"down_single"}
+REPORT_LAG_S = 1.0  # a bulb's report can trail the send that moved it
+FADE_HEADROOM = 1.5  # a fade may run this much faster than linear between reports
 RESTART_SEND_S = 120.0  # Light Man's start-up send lands within this of HA's start
 IGNORED_TAP_WINDOW_S = 1.0  # an ignored config tap's red blink follows within this
 REPORT_CADENCE_S = 10.0
@@ -147,26 +149,32 @@ def source_spacing(
 ) -> list[Row]:
     """Each source goes out at most once per interval (would have caught 0.8.2).
 
-    The first send after each HA start is left out (and counted): Light Man
-    sends every source at once when HA starts, whatever the last tick was.
+    A regular send's fade is the interval it was sent with (120 s until 0.8.13,
+    240 s since), so each gap is judged by the earlier send's own fade; a short
+    send falls back to ``interval``. The first send after each HA start is
+    off-cycle (Light Man sends every source at once on start): the gaps on
+    either side of it are left out and counted.
     """
     rows: list[Row] = []
-    floor = SPACING_FRACTION * interval
     for key, topic in sorted(house.sources.items()):
-        times = [r["t"] for r in records if r["kind"] == "set" and r["topic"] == topic]
-        restart = _restart_sends(times, starts or [])
-        close = sum(
-            1
-            for a, b in itertools.pairwise(times)
-            if b - a < floor and b not in restart
-        )
-        excused = sum(
-            1 for a, b in itertools.pairwise(times) if b - a < floor and b in restart
-        )
+        sends = [r for r in records if r["kind"] == "set" and r["topic"] == topic]
+        restart = _restart_sends([r["t"] for r in sends], starts or [])
+        close = excused = 0
+        for a, b in itertools.pairwise(sends):
+            fade = _transition(a)
+            floor = SPACING_FRACTION * (
+                fade if fade >= GLIDE_MIN_TRANSITION_S else interval
+            )
+            if b["t"] - a["t"] >= floor:
+                continue
+            if a["t"] in restart or b["t"] in restart:
+                excused += 1
+            else:
+                close += 1
         rows.append(
             (
-                f"capture: {key} sends closer than {floor:.0f} s = {close} "
-                f"(of {len(times)}; {excused} restart sends left out)",
+                f"capture: {key} sends closer than their interval = {close} "
+                f"(of {len(sends)}; {excused} next to a restart send left out)",
                 "0",
                 close == 0,
             )
@@ -199,27 +207,34 @@ def _red_blink(records: list[dict[str, Any]], i: int, switch: str) -> bool:
         lambda r: (
             r["kind"] == "set"
             and r["topic"] == f"{switch}/set"
-            and (r["payload"].get("individual_led_effect") or {}).get("effect")
-            == "fast_blink"
-            and r["payload"]["individual_led_effect"].get("color") == 0
+            and any(
+                (r["payload"].get(key) or {}).get("effect") == "fast_blink"
+                and r["payload"][key].get("color") == 0
+                for key in ("individual_led_effect", "led_effect")  # top LED / bar
+            )
         ),
     )
     return blink is not None
 
 
-def tap_latency(records: list[dict[str, Any]], house: House) -> list[Row]:
-    """Tap → Light Man's send → the tapped room's bulbs report it.
+def _lights_off(records: list[dict[str, Any]], i: int, bulbs: set[str]) -> bool:
+    """Return True if every governed bulb's last report before tap ``i`` was off.
 
-    A down tap that released a hold is answered by the curve send 1.5 s later
-    (0.8.12); that delay is taken off, and the bulbs are off then, so no report
-    is measured for it.
+    Before 0.8.7 an ignored config tap had no red blink; the light being off is
+    then the only sign it was ignored on purpose.
     """
-    sends: list[float] = []
-    reported: list[float] = []
-    skipped = 0
-    off_stages = 0
-    look_without_send = 0
-    ignored = 0
+    seen: dict[str, bool] = {}
+    for rec in reversed(records[max(0, i - 2000) : i]):
+        if rec["kind"] == "report" and rec["bulb"] in bulbs:
+            seen.setdefault(rec["bulb"], rec["on"])
+    return bool(seen) and not any(seen.values())
+
+
+def _taps(
+    records: list[dict[str, Any]], house: House
+) -> list[tuple[int, dict[str, Any], dict[str, Any] | None]]:
+    """Each Light Man switch tap with Light Man's send to its room (None: no send)."""
+    out: list[tuple[int, dict[str, Any], dict[str, Any] | None]] = []
     for i, rec in enumerate(records):
         if rec["kind"] != "action" or rec["topic"] not in house.switch_room:
             continue
@@ -237,9 +252,30 @@ def tap_latency(records: list[dict[str, Any]], house: House) -> list[Row]:
             until,
             lambda r, room=room: r["kind"] == "set" and r["topic"] == room,
         )
+        out.append((i, rec, send))
+    return out
+
+
+def tap_latency(records: list[dict[str, Any]], house: House) -> list[Row]:
+    """Tap → Light Man's send → the tapped room's bulbs report it.
+
+    A down tap that released a hold is answered by the curve send 1.5 s later
+    (0.8.12); that delay is taken off, and the bulbs are off then, so no report
+    is measured for it.
+    """
+    sends: list[float] = []
+    reported: list[float] = []
+    skipped = 0
+    off_stages = 0
+    look_without_send = 0
+    ignored = 0
+    for i, rec, send in _taps(records, house):
+        room = house.switch_room[rec["topic"]]
         if send is None:
             if rec["action"] in LOOK_ACTIONS:
-                if _red_blink(records, i, rec["topic"]):
+                if _red_blink(records, i, rec["topic"]) or _lights_off(
+                    records, i, house.switch_bulbs(rec["topic"])
+                ):
                     ignored += 1
                 else:
                     look_without_send += 1
@@ -291,7 +327,7 @@ def tap_latency(records: list[dict[str, Any]], house: House) -> list[Row]:
         ),
         (
             f"capture: config taps Light Man did not answer = {look_without_send} "
-            f"(ignored on purpose with the red blink: {ignored})",
+            f"(ignored on purpose, red blink or light off: {ignored})",
             "0",
             look_without_send == 0,
         ),
@@ -314,6 +350,44 @@ def _paddle_times(
     return times
 
 
+def _levels_at_sends(
+    records: list[dict[str, Any]], house: House
+) -> dict[str, dict[float, int]]:
+    """Bulb name -> {send time: the bulb's last reported level when it went out}."""
+    last: dict[str, int] = {}
+    out: dict[str, dict[float, int]] = {}
+    for rec in records:
+        if rec["kind"] == "report":
+            last[rec["bulb"]] = rec["brightness"]
+        elif rec["kind"] == "set":
+            for bulb in house.bulbs_of(rec["topic"]):
+                if bulb in last:
+                    out.setdefault(bulb, {})[rec["t"]] = last[bulb]
+    return out
+
+
+def _rate_limit(causes: list[dict[str, Any]], level_at: dict[float, int]) -> float:
+    """Return the fastest rate the causing sends allow, in percent per second.
+
+    A send fades from the bulb's level at the time it went out to its target
+    over its transition, so its own pace is allowed (with headroom), and never
+    less than its class: a glide 0.2 %/s, an interactive send 50 %/s.
+    """
+    allowed = 0.0
+    for send in causes:
+        fade = _transition(send)
+        floor = (
+            GLIDE_PCT_PER_S if fade >= GLIDE_MIN_TRANSITION_S else INTERACTIVE_PCT_PER_S
+        )
+        target = send["payload"].get("brightness")
+        start = level_at.get(send["t"])
+        pace = 0.0
+        if target is not None and start is not None and fade > 0:
+            pace = abs(target - start) * 100 / 254 / fade * FADE_HEADROOM
+        allowed = max(allowed, floor, pace)
+    return allowed
+
+
 def bulb_jumps(records: list[dict[str, Any]], house: House) -> list[Row]:
     """Report-to-report rate on lit bulbs, judged by the send that caused it."""
     last_report: dict[str, dict[str, Any]] = {}
@@ -322,6 +396,7 @@ def bulb_jumps(records: list[dict[str, Any]], house: House) -> list[Row]:
     jumps: list[str] = []
     checked = 0
     paddled = _paddle_times(records, house)
+    level_at = _levels_at_sends(records, house)
     for rec in records:
         if rec["kind"] == "set":
             sends_to.setdefault(rec["topic"], []).append(rec)
@@ -342,23 +417,19 @@ def bulb_jumps(records: list[dict[str, Any]], house: House) -> list[Row]:
             s
             for t in house.topics_of(rec["bulb"])
             for s in sends_to.get(t, [])[-3:]
-            if s["t"] <= rec["t"] and s["t"] + _transition(s) > prev["t"]
+            if s["t"] <= rec["t"] and s["t"] + _transition(s) > prev["t"] - REPORT_LAG_S
         ]  # sends whose fade overlaps the interval between the two reports
         if not causes:
             continue  # a switch ramp or a manual dim, not Light Man
-        # the fastest class among the causes sets the limit
-        limit = (
-            GLIDE_PCT_PER_S
-            if all(_transition(c) >= GLIDE_MIN_TRANSITION_S for c in causes)
-            else INTERACTIVE_PCT_PER_S
-        )
+        limit = _rate_limit(causes, level_at.get(rec["bulb"], {}))
         dt = max(rec["t"] - prev["t"], 0.1)
         rate = abs(rec["brightness"] - prev["brightness"]) * 100 / 254 / dt
         checked += 1
         if rate > limit and abs(rec["brightness"] - prev["brightness"]) > 2:
             jumps.append(f"{rec['bulb']} {prev['brightness']}→{rec['brightness']}")
     label = (
-        f"capture: lit-bulb jumps above their send class = {len(jumps)} (of {checked})"
+        f"capture: lit-bulb jumps faster than the causing send = {len(jumps)} "
+        f"(of {checked})"
     )
     if jumps:
         label += f": {', '.join(jumps[:3])}"
@@ -427,14 +498,17 @@ def all_rows(
     end: float | None,
     interval: float,
     starts: list[float] | None = None,
+    skip: list[tuple[float, float]] | None = None,
 ) -> tuple[list[Row], list[float]]:
-    """Every capture row, and the times of the Light Man switch taps in the window."""
+    """Every capture row, and the times of the taps Light Man answered with a send.
+
+    ``skip`` windows (test sessions) are left out of every row.
+    """
     records, house = load(path, config, start, end)
-    taps = [
-        r["t"]
-        for r in records
-        if r["kind"] == "action" and r["topic"] in house.switch_room
+    records = [
+        r for r in records if not any(lo <= r["t"] < hi for lo, hi in skip or [])
     ]
+    taps = [rec["t"] for _i, rec, send in _taps(records, house) if send is not None]
     rows = (
         group_window(records, house)
         + source_spacing(records, house, interval, starts)

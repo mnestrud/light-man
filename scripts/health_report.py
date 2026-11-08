@@ -96,6 +96,12 @@ def main() -> None:
     parser.add_argument("--from", dest="start", default=None, help="capture rows from")
     parser.add_argument("--to", dest="end", default=None, help="capture rows until")
     parser.add_argument(
+        "--skip",
+        action="append",
+        default=[],
+        help="FROM/TO local times to leave out of the capture (test sessions)",
+    )
+    parser.add_argument(
         "--operator-actions",
         type=int,
         default=0,
@@ -165,6 +171,10 @@ def main() -> None:
             _stamp(args.end),
             float(config["push_interval_s"]),
             starts,
+            [
+                (_stamp(lo) or 0.0, _stamp(hi) or 0.0)
+                for lo, hi in (window.split("/") for window in args.skip)
+            ],
         )
         rows += capture_rows
     started = starts[-1] if starts else None
@@ -172,7 +182,7 @@ def main() -> None:
     rows.append(
         (
             f"interactive latency p95 = {p95} ms (Light Man, since HA start; "
-            f"{taps_since} switch taps in the capture since then)",
+            f"{taps_since} taps answered by a send in the capture since then)",
             "<= 300 ms; no samples only if no taps",
             p95 <= 300 if p95 is not None else taps_since == 0,
         )
