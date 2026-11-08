@@ -21,7 +21,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from functools import partial
-from typing import TYPE_CHECKING, Any, NamedTuple, TypedDict, cast
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple, TypedDict, cast
 
 from homeassistant.components import mqtt
 from homeassistant.core import callback
@@ -138,6 +138,7 @@ if TYPE_CHECKING:
         LightManConfig,
         OccupancyLight,
         OccupancyStage,
+        OccupancyZone,
         PushPayload,
         SourceConfig,
         SourceProfile,
@@ -347,6 +348,10 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
             self._bindings_by_topic.setdefault(binding.topic, []).append(binding)
             self._bindings_by_zone.setdefault(binding.zone, []).append(binding)
         self._sensor_occupied: dict[tuple[str, str], bool] = {}
+        # Zones not yet settled after a start (see _settle_start), and the
+        # zones each sync switch's first report can settle.
+        self._start_pending: set[str] = set(self._bindings_by_zone)
+        self._sync_zones = _switch_zones(self._occupancy, CONF_SYNC_SWITCHES)
         # The rooms each zone's sweeps light: a config-tap look on any of them
         # holds the zone on (no all-clear OFF; sweeps show the look).
         self._topic_room: dict[str, str] = {
@@ -365,10 +370,8 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
             }
             for zone_key, bindings in self._bindings_by_zone.items()
         }
-        self._override_zones: dict[str, list[str]] = {}  # switch -> zones it holds
-        for zone_key, zone in self._occupancy.items():
-            for base in zone.get(CONF_OVERRIDE_SWITCHES, []):
-                self._override_zones.setdefault(base, []).append(zone_key)
+        # switch -> zones it holds
+        self._override_zones = _switch_zones(self._occupancy, CONF_OVERRIDE_SWITCHES)
         self._sweep_tasks: dict[tuple[str, str], asyncio.Task[None]] = {}
         self.diagnostics: dict[str, Any] = {
             "issues": validated.issues,
@@ -1162,7 +1165,9 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
 
         A topic may carry several bindings (e.g. ``mmwave_area1_occupancy`` and
         ``mmwave_area2_occupancy`` on one switch); each reads its own field, tracks its
-        own edge, and drives its own sweep independently.
+        own edge, and drives its own sweep independently. A binding's first report
+        after a start is no edge: it is recorded and the zone settles once
+        (:meth:`_settle_start`).
         """
         bindings = self._bindings_by_topic.get(msg.topic)
         if not bindings or not self.push_enabled:
@@ -1176,9 +1181,12 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
                 continue  # this binding's field is absent from this message
             occupied = _truthy(value)
             bid = (binding.zone, binding.name)
-            if occupied == self._sensor_occupied.get(bid):
+            first = bid not in self._sensor_occupied
+            if not first and occupied == self._sensor_occupied[bid]:
                 continue  # no edge for this binding
             self._sensor_occupied[bid] = occupied
+            if first:
+                self._settle_start(binding.zone)
             if self._modes.override_until(binding.zone) is not None:
                 # Held on by a tap: no sweep (the lights are on), no clear; any
                 # presence restarts the idle clock.
@@ -1187,10 +1195,51 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
                 )
                 self._restart_idle_timer(binding.zone)
                 continue
+            if first:
+                continue  # a baseline, not an edge
             if occupied:
                 self._start_sweep(binding)
             else:
                 await self._maybe_clear_zone(binding.zone)
+
+    def _settle_start(self, zone_key: str) -> None:
+        """Bring a zone in line once after a start, sending only what is needed.
+
+        Waits until every sensor binding and sync switch of the zone has
+        reported. The sync switch shows whether the zone's lights are on: a
+        vacant zone whose switch shows ON is cleared (through the switch); an
+        occupied zone whose switch shows OFF is swept on. Otherwise nothing is
+        sent. A zone held by a tap override is left to its idle timer, and a
+        zone without a sync switch to its next edge.
+        """
+        if zone_key not in self._start_pending:
+            return
+        bindings = self._bindings_by_zone[zone_key]
+        if any((b.zone, b.name) not in self._sensor_occupied for b in bindings):
+            return
+        sync = self._occupancy[zone_key].get(CONF_SYNC_SWITCHES, [])
+        if any(base not in self._paddle_on for base in sync):
+            return
+        self._start_pending.discard(zone_key)
+        if self._modes.override_until(zone_key) is not None:
+            return
+        vacant = self._zone_vacant(zone_key)
+        self.diagnostics["occupancy"][zone_key] = not vacant
+        if not sync:
+            return
+        lit = any(self._paddle_on[base] for base in sync)
+        if vacant and lit:
+            _LOGGER.info(
+                "zone %s vacant at start with its lights on: clearing", zone_key
+            )
+            self._clear_zone(zone_key)
+        elif not vacant and not lit:
+            _LOGGER.info(
+                "zone %s occupied at start with its lights off: sweeping", zone_key
+            )
+            for binding in bindings:
+                if self._sensor_occupied[(binding.zone, binding.name)]:
+                    self._start_sweep(binding)
 
     def _start_sweep(self, binding: _Binding) -> None:
         """Launch a binding's sweep as a task, restarting any in-flight run."""
@@ -1811,6 +1860,9 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
             # off 0.37 s later); a real paddle change arrives as an action.
             return
         self._set_paddle(base, on=on)
+        if previous is None:
+            for zone_key in self._sync_zones.get(base, ()):
+                self._settle_start(zone_key)
         lights = self._switch_lights.get(base)
         if lights is None or not self.push_enabled:
             return  # a room-level switch: its binding acts, the state is tracked
@@ -2245,6 +2297,18 @@ def _curve_inflections(
         "ramp_down": {"start": point(down_start), "end": point(down_end)},
         "solar_noon": noon,
     }
+
+
+def _switch_zones(
+    occupancy: Mapping[str, OccupancyZone],
+    key: Literal["sync_switches", "override_switches"],
+) -> dict[str, list[str]]:
+    """Map each switch listed under ``key`` to the zones that list it."""
+    zones: dict[str, list[str]] = {}
+    for zone_key, zone in occupancy.items():
+        for base in zone.get(key, []):
+            zones.setdefault(base, []).append(zone_key)
+    return zones
 
 
 def _truthy(value: object) -> bool:

@@ -290,8 +290,16 @@ async def coordinator(
     await coord._async_setup()  # exercise subscribe + reconcile
     await coord.async_refresh()
     await hass.async_block_till_done()
+    settle_start(coord)
     yield coord
     coord.shutdown_subscriptions()  # cancels pending timers (off-stage, override)
+
+
+def settle_start(coord: LightManCoordinator) -> None:
+    """Skip the start baseline: every sensor reported vacant, every zone settled."""
+    for binding in coord._bindings:
+        coord._sensor_occupied[(binding.zone, binding.name)] = False
+    coord._start_pending.clear()
 
 
 async def setup_lightman(hass: HomeAssistant, seed: Any = SEED) -> MockConfigEntry:

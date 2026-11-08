@@ -35,10 +35,13 @@ from .conftest import (
     LR_SET,
     LR_SWITCH,
     MMWAVE_EAST,
+    MMWAVE_PORCH,
     MMWAVE_WEST,
+    PORCH_OFF,
     SEED,
     FakeStore,
     published,
+    settle_start,
     tick,
 )
 
@@ -86,6 +89,7 @@ async def hall(
     coord = await _coordinator(hass, _hall_seed())
     await coord.async_set_push_enabled(enabled=True)
     await hass.async_block_till_done()
+    settle_start(coord)
     mqtt_mock.async_publish.reset_mock()
     yield coord
     coord.shutdown_subscriptions()  # idle and off-stage clocks a test left running
@@ -288,6 +292,7 @@ async def test_down_tap_ends_the_override_and_the_hold(
     clock.advance(1.0)
     await _send(hass, hall, MMWAVE_EAST, {"action": "config_single"})
     assert hall._modes.is_held("hall.center")
+    await _send(hass, hall, MMWAVE_EAST, {"occupancy": True})  # someone there
     mqtt_mock.async_publish.reset_mock()
     await _send(hass, hall, MMWAVE_EAST, {"action": "down_single"})
     assert hall._modes.overrides() == {}
@@ -613,3 +618,109 @@ async def test_clear_holds_clears_a_vacant_held_zone(
     await hall.async_clear_holds()
     await hass.async_block_till_done()
     assert published(mqtt_mock)[EAST_SET] == {"state": "OFF"}
+
+
+# --- the start: first reports are a baseline; each zone settles once ---------
+
+
+@pytest.fixture
+async def boot(
+    hass: HomeAssistant, mqtt_mock: Any
+) -> AsyncIterator[LightManCoordinator]:
+    """The hall coordinator right after a start: no sensor or switch reported."""
+    coord = await _coordinator(hass, _hall_seed())
+    await coord.async_set_push_enabled(enabled=True)
+    await hass.async_block_till_done()
+    mqtt_mock.async_publish.reset_mock()
+    yield coord
+    coord.shutdown_subscriptions()
+
+
+async def _report(
+    hass: HomeAssistant,
+    coord: LightManCoordinator,
+    *,
+    east: bool,
+    west: bool,
+    switch: str,
+) -> None:
+    await _send(hass, coord, MMWAVE_EAST, {"occupancy": east})
+    await _send(hass, coord, MMWAVE_WEST, {"occupancy": west})
+    await _send(hass, coord, MMWAVE_EAST, {"state": switch})
+
+
+async def test_start_vacant_with_lights_off_sends_nothing(
+    hass: HomeAssistant, boot: LightManCoordinator, mqtt_mock: Any
+) -> None:
+    await _report(hass, boot, east=False, west=False, switch="OFF")
+    assert published(mqtt_mock) == {}
+    assert "hallway" not in boot._start_pending
+    assert boot.diagnostics["occupancy"]["hallway"] is False
+    await _send(hass, boot, MMWAVE_EAST, {"occupancy": True})  # a real edge
+    assert HALL_UP in published(mqtt_mock)
+
+
+async def test_start_vacant_with_lights_on_turns_the_switch_off_once(
+    hass: HomeAssistant, boot: LightManCoordinator, mqtt_mock: Any
+) -> None:
+    await _report(hass, boot, east=False, west=False, switch="ON")
+    assert published(mqtt_mock) == {EAST_SET: {"state": "OFF"}}
+
+
+async def test_start_waits_for_the_switch_before_settling(
+    hass: HomeAssistant, boot: LightManCoordinator, mqtt_mock: Any
+) -> None:
+    await _send(hass, boot, MMWAVE_EAST, {"state": "ON"})
+    await _send(hass, boot, MMWAVE_EAST, {"occupancy": False})
+    assert published(mqtt_mock) == {}  # the west sensor has not reported
+    await _send(hass, boot, MMWAVE_WEST, {"occupancy": False})
+    assert published(mqtt_mock) == {EAST_SET: {"state": "OFF"}}
+
+
+async def test_start_occupied_with_lights_off_sweeps(
+    hass: HomeAssistant, boot: LightManCoordinator, mqtt_mock: Any
+) -> None:
+    await _report(hass, boot, east=True, west=False, switch="OFF")
+    pubs = published(mqtt_mock)
+    assert HALL_UP in pubs
+    assert HALL_OFF not in pubs
+
+
+async def test_start_occupied_with_lights_on_sends_nothing(
+    hass: HomeAssistant, boot: LightManCoordinator, mqtt_mock: Any
+) -> None:
+    await _report(hass, boot, east=True, west=True, switch="ON")
+    assert published(mqtt_mock) == {}
+    assert boot.diagnostics["occupancy"]["hallway"] is True
+
+
+async def test_start_leaves_an_override_to_its_idle_timer(
+    hass: HomeAssistant, boot: LightManCoordinator, mqtt_mock: Any
+) -> None:
+    await boot._arm_override("hallway")
+    await _report(hass, boot, east=False, west=False, switch="ON")
+    assert published(mqtt_mock) == {}
+    assert "hallway" not in boot._start_pending
+    assert "hallway" in boot._override_timers  # the idle clock still runs
+
+
+async def test_start_keeps_a_held_look_on(
+    hass: HomeAssistant, boot: LightManCoordinator, mqtt_mock: Any
+) -> None:
+    now = dt_util.utcnow()
+    await boot._modes.set_held(
+        "hall.center", kind="night", armed_at=now, expires_at=now + timedelta(hours=1)
+    )
+    await _report(hass, boot, east=False, west=False, switch="ON")
+    assert HALL_OFF not in published(mqtt_mock)
+    assert EAST_SET not in published(mqtt_mock)
+
+
+async def test_start_zone_without_a_sync_switch_waits_for_an_edge(
+    hass: HomeAssistant, boot: LightManCoordinator, mqtt_mock: Any
+) -> None:
+    payload = {"mmwave_area1_occupancy": False, "mmwave_area2_occupancy": False}
+    await _send(hass, boot, MMWAVE_PORCH, payload)
+    assert PORCH_OFF not in published(mqtt_mock)
+    assert "porch" not in boot._start_pending
+    assert boot.diagnostics["occupancy"]["porch"] is False
