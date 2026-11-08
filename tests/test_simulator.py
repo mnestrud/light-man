@@ -133,7 +133,7 @@ def _tap(topic: str, action: str) -> Any:
     async def run(hass: HomeAssistant, coordinator: LightManCoordinator) -> None:
         if action.startswith("config"):
             coordinator._set_paddle(topic, on=True)  # the light has been on
-            coordinator._on_since[topic] -= 10.0
+            coordinator._switches[topic].on_since -= 10.0
         async_fire_mqtt_message(hass, topic, json.dumps({"action": action}))
 
     return run

@@ -18,7 +18,7 @@ import json
 import logging
 import math
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from functools import partial
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple, TypedDict, cast
@@ -181,6 +181,23 @@ class _Dim:
         return round(self.start + (self.target - self.start) * done)
 
 
+@dataclass(slots=True)
+class _Switch:
+    """One Inovelli switch: the lights it governs and what is known of it."""
+
+    lights: list[tuple[str, str]]  # every (source, light ref) it governs
+    room: str | None = None  # the room it governs whole (the hallway pair)
+    on: bool | None = None  # its paddle state; None until it reports
+    on_since: float | None = None  # when it last turned on (config-tap rule)
+    height: int | None = None  # its own level (the bar's height), last reported
+    bar_quiet_until: float = 0.0  # its level reports are ignored until then
+    echo: tuple[str, float] | None = None  # a state write of ours coming back
+    ignore_until: float = 0.0  # state reports before then are not presses
+    held_off: bool = False  # its paddle is held while it is off
+    dims: list[_Dim] = field(default_factory=list)  # fades its held paddle runs
+    dim_start: asyncio.Task[None] | None = None  # a hold not dimming yet
+
+
 class _Binding(NamedTuple):
     """One occupancy trigger: a named sensor's ``(zone, topic, key, sweep)``.
 
@@ -237,14 +254,12 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         self.stored = validated.stored  # the data-model shape (read by the panel)
         self._modes = modes
         self._switch_map = validated.switch_map
-        # light-level switches: base -> every (source, ref) it governs
-        self._switch_lights = validated.switch_lights
-        # room-level switches (the hallway pair): base -> (room, [(source, ref)])
-        self._room_switches = validated.room_switch_map
+        self._switches: dict[str, _Switch] = {
+            base: _Switch(lights) for base, lights in validated.switch_lights.items()
+        }
+        for base, (room, lights) in validated.room_switch_map.items():
+            self._switches[base] = _Switch(lights, room=room)
         self._bar_lights = validated.bar_lights  # base -> the light its bar follows
-        self._switch_height: dict[str, int] = {}  # base -> its last reported level
-        self._on_since: dict[str, float] = {}  # switch -> when it last turned on
-        self._expect_echo: dict[str, tuple[str, float]] = {}  # our switch writes
         self._override_timers: dict[str, Callable[[], None]] = {}
         self._off_stages: dict[str, Callable[[], None]] = {}  # light ref -> cancel
         self._bar_pct: dict[str, float] = {}  # source -> curve % of its last send
@@ -258,8 +273,6 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         # set only on broker ack; cleared by Z2M failures and outages.
         self._last_published: dict[str, PushPayload] = {}
         self._last_planned: dict[str, dict[str, Any]] = {}  # for re-sends/replay
-        self._paddle_on: dict[str, bool] = {}
-        self._paddle_action_at: dict[str, float] = {}  # switch -> last up/down tap
         self._unsubs: list[Any] = []
         self._clock: Callable[[], float] = lambda: _monotonic()
         topics = [s[CONF_CONSOLIDATED_TOPIC] for s in config[CONF_SOURCES].values()]
@@ -270,10 +283,6 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         self._force_pending: dict[str, int] = {}
         self._force_seq = 0
         self._failed_at: dict[str, float] = {}  # topic -> last Z2M failure
-        self._dims: dict[str, list[_Dim]] = {}  # switch -> fades it is running
-        self._dim_starts: dict[str, asyncio.Task[None]] = {}  # holds not yet dimming
-        self._off_holds: dict[str, float] = {}  # switch held while off -> since
-        self._bar_quiet: dict[str, float] = {}  # switch -> ignore its level until
         # switches whose level binding still reaches a light or another switch;
         # None until Z2M's device list has been seen (then nothing is written)
         self._level_bound: set[str] | None = None
@@ -297,7 +306,7 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         )
         self._due = 0.0  # when every source's next step is due (shared schedule)
         self._step_s = float(interval)  # the current step: its length is its fade
-        self._glide_end: dict[str, datetime] = {}
+        self._step_end: datetime | None = None  # where every curve send aims
         self._pushed_once = False
         self._closed = False
         self._marked_at: dict[str, float] = {}
@@ -449,14 +458,14 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         )
 
     def _all_switches(self) -> list[str]:
-        return [*self._switch_map, *self._room_switches]
+        return list(self._switches)
 
     async def _read_switches(self) -> None:
         """Ask each switch for its state once (unicasts, spaced)."""
         for base in self._all_switches():
             if self._closed:
                 return
-            if base in self._paddle_on:
+            if self._switches[base].on is not None:
                 continue  # it already reported
             await mqtt.async_publish(
                 self.hass, f"{base}/get", json.dumps({"state": ""})
@@ -479,10 +488,11 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         self._closed = True
         while self._unsubs:
             self._unsubs.pop()()
-        self._dims.clear()
-        for task in self._dim_starts.values():
-            task.cancel()
-        self._dim_starts.clear()
+        for switch in self._switches.values():
+            switch.dims = []
+            if switch.dim_start is not None:
+                switch.dim_start.cancel()
+                switch.dim_start = None
         for cancel in [*self._override_timers.values(), *self._off_stages.values()]:
             cancel()
         self._override_timers.clear()
@@ -664,11 +674,24 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         if clock >= self._due - slack:  # this send starts the next step
             self._step_s = self._plan_step(now)
             self._due = max(clock, self._due) + self._step_s
+            self._step_end = now + timedelta(seconds=self._step_s)
         elif due_only:
             return  # not due yet; a forced push leaves the schedule unchanged
         for key in self._config[CONF_SOURCES]:
             self._enqueue_source(key, force=force)
         self._pushed_once = True
+
+    def _step_target(self) -> datetime:
+        """Return the current step's end: where every curve send aims.
+
+        Every source aims at the same moment, so a source sent later in the
+        step (paced behind the others) fades faster and lands with them. Past
+        the step's end (a backlog), a send aims one step ahead of now.
+        """
+        now = dt_util.utcnow()
+        if self._step_end is None or self._step_end <= now:
+            return now + timedelta(seconds=self._step_s)
+        return self._step_end
 
     def _plan_step(self, now: datetime) -> float:
         """Return the next step's length: the longest that keeps every curve close.
@@ -730,8 +753,7 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         used: list[int | None] = [None]  # the force generation this unit planned with
 
         def planner() -> list[Send]:
-            t_end = dt_util.utcnow() + timedelta(seconds=self._step_s)
-            self._glide_end[key] = t_end
+            t_end = self._step_target()
             used[0] = self._force_pending.get(key)
             sends = self._plan_source(key, source, t_end, force=used[0] is not None)
             self._note_planned(sends, PRIORITY_TICK)
@@ -801,7 +823,7 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
                 skips += 1
                 continue
             transition = self._tick_transition(
-                item.topic, item.payload, item.dedup, force=force
+                item.topic, item.payload, item.dedup, t_end, force=force
             )
             sends.append(Send(item.topic, {**item.payload, "transition": transition}))
         self._plan_diag[key] = (diag, skips)
@@ -907,9 +929,15 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         return self._shown(topic) == _strip(payload)
 
     def _tick_transition(
-        self, topic: str, payload: PushPayload, dedup: bool, *, force: bool = False
+        self,
+        topic: str,
+        payload: PushPayload,
+        dedup: bool,
+        t_end: datetime,
+        *,
+        force: bool = False,
     ) -> float:
-        """Glide for curve sends, short for re-asserts, catch-up when forced/unknown.
+        """Glide to ``t_end`` for curve sends, short for re-asserts, catch-up.
 
         Catch-up (U7): ``0.1 s`` per brightness point of change, clamped to 2-10 s,
         so a stale bulb converges without a visible jump; 5 s when the last value
@@ -928,7 +956,8 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
                 d_mired = INTERACTIVE_MODE_CHANGE_MIRED
             seconds = 0.1 * delta_pct + 0.02 * d_mired
             return round(min(10.0, max(2.0, seconds)), 1)
-        return self._step_s
+        remaining = (t_end - dt_util.utcnow()).total_seconds()
+        return round(max(1.0, remaining), 1)
 
     def _enqueue(
         self,
@@ -1005,11 +1034,8 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         arrives slightly early and waits rather than stepping backwards (U3).
         """
         source = self._config[CONF_SOURCES][source_key]  # loader-validated
-        t_end = self._glide_end.get(source_key) or (
-            dt_util.utcnow() + timedelta(seconds=self._step_s)
-        )
         try:
-            return self._engine_payload(source_key, source, t_end)
+            return self._engine_payload(source_key, source, self._step_target())
         except KeyError, TypeError, ValueError:
             return None
 
@@ -1079,9 +1105,7 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
 
     def _governed(self, base: str) -> list[tuple[str, str]]:
         """Return every (source, light ref) a switch governs."""
-        if base in self._room_switches:
-            return self._room_switches[base][1]
-        return self._switch_lights[base]
+        return self._switches[base].lights
 
     def _bar_source(self, base: str) -> str:
         """Return the source whose curve a switch's bar follows."""
@@ -1157,7 +1181,7 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         level = data.get(KEY_HEIGHT)
         if not isinstance(level, int) or data.get("state") != STATE_ON:
             return
-        self._switch_height[base] = level
+        self._switches[base].height = level
         self._write_height(base, level)
 
     def _follow_partners(self, base: str) -> None:
@@ -1171,26 +1195,27 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         for other in self._all_switches():
             if other == base or not refs & {r for _s, r in self._governed(other)}:
                 continue
-            level = self._switch_height.get(other)
+            level = self._switches[other].height
             if level is not None:
                 self._write_height(other, level)
 
     def _write_height(self, base: str, level: int) -> None:
         """Set a switch's own level to its lights' when it is off by a step."""
+        switch = self._switches[base]
         if (
-            not self._paddle_on.get(base)
+            not switch.on
             or not self.push_enabled
-            or base in self._dims
+            or switch.dims
             or self._level_bound is None
             or base in self._level_bound
-            or self._clock() < self._bar_quiet.get(base, 0.0)
+            or self._clock() < switch.bar_quiet_until
         ):
             return
         target = self._lights_level(base)
         if target is None or abs(target - level) < HEIGHT_STEP:
             return
-        self._bar_quiet[base] = self._clock() + BAR_HEIGHT_QUIET_S
-        self._switch_height[base] = target
+        switch.bar_quiet_until = self._clock() + BAR_HEIGHT_QUIET_S
+        switch.height = target
         self._bars.height(base, target)
 
     def _bar_play(
@@ -1268,7 +1293,7 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         if any((b.zone, b.name) not in self._sensor_occupied for b in bindings):
             return
         sync = self._occupancy[zone_key].get(CONF_SYNC_SWITCHES, [])
-        if any(base not in self._paddle_on for base in sync):
+        if any(self._paddle(base) is None for base in sync):
             return
         self._start_pending.discard(zone_key)
         if self._modes.override_until(zone_key) is not None:
@@ -1277,7 +1302,7 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         self.diagnostics["occupancy"][zone_key] = not vacant
         if not sync:
             return
-        lit = any(self._paddle_on[base] for base in sync)
+        lit = any(self._paddle(base) for base in sync)
         if vacant and lit:
             _LOGGER.info(
                 "zone %s vacant at start with its lights on: clearing", zone_key
@@ -1403,7 +1428,7 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         if self._zone_held(zone_key):
             return
         sync = zone.get(CONF_SYNC_SWITCHES, [])
-        if sync and all(self._paddle_on.get(base) for base in sync):
+        if sync and all(self._paddle(base) for base in sync):
             self._write_switches(sync, STATE_OFF)
             return
         transition = zone.get(CONF_OFF_TRANSITION, DEFAULT_OCCUPANCY_TRANSITION_S)
@@ -1412,6 +1437,11 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         if sends:
             self._enqueue(sends, priority=PRIORITY_INTERACTIVE)
         self._write_switches(sync, STATE_OFF)  # bars follow (lights already off)
+
+    def _paddle(self, base: str) -> bool | None:
+        """Return a switch's paddle state (None: unknown, or not a switch here)."""
+        switch = self._switches.get(base)
+        return None if switch is None else switch.on
 
     def _write_switches(self, bases: Iterable[str], state: str) -> None:
         """Set switches' on/off state (unicasts); their echo is not a paddle press.
@@ -1422,13 +1452,15 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         sends = [
             Send(f"{base}/set", {"state": state})
             for base in bases
-            if self._paddle_on.get(base) != want
+            if self._paddle(base) != want
         ]
         if not sends:
             return
         now = self._clock()
         for send in sends:
-            self._expect_echo[send.topic.removesuffix("/set")] = (state, now)
+            switch = self._switches.get(send.topic.removesuffix("/set"))
+            if switch is not None:
+                switch.echo = (state, now)
         self._enqueue(sends, priority=PRIORITY_INTERACTIVE)
 
     # --- zone override (a tap holds the zone on; motion ignored) ------------
@@ -1507,18 +1539,8 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         self, room: str, kind: str, *, origin_at: float | None = None
     ) -> None:
         """Hold a room at a look and show it now — one interactive send (#3)."""
-        now = dt_util.utcnow()
-        await self._modes.set_held(
-            room, kind=kind, armed_at=now, expires_at=self._next_midnight(now)
-        )
-        source_key = self._room_source.get(room)
-        topic = self._room_topic(room)
-        if source_key is not None and topic is not None:
-            look = self._held_looks(source_key, self._config[CONF_SOURCES][source_key])
-            payload = look.get(room)
-            if payload is not None and self.push_enabled:
-                self._interactive_send(topic, payload, origin_at=origin_at)
-        self._publish_snapshot()
+        source_key = self._room_source.get(room, "")
+        await self._hold_lights([(source_key, room)], kind, origin_at=origin_at)
 
     async def async_release_hold(
         self, room: str, *, origin_at: float | None = None
@@ -1633,65 +1655,125 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         self._follow_bar(msg.topic, data)
 
     async def _on_action(self, base: str, action: str) -> None:
-        """Apply a tap: a config hold, a held-dim freeze, or an on/off release.
+        """Apply a tap: a config hold, a held-paddle dim, or an on/off release.
 
-        On a Smart-Bulb-Mode switch a single tap is also the on/off intent
-        (up = on, down = off). Paddle-on publishes nothing: the bulbs wake at the
-        value staged by the last flood (verified on every model 2026-11-03); the
-        source is invalidated so its next due tick re-sends it.
+        Every switch handles taps the same way, on the lights it governs. On a
+        Smart-Bulb-Mode switch a single tap is also the on/off intent (up = on,
+        down = off). Paddle-on publishes nothing: the bulbs wake at the value
+        staged by the last flood (verified on every model 2026-11-03). A switch
+        that also holds a zone on (the hallway pair) arms that override with
+        its up tap and ends it with its down tap.
         """
         if not self.push_enabled:
             return  # inert when Light Man is off — the blueprint owns taps
         self._play_tap_animation(base, action)
-        if base in self._room_switches:
-            await self._on_room_action(base, action)
+        switch = self._switches.get(base)
+        if switch is None:
             return
-        lights = self._switch_lights.get(base)
-        if lights is None:
-            return
-        origin_at = self._clock()
         if action in RELEASE_ACTIONS:
             await self._end_dim(base)
             return
         mode = action_to_mode(action)
         if mode is None:
             return
+        origin_at = self._clock()
         if mode == MODE_ADAPTIVE:
-            await self._on_paddle_tap(base, action, lights, origin_at)
-        elif mode not in LOOK_KINDS:
+            await self._on_paddle_tap(base, switch, action, origin_at)
+        elif mode == HELD_MANUAL:
             await self._start_dim(base, action)
         elif self._look_tap_accepted(base, action):
             self._bars.announce(base, LED_TOP)  # the top LED pulses, then stays
-            for _source, light_ref in lights:
-                await self.async_hold(light_ref, mode, origin_at=origin_at)
+            await self._hold_lights(
+                switch.lights,
+                mode,
+                origin_at=origin_at,
+                whole=switch.room is not None,
+            )
             self._bars.unannounce(base)
             self._follow_partners(base)
 
     async def _on_paddle_tap(
-        self,
-        base: str,
-        action: str,
-        lights: list[tuple[str, str]],
-        origin_at: float,
+        self, base: str, switch: _Switch, action: str, origin_at: float
     ) -> None:
-        """Handle a single up/down tap: track the paddle and release any hold."""
+        """Handle a single up/down tap: track the paddle and release any hold.
+
+        A release is answered by a bar pulse (back to automatic); a newly
+        armed zone override by the bottom LED instead.
+        """
         off = action.startswith("down")
         self._drop_dim(base)
         self._set_paddle(base, on=not off)
-        self._paddle_action_at[base] = self._clock()
-        released = False
-        for _source, light_ref in lights:
-            freed = await self._modes.release(light_ref)
-            released = released or freed
-            if off:
-                self._forget_lit(light_ref)
-                if freed:
-                    self._schedule_off_stage(light_ref)
-            elif self._cancel_off_stage(light_ref) or freed:
-                self._release_room(light_ref, origin_at=origin_at)
+        switch.ignore_until = origin_at + PADDLE_STATE_GRACE_S
+        released = [
+            ref for _src, ref in switch.lights if await self._modes.release(ref)
+        ]
+        zones = self._override_zones.get(base, [])
+        feedback: int | None = None
+        if off:
+            await self._paddle_off(switch, zones, released)
+        else:
+            feedback = await self._paddle_up(base, switch, zones, released, origin_at)
+        _LOGGER.debug("%s on %s", action, base)
         self._publish_snapshot()
-        if released and not off:
-            self._bar_play(base, EFFECT_PULSE, COLOR_BAR)  # back to automatic
+        self._bars.unannounce(base)
+        if feedback is not None:
+            self._bar_play(base, EFFECT_PULSE, feedback)
+
+    async def _paddle_off(
+        self, switch: _Switch, zones: list[str], released: list[str]
+    ) -> None:
+        """End a switch-off's overrides; stage released holds' curves.
+
+        The switch's binding turns the bulbs off. A light that was held still
+        carries its look; it gets its curve staged once the bulbs are off.
+        """
+        for zone in zones:
+            await self._end_override(zone)
+            self._zone_lit.pop(zone, None)
+        for _source, ref in switch.lights:
+            self._forget_lit(ref)
+        for source_key, topic, _refs in self._light_topics(
+            switch.lights, whole=switch.room is not None
+        ):
+            if topic == self._config[CONF_SOURCES][source_key][CONF_CONSOLIDATED_TOPIC]:
+                self._invalidate_source(source_key)
+        for ref in released:
+            self._schedule_off_stage(ref)
+
+    async def _paddle_up(
+        self,
+        base: str,
+        switch: _Switch,
+        zones: list[str],
+        released: list[str],
+        origin_at: float,
+    ) -> int | None:
+        """Show released lights their curve, arm overrides; return the bar colour.
+
+        A newly armed override is answered on the bottom LED of the tapped
+        switch (it pulses, then stays); only a bare release pulses the bar.
+        """
+        pending = [ref for _src, ref in switch.lights if self._cancel_off_stage(ref)]
+        shown = [
+            (src, ref)
+            for src, ref in switch.lights
+            if ref in released or ref in pending
+        ]
+        feedback: int | None = None
+        if shown:
+            self._show_lights(
+                shown,
+                self._room_glide_target,
+                origin_at=origin_at,
+                whole=switch.room is not None,
+            )
+            feedback = COLOR_BAR  # back to automatic
+        for zone in zones:
+            if self._modes.override_until(zone) is None:
+                self._bars.announce(base, LED_BOTTOM)
+                feedback = None
+            await self._arm_override(zone)
+        return feedback
 
     def _play_tap_animation(self, base: str, action: str) -> None:
         """Play the bar animation configured for a tap (the shade taps)."""
@@ -1721,12 +1803,13 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
 
     def _set_paddle(self, base: str, *, on: bool) -> None:
         """Record a switch's on/off and when it turned on (config-tap rule)."""
-        was = self._paddle_on.get(base)
-        self._paddle_on[base] = on
+        switch = self._switches[base]
+        was = switch.on
+        switch.on = on
         if not on:
-            self._on_since.pop(base, None)
+            switch.on_since = None
         elif not was:
-            self._on_since[base] = self._clock()
+            switch.on_since = self._clock()
 
     def _on_long_enough(self, base: str, action: str) -> bool:
         """Return True once the switch has been on for 0.5 s (config-tap rule).
@@ -1734,7 +1817,7 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         Family members hit config by accident while pressing the paddle on; an
         unknown switch state counts as off. A config tap never turns lights on.
         """
-        since = self._on_since.get(base)
+        since = self._switches[base].on_since
         if since is not None and self._clock() - since >= CONFIG_TAP_MIN_ON_S:
             return True
         self.diagnostics["ignored_config_taps"] += 1
@@ -1747,92 +1830,15 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         for lit in self._zone_lit.values():
             lit.discard(topic or "")
 
-    async def _on_room_action(self, base: str, action: str) -> None:
-        """Handle a tap on a switch that governs a whole room (the hallway pair).
-
-        Paddle on/off is the switch's own binding. Up arms the zone's motion
-        override (and releases a look); down ends it. A config tap holds every
-        light of the room at the look while the lights are on; a held paddle
-        dims each of the room's curves and holds the level.
-        """
-        room, lights = self._room_switches[base]
-        origin_at = self._clock()
-        if action in RELEASE_ACTIONS:
-            await self._end_dim(base)
-            return
-        mode = action_to_mode(action)
-        if mode is None:
-            return
-        if mode == HELD_MANUAL:
-            await self._start_dim(base, action)
-            return
-        if mode in LOOK_KINDS:
-            if self._look_tap_accepted(base, action):
-                self._bars.announce(base, LED_TOP)  # the top LED pulses, then stays
-                await self._hold_lights(lights, mode, origin_at=origin_at)
-                self._bars.unannounce(base)
-                self._follow_partners(base)
-            return
-        off = action.startswith("down")
-        self._drop_dim(base)
-        self._set_paddle(base, on=not off)
-        self._paddle_action_at[base] = origin_at
-        released = [ref for _src, ref in lights if await self._modes.release(ref)]
-        zones = self._override_zones.get(base, [])
-        feedback: int | None = None
-        if off:
-            await self._room_off(lights, zones, released)
-        else:
-            pending = [ref for _src, ref in lights if self._cancel_off_stage(ref)]
-            shown = [
-                (src, ref) for src, ref in lights if ref in released or ref in pending
-            ]
-            feedback = await self._room_tap_up(base, zones, shown, origin_at)
-        _LOGGER.debug("%s on %s (room %s)", action, base, room)
-        self._publish_snapshot()
-        self._bars.unannounce(base)
-        if feedback is not None:
-            self._bar_play(base, EFFECT_PULSE, feedback)
-
-    async def _room_off(
-        self, lights: list[tuple[str, str]], zones: list[str], released: list[str]
-    ) -> None:
-        """Handle a room switch going off: end overrides, stage released looks."""
-        for zone in zones:
-            await self._end_override(zone)
-            self._zone_lit.pop(zone, None)
-        for source_key in {src for src, _ref in lights}:
-            self._invalidate_source(source_key)
-        for ref in released:
-            self._schedule_off_stage(ref)
-
-    async def _room_tap_up(
-        self,
-        base: str,
-        zones: list[str],
-        released: list[tuple[str, str]],
-        origin_at: float,
-    ) -> int | None:
-        """Release looks to the curve and arm the override; return the bar colour.
-
-        A newly armed override is answered on the bottom LED of the tapped
-        switch (it pulses, then stays); only a bare release pulses the bar.
-        """
-        feedback: int | None = None
-        if released:
-            self._show_lights(released, self._room_glide_target, origin_at=origin_at)
-            feedback = COLOR_BAR  # back to automatic
-        for zone in zones:
-            if self._modes.override_until(zone) is None:
-                self._bars.announce(base, LED_BOTTOM)
-                feedback = None
-            await self._arm_override(zone)
-        return feedback
-
     async def _hold_lights(
-        self, lights: list[tuple[str, str]], kind: str, *, origin_at: float
+        self,
+        lights: list[tuple[str, str]],
+        kind: str,
+        *,
+        origin_at: float | None,
+        whole: bool = False,
     ) -> None:
-        """Hold several lights at a look; show it with one send per source."""
+        """Hold lights at a look; show it with one send per light (or source)."""
         now = dt_util.utcnow()
         for _source, ref in lights:
             await self._modes.set_held(
@@ -1845,39 +1851,52 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
             return _strip(_target_to_payload(target, 0.0))
 
         if self.push_enabled:
-            self._show_lights(lights, look, origin_at=origin_at)
+            self._show_lights(lights, look, origin_at=origin_at, whole=whole)
         self._publish_snapshot()
+
+    def _light_topics(
+        self, lights: list[tuple[str, str]], *, whole: bool
+    ) -> list[tuple[str, str, list[str]]]:
+        """Return (source, topic, light refs) for each send that reaches ``lights``.
+
+        With ``whole`` (a switch governing a whole room), a source whose every
+        light is in ``lights`` is reached on its consolidated topic; any other
+        light on its own topic.
+        """
+        by_source: dict[str, list[str]] = {}
+        for source_key, ref in lights:
+            by_source.setdefault(source_key, []).append(ref)
+        topics: list[tuple[str, str, list[str]]] = []
+        for source_key, refs in by_source.items():
+            source = self._config[CONF_SOURCES].get(source_key)
+            if source is None:
+                continue  # not a light here (a hold on an unknown ref)
+            rooms = source.get(CONF_ROOMS, {})
+            if whole and set(rooms) <= set(refs):
+                topics.append((source_key, source[CONF_CONSOLIDATED_TOPIC], refs))
+                continue
+            topics.extend(
+                (source_key, rooms[ref][CONF_SET_TOPIC], [ref])
+                for ref in refs
+                if ref in rooms and rooms[ref].get(CONF_SET_TOPIC)
+            )
+        return topics
 
     def _show_lights(
         self,
         lights: list[tuple[str, str]],
         payload_of: Callable[[str], PushPayload | None],
         *,
-        origin_at: float,
+        origin_at: float | None,
+        whole: bool,
     ) -> None:
-        """Send each source's payload to its lights.
-
-        The consolidated topic when every light of the source is in ``lights``,
-        else each light's own topic.
-        """
-        by_source: dict[str, list[str]] = {}
-        for source_key, ref in lights:
-            by_source.setdefault(source_key, []).append(ref)
-        for source_key, refs in by_source.items():
-            payload = payload_of(source_key)
-            if payload is None:
-                continue
-            source = self._config[CONF_SOURCES][source_key]
-            rooms = source.get(CONF_ROOMS, {})
-            if set(rooms) <= set(refs):
-                topics = [source[CONF_CONSOLIDATED_TOPIC]]
-            else:
-                topics = [
-                    rooms[ref][CONF_SET_TOPIC]
-                    for ref in refs
-                    if ref in rooms and rooms[ref].get(CONF_SET_TOPIC)
-                ]
-            for topic in topics:
+        """Send each source's payload to its lights (see :meth:`_light_topics`)."""
+        payloads: dict[str, PushPayload | None] = {}
+        for source_key, topic, _refs in self._light_topics(lights, whole=whole):
+            if source_key not in payloads:
+                payloads[source_key] = payload_of(source_key)
+            payload = payloads[source_key]
+            if payload is not None:
                 self._interactive_send(topic, payload, origin_at=origin_at)
 
     async def _on_state(self, base: str, state: str) -> None:
@@ -1887,40 +1906,38 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         or a held dim) gets its curve value staged once the bulbs are off
         (:meth:`_schedule_off_stage`); otherwise the regular sends keep it staged.
         """
+        switch = self._switches.get(base)
+        if switch is None:
+            return
         on = state == STATE_ON
-        previous = self._paddle_on.get(base)
+        previous = switch.on
         if previous == on:
             return  # unchanged, or the matching action already handled it
-        echo = self._expect_echo.get(base)
+        now = self._clock()
         if (
-            echo is not None
-            and echo[0] == state
-            and self._clock() - echo[1] < SWITCH_ECHO_S
+            switch.echo is not None
+            and switch.echo[0] == state
+            and now - switch.echo[1] < SWITCH_ECHO_S
         ):
             # Our own sync write coming back: record it, it is not a press.
-            del self._expect_echo[base]
+            switch.echo = None
             self._set_paddle(base, on=on)
             return
-        held_off = self._off_holds.get(base)
-        if held_off is not None and self._clock() - held_off < DIM_TIMEOUT_S:
-            return  # the switch turned itself on under a held paddle: not a press
-        tapped = self._paddle_action_at.get(base)
-        if tapped is not None and self._clock() - tapped < PADDLE_STATE_GRACE_S:
-            # Z2M republishes the switch's *cached* state with any attribute report
-            # until the switch reports its new state (~1.5 s after a tap). A
-            # contradicting state this soon after an up/down tap is that stale
-            # cache (live 2026-11-04 03:40: a bath light turned on, then staged
-            # off 0.37 s later); a real paddle change arrives as an action.
+        if now < switch.ignore_until:
+            # Not a press: either Z2M republishing the switch's *cached* state
+            # after a tap, before the switch reports its new one (~1.5 s; live
+            # 2026-11-04 03:40 a bath light turned on, then staged off 0.37 s
+            # later), or the switch turning itself on under a paddle held while
+            # it was off. A real paddle change arrives as an action.
             return
         self._set_paddle(base, on=on)
         if previous is None:
             for zone_key in self._sync_zones.get(base, ()):
                 self._settle_start(zone_key)
-        lights = self._switch_lights.get(base)
-        if lights is None or not self.push_enabled:
-            return  # a room-level switch: its binding acts, the state is tracked
+        if switch.room is not None or not self.push_enabled:
+            return  # a whole-room switch: its binding acts, the state is tracked
         self._drop_dim(base)
-        for source_key, light_ref in lights:
+        for source_key, light_ref in switch.lights:
             await self._follow_paddle(
                 source_key, light_ref, on=on, boot=previous is None
             )
@@ -1955,22 +1972,8 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         One per curve: the consolidated topic when a room switch covers every
         light of the source, else each light's own topic.
         """
-        by_source: dict[str, list[str]] = {}
-        for source_key, ref in self._governed(base):
-            by_source.setdefault(source_key, []).append(ref)
-        groups: list[tuple[str, str, list[str]]] = []
-        for source_key, refs in by_source.items():
-            source = self._config[CONF_SOURCES][source_key]
-            rooms = source.get(CONF_ROOMS, {})
-            if base in self._room_switches and set(rooms) <= set(refs):
-                groups.append((source_key, source[CONF_CONSOLIDATED_TOPIC], refs))
-                continue
-            groups.extend(
-                (source_key, rooms[ref][CONF_SET_TOPIC], [ref])
-                for ref in refs
-                if ref in rooms and rooms[ref].get(CONF_SET_TOPIC)
-            )
-        return groups
+        switch = self._switches[base]
+        return self._light_topics(switch.lights, whole=switch.room is not None)
 
     async def _start_dim(self, base: str, action: str) -> None:
         """Fade a held paddle's lights toward the floor or the ceiling.
@@ -1979,22 +1982,24 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         the switch on (a held paddle never turns lights on) and holds the lights
         as ``manual``; the level is set when the paddle is released.
         """
-        on = self._paddle_on.get(base)
-        if on is False:
-            self._off_holds[base] = self._clock()
+        switch = self._switches[base]
+        if switch.on is False:
+            switch.held_off = True
             self._turn_back_off(base)
+            # The switch turns itself on under the held paddle: not a press.
+            switch.ignore_until = self._clock() + DIM_TIMEOUT_S
             return
-        if not on:
+        if not switch.on:
             return
         self._cancel_dim_start(base)
-        self._dim_starts[base] = self.hass.async_create_task(
+        switch.dim_start = self.hass.async_create_task(
             self._dim_after_delay(base, action), "lm_dim_start", eager_start=True
         )
 
     async def _dim_after_delay(self, base: str, action: str) -> None:
         """Start the dim once the paddle has stayed held past the delay."""
         await _dim_sleep(DIM_START_DELAY_S)
-        self._dim_starts.pop(base, None)
+        self._switches[base].dim_start = None
         await self._begin_dim(base, action)
 
     async def _begin_dim(self, base: str, action: str) -> None:
@@ -2032,8 +2037,7 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
                     armed_at=now,
                     expires_at=self._next_midnight(now),
                 )
-        if dims:
-            self._dims[base] = dims
+        self._switches[base].dims = dims
         self._publish_snapshot()
 
     async def _end_dim(self, base: str) -> dict[str, PushPayload]:
@@ -2042,11 +2046,13 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         Returns what each stopped topic now shows.
         """
         stopped: dict[str, PushPayload] = {}
-        if self._off_holds.pop(base, None) is not None:
+        switch = self._switches[base]
+        if switch.held_off:
+            switch.held_off = False
             self._turn_back_off(base)
             return stopped
         self._cancel_dim_start(base)  # released before the dim began: nothing
-        dims = self._dims.pop(base, None)
+        dims, switch.dims = switch.dims, []
         if not dims:
             return stopped
         clock = self._clock()
@@ -2068,15 +2074,17 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
 
     def _cancel_dim_start(self, base: str) -> None:
         """Forget a hold that has not started dimming yet."""
-        task = self._dim_starts.pop(base, None)
+        switch = self._switches[base]
+        task, switch.dim_start = switch.dim_start, None
         if task is not None:
             task.cancel()
 
     def _drop_dim(self, base: str) -> None:
         """Forget a switch's hold (a tap or a paddle change ended it)."""
         self._cancel_dim_start(base)
-        self._dims.pop(base, None)
-        self._off_holds.pop(base, None)
+        switch = self._switches[base]
+        switch.dims = []
+        switch.held_off = False
 
     def _turn_back_off(self, base: str) -> None:
         """Turn off a switch whose paddle was held while it was off.
@@ -2087,8 +2095,9 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         reports in between are not paddle presses.
         """
         now = self._clock()
-        self._paddle_action_at[base] = now
-        self._expect_echo[base] = (STATE_OFF, now)
+        switch = self._switches[base]
+        switch.ignore_until = now + PADDLE_STATE_GRACE_S
+        switch.echo = (STATE_OFF, now)
         self._enqueue(
             [Send(f"{base}/set", {"state": STATE_OFF})], priority=PRIORITY_INTERACTIVE
         )
@@ -2098,15 +2107,15 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         clock = self._clock()
         return any(
             room in dim.refs and clock - dim.began < DIM_TIMEOUT_S
-            for dims in self._dims.values()
-            for dim in dims
+            for switch in self._switches.values()
+            for dim in switch.dims
         )
 
     async def _finish_stale_dims(self) -> None:
         """End fades whose release never arrived (they have reached their end)."""
         clock = self._clock()
-        for base, dims in list(self._dims.items()):
-            if any(clock - dim.began >= DIM_TIMEOUT_S for dim in dims):
+        for base, switch in self._switches.items():
+            if any(clock - dim.began >= DIM_TIMEOUT_S for dim in switch.dims):
                 await self._end_dim(base)
 
     # --- Z2M feedback (A2) --------------------------------------------------

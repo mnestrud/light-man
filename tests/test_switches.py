@@ -95,6 +95,11 @@ async def hall(
     coord.shutdown_subscriptions()  # idle and off-stage clocks a test left running
 
 
+def _clear_echoes(coordinator: Any) -> None:
+    for switch in coordinator._switches.values():
+        switch.echo = None
+
+
 def _fire(hass: HomeAssistant, topic: str, payload: dict[str, Any]) -> None:
     async_fire_mqtt_message(hass, topic, json.dumps(payload))
 
@@ -376,7 +381,7 @@ async def test_sweep_turns_the_sync_switch_on_and_its_echo_is_not_a_press(
     _fire(hass, MMWAVE_EAST, {"state": "ON"})  # the echo
     await hass.async_block_till_done()
     assert hall._modes.overrides() == {}  # a sync write is not a tap
-    assert hall._paddle_on[MMWAVE_EAST] is True
+    assert hall._switches[MMWAVE_EAST].on is True
     mqtt_mock.async_publish.reset_mock()
     await _send(hass, hall, MMWAVE_EAST, {"occupancy": False})
     assert published(mqtt_mock) == {EAST_SET: {"state": "OFF"}}
@@ -385,11 +390,11 @@ async def test_sweep_turns_the_sync_switch_on_and_its_echo_is_not_a_press(
 async def test_clear_with_an_unknown_switch_state_turns_the_group_off(
     hass: HomeAssistant, hall: LightManCoordinator, mqtt_mock: Any
 ) -> None:
-    hall._expect_echo.clear()
+    _clear_echoes(hall)
     await _send(hass, hall, MMWAVE_EAST, {"occupancy": True})
     _fire(hass, MMWAVE_EAST, {"state": "OFF"})  # the ON write never landed
     await hass.async_block_till_done()
-    hall._expect_echo.clear()
+    _clear_echoes(hall)
     mqtt_mock.async_publish.reset_mock()
     await _send(hass, hall, MMWAVE_EAST, {"occupancy": False})
     pubs = published(mqtt_mock)
@@ -426,7 +431,7 @@ async def test_paddle_off_lets_the_sweep_light_that_room_again(
 async def test_startup_reads_each_switch_that_has_not_reported(
     hass: HomeAssistant, hall: LightManCoordinator, mqtt_mock: Any
 ) -> None:
-    hall._paddle_on[LR_SWITCH] = True
+    hall._switches[LR_SWITCH].on = True
     await hall._read_switches()
     gets = [
         c.args[0]
@@ -521,8 +526,12 @@ async def test_show_lights_uses_light_topics_for_part_of_a_source(
     hass: HomeAssistant, hall: LightManCoordinator, mqtt_mock: Any
 ) -> None:
     look: Any = {"brightness": 50}
-    hall._show_lights([("hallway_up", "hall.center")], lambda _s: look, origin_at=0)
-    hall._show_lights([("hallway_up", "hall.center")], lambda _s: None, origin_at=0)
+    hall._show_lights(
+        [("hallway_up", "hall.center")], lambda _s: look, origin_at=0, whole=True
+    )
+    hall._show_lights(
+        [("hallway_up", "hall.center")], lambda _s: None, origin_at=0, whole=True
+    )
     await hass.async_block_till_done()
     assert set(published(mqtt_mock)) == {HALL_CENTER_SET}
 

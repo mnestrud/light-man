@@ -140,12 +140,12 @@ async def test_a_config_tap_holds_every_light_and_moves_the_partner_bar(
 async def test_a_partner_that_is_off_or_unknown_keeps_its_bar(
     hass: HomeAssistant, pair: LightManCoordinator, mqtt_mock: Any, clock: FakeClock
 ) -> None:
-    pair._paddle_on[SIDE] = False
+    pair._switches[SIDE].on = False
     await _press(hass, FRONT, {"action": "config_double"})
     assert _height(mqtt_mock, SIDE) is None
 
-    pair._paddle_on[SIDE] = True
-    pair._switch_height.pop(SIDE)
+    pair._switches[SIDE].on = True
+    pair._switches[SIDE].height = None
     pair._follow_partners(FRONT)
     await hass.async_block_till_done()
     assert _height(mqtt_mock, SIDE) is None

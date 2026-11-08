@@ -309,6 +309,22 @@ async def test_no_send_before_the_step_is_due(
     assert coordinator.update_interval.total_seconds() == coordinator._steps["min_s"]
 
 
+async def test_every_send_aims_at_the_step_end(coordinator: Coord) -> None:
+    now = dt_util.utcnow()
+    coordinator._step_s = 240.0
+    assert coordinator._step_target() >= now + timedelta(seconds=240)  # no step
+    end = now + timedelta(seconds=100)
+    coordinator._step_end = end
+    assert coordinator._step_target() == end
+    coordinator._last_published[LR_SET] = {"brightness": 1}
+    later = coordinator._tick_transition(LR_SET, {"brightness": 1}, True, end)
+    assert 98.0 <= later <= 100.0  # a send late in the step fades faster
+    coordinator._step_end = now - timedelta(seconds=1)  # behind: one step ahead
+    assert coordinator._step_target() > now + timedelta(seconds=239)
+    past = coordinator._tick_transition(LR_SET, {"brightness": 1}, True, now)
+    assert past == 1.0
+
+
 async def test_room_glide_target_without_solar(coordinator: Coord) -> None:
     with patch(
         "custom_components.light_man.coordinator.solar_inputs",
@@ -388,11 +404,19 @@ async def test_per_room_fallback_is_split_into_budget_sized_units(
 def test_forced_catch_up_counts_colour_mode_changes(coordinator: Coord) -> None:
     coordinator._last_published[LR_SET] = {"brightness": 100, "color_temp": 300}
     seconds = coordinator._tick_transition(
-        LR_SET, {"brightness": 100, "color": {"x": 0.3, "y": 0.3}}, True, force=True
+        LR_SET,
+        {"brightness": 100, "color": {"x": 0.3, "y": 0.3}},
+        True,
+        dt_util.utcnow(),
+        force=True,
     )
     assert seconds == 2.0
     seconds = coordinator._tick_transition(
-        LR_SET, {"brightness": 100, "color_temp": 500}, True, force=True
+        LR_SET,
+        {"brightness": 100, "color_temp": 500},
+        True,
+        dt_util.utcnow(),
+        force=True,
     )
     assert seconds == 4.0  # 200 mired * 0.02 s
 
@@ -735,11 +759,11 @@ async def test_stale_off_right_after_an_up_tap_is_ignored(
     _fire(hass, LR_SWITCH, {"state": "OFF", "power": 0.2})  # stale cache
     await hass.async_block_till_done()
     assert LR_SET not in published(mqtt_mock)
-    assert coordinator._paddle_on[LR_SWITCH]
+    assert coordinator._switches[LR_SWITCH].on
     clock.advance(3.0)  # after the grace window a real OFF report still counts
     _fire(hass, LR_SWITCH, {"state": "OFF"})
     await hass.async_block_till_done()
-    assert not coordinator._paddle_on[LR_SWITCH]
+    assert not coordinator._switches[LR_SWITCH].on
     assert LR_SET not in published(mqtt_mock)
 
 
@@ -892,7 +916,7 @@ async def test_a_tap_or_a_release_service_during_a_hold_ends_the_dim(
     await _action(hass, "down_held")
     await _action(hass, "up_single")  # back to the curve
     assert not coordinator._modes.is_held(LR)
-    assert coordinator._dims == {}
+    assert not any(s.dims for s in coordinator._switches.values())
 
     coordinator._last_published[LR_SET] = {"brightness": 183, **LR_COLOUR}  # type: ignore[typeddict-item]
     coordinator._marked_at[LR_SET] = clock.now
@@ -911,7 +935,7 @@ async def test_a_lost_release_holds_the_end_of_the_fade(
     await _lit_at(hass, coordinator, mqtt_mock, clock, 183)
     await _action(hass, "down_held")
     await tick(hass, coordinator, clock)
-    assert coordinator._dims == {}
+    assert not any(s.dims for s in coordinator._switches.values())
     assert coordinator._modes.look_of(LR) == {"brightness": DIM_FLOOR, **LR_COLOUR}
 
 
@@ -1044,9 +1068,9 @@ async def test_a_hold_released_before_the_delay_does_not_dim(
     with patch("custom_components.light_man.coordinator._dim_sleep", gate.sleep):
         _fire(hass, LR_SWITCH, {"action": "down_held"})
         await asyncio.sleep(0)
-        assert LR_SWITCH in coordinator._dim_starts
+        assert coordinator._switches[LR_SWITCH].dim_start is not None
         await _action(hass, "down_release")  # a press that lingered
-        assert coordinator._dim_starts == {}
+        assert all(s.dim_start is None for s in coordinator._switches.values())
         assert published(mqtt_mock) == {}
         assert not coordinator._modes.is_held(LR)
 
@@ -1054,14 +1078,15 @@ async def test_a_hold_released_before_the_delay_does_not_dim(
         _fire(hass, LR_SWITCH, {"action": "down_held"})
         await asyncio.sleep(0)
         await _action(hass, "up_single")
-        assert coordinator._dim_starts == {}
+        assert all(s.dim_start is None for s in coordinator._switches.values())
         _fire(hass, LR_SWITCH, {"action": "up_held"})
         await asyncio.sleep(0)
-        task = coordinator._dim_starts[LR_SWITCH]
+        task = coordinator._switches[LR_SWITCH].dim_start
+        assert task is not None
         coordinator.shutdown_subscriptions()
         await hass.async_block_till_done()
         assert task.cancelled()
-        assert coordinator._dim_starts == {}
+        assert all(s.dim_start is None for s in coordinator._switches.values())
 
 
 async def test_a_hold_past_the_delay_dims(
@@ -1076,7 +1101,7 @@ async def test_a_hold_past_the_delay_dims(
         gate.event.set()
         await hass.async_block_till_done()
     assert published(mqtt_mock)[LR_SET]["brightness"] == DIM_FLOOR
-    assert coordinator._dim_starts == {}
+    assert all(s.dim_start is None for s in coordinator._switches.values())
 
 
 async def test_a_hold_on_an_off_switch_turns_the_switch_back_off(
@@ -1093,16 +1118,16 @@ async def test_a_hold_on_an_off_switch_turns_the_switch_back_off(
     clock.advance(PADDLE_GRACE_PLUS)
     mqtt_mock.async_publish.reset_mock()
     assert await _report(hass, mqtt_mock, {"state": "ON", "brightness": 200}) is None
-    assert coordinator._paddle_on[LR_SWITCH] is False
+    assert coordinator._switches[LR_SWITCH].on is False
     assert LR_SET not in published(mqtt_mock)
 
     mqtt_mock.async_publish.reset_mock()
     await _action(hass, "up_release")
     assert published(mqtt_mock) == {LR_SWITCH_SET: {"state": "OFF"}}
-    assert coordinator._off_holds == {}
+    assert not any(s.held_off for s in coordinator._switches.values())
     assert not coordinator._modes.is_held(LR)
     await _report(hass, mqtt_mock, {"state": "OFF"})  # the write's echo
-    assert coordinator._paddle_on[LR_SWITCH] is False
+    assert coordinator._switches[LR_SWITCH].on is False
 
 
 async def test_an_off_hold_whose_release_is_lost_stops_hiding_reports(
@@ -1112,11 +1137,11 @@ async def test_an_off_hold_whose_release_is_lost_stops_hiding_reports(
     await _action(hass, "down_single")
     clock.advance(5.0)
     await _action(hass, "down_held")
-    assert LR_SWITCH in coordinator._off_holds
+    assert coordinator._switches[LR_SWITCH].held_off
     clock.advance(DIM_TIMEOUT_S)
     await _report(hass, mqtt_mock, {"state": "ON"})  # a real paddle-on, later
-    assert coordinator._paddle_on[LR_SWITCH] is True
-    assert coordinator._off_holds == {}
+    assert coordinator._switches[LR_SWITCH].on is True
+    assert not any(s.held_off for s in coordinator._switches.values())
 
 
 async def test_unload_stops_sending(

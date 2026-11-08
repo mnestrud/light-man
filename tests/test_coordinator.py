@@ -82,7 +82,7 @@ def _later(hass: HomeAssistant, seconds: float) -> None:
 def _lit(coordinator: Coord, base: str = LR_SWITCH) -> None:
     """The switch has been on for a while (config taps need the light on)."""
     coordinator._set_paddle(base, on=True)
-    coordinator._on_since[base] -= 10.0
+    coordinator._switches[base].on_since -= 10.0
 
 
 def _fire(hass: HomeAssistant, topic: str, payload: Any) -> None:
@@ -297,6 +297,17 @@ async def test_on_before_the_stage_sends_the_curve_at_once(
     _later(hass, OFF_STAGE_DELAY_S + 1)
     await hass.async_block_till_done()
     assert _sends_to(mqtt_mock, LR_SET) == 1
+
+
+async def test_hold_on_an_unknown_light_sends_nothing(
+    hass: HomeAssistant, coordinator: Coord, mqtt_mock: Any
+) -> None:
+    await coordinator.async_set_push_enabled(enabled=True)
+    await hass.async_block_till_done()
+    mqtt_mock.async_publish.reset_mock()
+    await coordinator.async_hold("attic.overhead", "night")
+    await hass.async_block_till_done()
+    assert published(mqtt_mock) == {}
 
 
 async def test_switch_report_off_after_a_look_stages_later(
