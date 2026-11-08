@@ -538,7 +538,7 @@ def test_loader_keeps_valid_animations_and_flags_bad_ones() -> None:
 def test_v11_fixture_migrates_to_the_shipped_bundle() -> None:
     raw = json.loads((FIXTURES / "seed_v11.json").read_text())
     migrated, steps = migrate(raw)
-    assert steps == [11, 12, 13, 14, 15]
+    assert steps == [11, 12, 13, 14, 15, 16]
     assert migrated == json.loads(BUNDLE.read_text())
     assert migrated["seed_version"] == BUNDLED_SEED_VERSION
     result = validate_config(migrated)

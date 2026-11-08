@@ -32,13 +32,13 @@ def _seed_v8() -> dict:
 
 def test_v8_fixture_migrates_to_the_shipped_bundle() -> None:
     migrated, steps = migrate(_seed_v8())
-    assert steps == [8, 9, 10, 11, 12, 13, 14, 15]
+    assert steps == [8, 9, 10, 11, 12, 13, 14, 15, 16]
     assert migrated == json.loads(BUNDLE.read_text())
     assert migrated["seed_version"] == BUNDLED_SEED_VERSION
 
 
 def test_v8_to_v9_makes_day_window_defaults_explicit() -> None:
-    migrated, _ = migrate(_seed_v8())
+    migrated, _ = migrate(_seed_v8(), target=9)
     for curve in migrated["curves"].values():
         assert "sat" in curve
         assert curve["day_window"]["edge_transition_s"] == 1800.0
@@ -48,7 +48,7 @@ def test_v8_to_v9_makes_day_window_defaults_explicit() -> None:
 def test_v9_fixture_migrates_to_the_shipped_bundle() -> None:
     raw = json.loads((FIXTURES / "seed_v9.json").read_text())
     migrated, steps = migrate(raw)
-    assert steps == [9, 10, 11, 12, 13, 14, 15]
+    assert steps == [9, 10, 11, 12, 13, 14, 15, 16]
     assert migrated == json.loads(BUNDLE.read_text())
     assert migrated["push_interval_s"] == 240
 
@@ -62,7 +62,7 @@ def test_v9_to_v10_keeps_an_edited_interval() -> None:
 def test_v10_fixture_migrates_to_the_shipped_bundle() -> None:
     raw = json.loads((FIXTURES / "seed_v10.json").read_text())
     migrated, steps = migrate(raw)
-    assert steps == [10, 11, 12, 13, 14, 15]
+    assert steps == [10, 11, 12, 13, 14, 15, 16]
     assert migrated == json.loads(BUNDLE.read_text())
     hall = migrated["occupancy_zones"]["hallway"]
     assert hall["override_switches"] == [HALL_EAST, HALL_WEST]
@@ -162,7 +162,7 @@ def _bath_switches(raw: dict) -> list[dict]:
 
 def test_v12_fixture_migrates_to_the_shipped_bundle() -> None:
     migrated, steps = migrate(_seed_v12())
-    assert steps == [12, 13, 14, 15]
+    assert steps == [12, 13, 14, 15, 16]
     assert migrated == json.loads(BUNDLE.read_text())
     bath = ["primary_bath.overhead", "primary_bath.under_vanity"]
     switches = {sw["topic"]: sw for sw in _bath_switches(migrated)}
@@ -212,7 +212,7 @@ def _seed_v13() -> dict:
 
 def test_v13_fixture_migrates_to_the_shipped_bundle() -> None:
     migrated, steps = migrate(_seed_v13())
-    assert steps == [13, 14, 15]
+    assert steps == [13, 14, 15, 16]
     assert migrated == json.loads(BUNDLE.read_text())
     assert migrated["push_interval_s"] == 240
 
@@ -229,7 +229,7 @@ def _seed_v14() -> dict:
 
 def test_v14_fixture_migrates_to_the_shipped_bundle() -> None:
     migrated, steps = migrate(_seed_v14())
-    assert steps == [14, 15]
+    assert steps == [14, 15, 16]
     assert migrated == json.loads(BUNDLE.read_text())
     sensors = migrated["rooms"]["stairwell"]["sensors"]
     assert sensors["stairwell_top_landing"]["occupancy_key"] == "mmwave_area2_occupancy"
@@ -281,7 +281,7 @@ def _seed_v15() -> dict:
 
 def test_v15_fixture_migrates_to_the_shipped_bundle() -> None:
     migrated, steps = migrate(_seed_v15())
-    assert steps == [15]
+    assert steps == [15, 16]
     assert migrated == json.loads(BUNDLE.read_text())
     assert validate_config(migrated).config["steps"] == {
         "min_s": 30.0,
@@ -295,3 +295,40 @@ def test_v15_to_v16_keeps_an_edited_step_block() -> None:
     raw = _seed_v15()
     raw["steps"] = {"min_s": 60}
     assert migrate(raw)[0]["steps"] == {"min_s": 60}
+
+
+def _seed_v16() -> dict:
+    return json.loads((FIXTURES / "seed_v16.json").read_text())
+
+
+def test_v16_fixture_migrates_to_the_shipped_bundle() -> None:
+    migrated, steps = migrate(_seed_v16())
+    assert steps == [16]
+    assert migrated == json.loads(BUNDLE.read_text())
+    for curve in migrated["curves"].values():
+        assert curve["day_window"]["start"] == "07:30"
+        assert curve["day_window"]["edge_transition_s"] == 3600.0
+    assert validate_config(migrated).issues == []
+
+
+def test_v16_to_v17_keeps_an_edited_window() -> None:
+    raw = _seed_v16()
+    curves = list(raw["curves"].values())
+    curves[0]["day_window"]["start"] = "06:45"
+    curves[1]["day_window"]["edge_transition_s"] = 900.0
+    del curves[2]["day_window"]
+    migrated = list(migrate(raw)[0]["curves"].values())
+    assert migrated[0]["day_window"]["start"] == "06:45"
+    assert migrated[0]["day_window"]["edge_transition_s"] == 1800.0
+    assert migrated[1]["day_window"]["start"] == "08:00"
+    assert "day_window" not in migrated[2]
+    assert migrated[3]["day_window"]["start"] == "07:30"
+
+
+def test_v16_to_v17_skips_bad_curves() -> None:
+    raw = _seed_v16()
+    raw["curves"] = "nope"
+    assert migrate(raw)[0]["curves"] == "nope"
+    raw = _seed_v16()
+    raw["curves"]["odd"] = "not-a-curve"
+    assert migrate(raw)[0]["curves"]["odd"] == "not-a-curve"

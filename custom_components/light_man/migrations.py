@@ -245,6 +245,30 @@ def _v15_to_v16(raw: dict[str, Any]) -> dict[str, Any]:
     return raw
 
 
+V16_DAY_START, V16_EDGE_S = "08:00", 1800.0
+V17_DAY_START, V17_EDGE_S = "07:30", 3600.0
+
+
+def _v16_to_v17(raw: dict[str, Any]) -> dict[str, Any]:
+    """Mornings start at 07:30 over a 60 min edge (was 08:00 over 30 min).
+
+    Only a curve whose day window still has both shipped values is changed.
+    """
+    curves = raw.get("curves")
+    if not isinstance(curves, dict):
+        return raw
+    for curve in curves.values():
+        window = curve.get("day_window") if isinstance(curve, dict) else None
+        if (
+            isinstance(window, dict)
+            and window.get("start") == V16_DAY_START
+            and window.get("edge_transition_s") == V16_EDGE_S
+        ):
+            window["start"] = V17_DAY_START
+            window["edge_transition_s"] = V17_EDGE_S
+    return raw
+
+
 MIGRATIONS: dict[int, Callable[[dict[str, Any]], dict[str, Any]]] = {
     8: _v8_to_v9,
     9: _v9_to_v10,
@@ -254,6 +278,7 @@ MIGRATIONS: dict[int, Callable[[dict[str, Any]], dict[str, Any]]] = {
     13: _v13_to_v14,
     14: _v14_to_v15,
     15: _v15_to_v16,
+    16: _v16_to_v17,
 }
 
 
