@@ -100,6 +100,7 @@ class LightManConfig(TypedDict):
     push_interval_s: int
     sources: dict[str, SourceConfig]
     occupancy: dict[str, OccupancyZone]
+    steps: StepConfig
 
 
 class XY(TypedDict):
@@ -293,6 +294,15 @@ class SleepConfig(TypedDict, total=False):
     ramp_out_s: float
 
 
+class StepConfig(TypedDict):
+    """Variable curve steps: the shortest step and the change allowed per step."""
+
+    min_s: float
+    max_brightness_pct: float
+    max_mired: float
+    max_xy: float
+
+
 class StoredConfig(TypedDict, total=False):
     """Top-level stored topology (the dashboard data model; ``light_man_config``)."""
 
@@ -303,6 +313,7 @@ class StoredConfig(TypedDict, total=False):
     rooms: dict[str, Room]
     occupancy_zones: dict[str, ZoneConfig]
     sleep: SleepConfig
+    steps: StepConfig
 
 
 @dataclass(slots=True)

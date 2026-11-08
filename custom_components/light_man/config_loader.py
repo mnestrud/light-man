@@ -51,6 +51,11 @@ from .const import (
     CONF_SOURCE,
     CONF_SOURCES,
     CONF_STAGE_DELAY,
+    CONF_STEP_MAX_MIRED,
+    CONF_STEP_MAX_PCT,
+    CONF_STEP_MAX_XY,
+    CONF_STEP_MIN,
+    CONF_STEPS,
     CONF_SWEEP,
     CONF_SWITCHES,
     CONF_SYNC_SWITCHES,
@@ -60,6 +65,10 @@ from .const import (
     DEFAULT_OCCUPANCY_TRANSITION_S,
     DEFAULT_OVERRIDE_IDLE_S,
     DEFAULT_PUSH_INTERVAL_S,
+    DEFAULT_STEP_MAX_MIRED,
+    DEFAULT_STEP_MAX_PCT,
+    DEFAULT_STEP_MAX_XY,
+    DEFAULT_STEP_MIN_S,
 )
 from .models import (
     BarAnimation,
@@ -77,6 +86,7 @@ from .models import (
     SourceConfig,
     SourceGroup,
     SourceProfile,
+    StepConfig,
     StoredConfig,
     ZoneConfig,
     ZoneSensorBinding,
@@ -704,6 +714,37 @@ def _validate_sleep(raw: dict[str, object]) -> SleepConfig:
     return sleep
 
 
+def _validate_steps(
+    raw: dict[str, object], interval: int, issues: list[str]
+) -> StepConfig:
+    """Validate the variable-step block (soft: each bad value takes its default)."""
+    raw_steps = raw.get(CONF_STEPS, {})
+    if not isinstance(raw_steps, dict):
+        issues.append(f"{CONF_STEPS}: expected a mapping; using defaults")
+        raw_steps = {}
+    values: dict[str, float] = {}
+    for key, default in (
+        (CONF_STEP_MIN, DEFAULT_STEP_MIN_S),
+        (CONF_STEP_MAX_PCT, DEFAULT_STEP_MAX_PCT),
+        (CONF_STEP_MAX_MIRED, DEFAULT_STEP_MAX_MIRED),
+        (CONF_STEP_MAX_XY, DEFAULT_STEP_MAX_XY),
+    ):
+        value = raw_steps.get(key, default)
+        if not _is_number(value) or float(cast("float", value)) <= 0:
+            issues.append(f"{CONF_STEPS}.{key}: expected a positive number; default")
+            value = default
+        values[key] = float(cast("float", value))
+    if values[CONF_STEP_MIN] > interval:
+        issues.append(f"{CONF_STEPS}.{CONF_STEP_MIN}: above {CONF_PUSH_INTERVAL}")
+        values[CONF_STEP_MIN] = float(interval)
+    return StepConfig(
+        min_s=values[CONF_STEP_MIN],
+        max_brightness_pct=values[CONF_STEP_MAX_PCT],
+        max_mired=values[CONF_STEP_MAX_MIRED],
+        max_xy=values[CONF_STEP_MAX_XY],
+    )
+
+
 def _validate_interval(raw: dict[str, object], issues: list[str]) -> int:
     """Validate ``push_interval_s`` (soft — defaults on a bad value)."""
     interval = raw.get(CONF_PUSH_INTERVAL, DEFAULT_PUSH_INTERVAL_S)
@@ -733,11 +774,13 @@ def validate_config(raw: object) -> ValidatedConfig:
     )
     runtime_zones, stored_zones = _validate_zones(raw, scan, issues)
     sleep = _validate_sleep(raw)
+    steps = _validate_steps(raw, interval, issues)
 
     config: LightManConfig = {
         CONF_PUSH_INTERVAL: interval,
         CONF_SOURCES: runtime_sources,
         CONF_OCCUPANCY: runtime_zones,
+        CONF_STEPS: steps,
     }
     stored: StoredConfig = {
         CONF_PUSH_INTERVAL: interval,
@@ -746,6 +789,7 @@ def validate_config(raw: object) -> ValidatedConfig:
         CONF_ROOMS: scan.rooms,
         CONF_OCCUPANCY_ZONES: stored_zones,
         CONF_SLEEP: sleep,
+        CONF_STEPS: steps,
     }
     if isinstance(raw.get("seed_version"), int):
         stored["seed_version"] = raw["seed_version"]

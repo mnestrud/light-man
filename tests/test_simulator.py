@@ -198,14 +198,18 @@ async def test_a_day_stays_inside_the_network_budget_and_never_jumps(
         worst = max(worst, len(window))
     assert worst <= CAP
 
-    # 2. Group sends per hour stay inside the steady-state budget (4 sources at
-    #    one flood per 120 s = 120/h, plus 30/h per held room re-assert).
+    # 2. Group sends per hour stay inside the budget: at most one flood per
+    #    source and one re-assert per held room each step, and a step is never
+    #    shorter than the shortest step (0.8.16 variable steps).
     per_hour: dict[int, int] = {}
     for t, topic, _payload in sends:
         if topic in groups:
             hour = int((t - sends[0][0]) // 3600)
             per_hour[hour] = per_hour.get(hour, 0) + 1
-    assert max(per_hour.values()) <= 120 + 30 * 2
+    steps_per_hour = 3600 / coordinator._steps["min_s"]
+    assert max(per_hour.values()) <= (4 + 1) * steps_per_hour + 30
+    # Flat hours keep the longest step: no more than one flood per source.
+    assert sorted(per_hour.values())[len(per_hour) // 2] <= 4 * 3600 / INTERVAL + 30
 
     # 3. Forced floods only from the operator enabling the push.
     assert coordinator.diagnostics["forced_floods"] == 1
@@ -218,7 +222,7 @@ async def test_a_day_stays_inside_the_network_budget_and_never_jumps(
         if prev is None or "state" in payload:
             continue
         pct_s, mired_s = _rate(prev, payload)
-        if float(payload.get("transition", 0)) >= INTERVAL:
+        if float(payload.get("transition", 0)) >= coordinator._steps["min_s"]:
             assert pct_s <= GLIDE_PCT_PER_S, (topic, prev, payload)
             assert mired_s <= GLIDE_MIRED_PER_S, (topic, prev, payload)
         else:

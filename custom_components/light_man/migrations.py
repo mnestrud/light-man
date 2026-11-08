@@ -236,6 +236,15 @@ def _v14_to_v15(raw: dict[str, Any]) -> dict[str, Any]:
     return raw
 
 
+V16_STEPS = {"min_s": 30, "max_brightness_pct": 2, "max_mired": 5, "max_xy": 0.005}
+
+
+def _v15_to_v16(raw: dict[str, Any]) -> dict[str, Any]:
+    """Variable curve steps: add the step limits (an existing block is kept)."""
+    raw.setdefault("steps", dict(V16_STEPS))
+    return raw
+
+
 MIGRATIONS: dict[int, Callable[[dict[str, Any]], dict[str, Any]]] = {
     8: _v8_to_v9,
     9: _v9_to_v10,
@@ -244,6 +253,7 @@ MIGRATIONS: dict[int, Callable[[dict[str, Any]], dict[str, Any]]] = {
     12: _v12_to_v13,
     13: _v13_to_v14,
     14: _v14_to_v15,
+    15: _v15_to_v16,
 }
 
 

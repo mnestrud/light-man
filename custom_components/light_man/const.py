@@ -26,7 +26,7 @@ MODES_STORE_VERSION: Final = 1
 # top-level objects merged across groups; occupancy moved to `occupancy_zones`
 # referencing room-owned sensors; sleep ramp became a top-level block. The loader
 # derives the unchanged runtime view from this shape, so addressing is identical.
-BUNDLED_SEED_VERSION: Final = 15
+BUNDLED_SEED_VERSION: Final = 16
 
 # --- Seed-config JSON keys --------------------------------------------------
 CONF_PUSH_INTERVAL: Final = "push_interval_s"
@@ -50,6 +50,13 @@ CONF_SET_TOPIC: Final = "set_topic"
 CONF_SWITCHES: Final = "switches"
 CONF_OCCUPANCY_ZONES: Final = "occupancy_zones"
 CONF_SLEEP: Final = "sleep"
+# Variable curve steps (0.8.16): during ramps a step ends early so the curve moves
+# at most this much per step; push_interval_s is the longest step.
+CONF_STEPS: Final = "steps"
+CONF_STEP_MIN: Final = "min_s"
+CONF_STEP_MAX_PCT: Final = "max_brightness_pct"
+CONF_STEP_MAX_MIRED: Final = "max_mired"
+CONF_STEP_MAX_XY: Final = "max_xy"
 CONF_RAMP_IN: Final = "ramp_in_s"
 CONF_RAMP_OUT: Final = "ramp_out_s"
 
@@ -60,6 +67,10 @@ COLOR_MODE_XY: Final = "xy"  # engine-blended chromaticity across modes
 
 # --- Defaults ---------------------------------------------------------------
 DEFAULT_PUSH_INTERVAL_S: Final = 30
+DEFAULT_STEP_MIN_S: Final = 30.0  # shortest curve step (and the push timer)
+DEFAULT_STEP_MAX_PCT: Final = 2.0  # brightness change per step, % of full
+DEFAULT_STEP_MAX_MIRED: Final = 5.0  # colour-temperature change per step
+DEFAULT_STEP_MAX_XY: Final = 0.005  # chromaticity change per step (colour curves)
 DEFAULT_TRANSITION_S: Final = 1.0
 # A small gap between per-group publishes so the Zigbee multicasts (network
 # broadcasts) don't all land in the same instant — gentle-on-mesh hygiene, not

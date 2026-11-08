@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 import asyncio
-import itertools
 import json
 import logging
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 from unittest.mock import patch
 
@@ -23,6 +22,7 @@ from custom_components.light_man.const import (
     DIM_TIMEOUT_S,
 )
 from custom_components.light_man.coordinator import _Dim, interactive_transition
+from custom_components.light_man.models import EngineTarget
 from custom_components.light_man.publisher import (
     PRIORITY_INTERACTIVE,
     PRIORITY_TICK,
@@ -297,17 +297,16 @@ async def test_a_broken_curve_skips_only_its_source(
     assert [t for t in published(mqtt_mock) if not t.endswith("/get")] == []
 
 
-async def test_sources_are_staggered_across_the_interval(
+async def test_no_send_before_the_step_is_due(
     hass: HomeAssistant, coordinator: Coord, mqtt_mock: Any, clock: FakeClock
 ) -> None:
     await _enabled(hass, coordinator, mqtt_mock)
-    for key in coordinator._next_due:
-        coordinator._next_due[key] = clock.now + 1  # not due
+    coordinator._due = clock.now + 100  # not due
     await coordinator.async_refresh()
     await hass.async_block_till_done()
     assert published(mqtt_mock) == {}
     assert coordinator.update_interval is not None
-    assert coordinator.update_interval.total_seconds() < coordinator._interval
+    assert coordinator.update_interval.total_seconds() == coordinator._steps["min_s"]
 
 
 async def test_room_glide_target_without_solar(coordinator: Coord) -> None:
@@ -348,21 +347,16 @@ def test_interactive_transition_scales_with_the_change() -> None:
     assert mode_change == 0.8
 
 
-async def test_stagger_spreads_sources_over_the_interval(
+async def test_every_source_steps_on_one_schedule(
     hass: HomeAssistant, coordinator: Coord, mqtt_mock: Any, clock: FakeClock
 ) -> None:
-    """After the boot push each source is due on its own slot, ~interval/n apart."""
+    """All sources go out together each step; a forced push keeps the schedule."""
     await _enabled(hass, coordinator, mqtt_mock)
-    due = sorted(coordinator._next_due.values())
-    gaps = [b - a for a, b in itertools.pairwise(due)]
-    step = coordinator._interval / len(coordinator._next_due)
-    assert all(abs(gap - step) < 1e-6 for gap in gaps)
-    # A forced push keeps the slots: no re-synchronisation.
+    due = coordinator._due
     await coordinator.async_force_push()
     await hass.async_block_till_done()
-    assert sorted(coordinator._next_due.values()) == due
-    # Advancing one slot makes exactly one more source due.
-    clock.advance(step)
+    assert coordinator._due == due
+    clock.now = due
     sent: list[str] = []
     with patch.object(
         coordinator,
@@ -370,10 +364,9 @@ async def test_stagger_spreads_sources_over_the_interval(
         side_effect=lambda key, *_a, **_k: sent.append(key) or [],
     ):
         await coordinator.async_refresh()
-    assert len(sent) == 1
-
-
-# --- review-fix coverage ------------------------------------------------------
+        await hass.async_block_till_done()
+    assert sorted(sent) == sorted(coordinator._config["sources"])
+    assert coordinator._due == due + coordinator._step_s
 
 
 async def test_per_room_fallback_is_split_into_budget_sized_units(
@@ -620,14 +613,14 @@ async def test_plan_diagnostics_count_once_per_unit(
     before = coordinator.diagnostics["dedup_skips"]
     await tick(hass, coordinator, clock)  # nothing changed at a frozen sun
     skips = coordinator.diagnostics["dedup_skips"] - before
-    assert skips == len(coordinator._next_due)  # one per source, not per re-plan
+    assert skips == len(coordinator._config["sources"])  # one per source, once
 
 
-async def test_a_source_due_within_the_timer_slack_goes_now(
+async def test_a_step_due_within_the_timer_slack_goes_now(
     hass: HomeAssistant, coordinator: Coord, mqtt_mock: Any, clock: FakeClock
 ) -> None:
     await _enabled(hass, coordinator, mqtt_mock)
-    key, due = min(coordinator._next_due.items(), key=lambda kv: kv[1])
+    due = coordinator._due
     clock.now = due - 0.9  # HA's whole-second timer fired a little early
     sent: list[str] = []
     with patch.object(
@@ -637,28 +630,91 @@ async def test_a_source_due_within_the_timer_slack_goes_now(
     ):
         await coordinator.async_refresh()
         await hass.async_block_till_done()
-    assert sent == [key]
-    assert coordinator._next_due[key] == due + coordinator._interval
+    assert len(sent) == len(coordinator._config["sources"])
+    assert coordinator._due == due + coordinator._step_s
 
 
-def test_next_slot_always_moves_past_the_slot_it_is_given(coordinator: Coord) -> None:
-    """0.8.3: an early send passes the slot itself; it must get the next slot.
+def _target(pct: float, kelvin: float | None = 4000.0, **kw: Any) -> EngineTarget:
+    mode = kw.pop("mode", "color_temp")
+    return EngineTarget(pct, mode, kelvin, kw.pop("rgb", None), kw.pop("xy", None))
 
-    Float rounding of ``slot - epoch - offset`` used to return the same slot for
-    some clock values, so every source was sent twice per interval.
-    """
-    import random
 
-    import pytest
+def test_plan_step_is_the_interval_on_a_flat_curve(coordinator: Coord) -> None:
+    now = datetime(2026, 11, 8, 12, 0, tzinfo=UTC)
+    with patch.object(coordinator, "_curve_target", return_value=_target(50)):
+        assert coordinator._plan_step(now) == coordinator._interval
 
-    rng = random.Random(20261103)  # noqa: S311  # test data, not crypto
-    for _ in range(2000):
-        coordinator._epoch = rng.uniform(1e3, 1e7)
-        for key in coordinator._stagger:
-            due = coordinator._next_slot(key, coordinator._epoch + rng.uniform(0, 1e5))
-            assert coordinator._next_slot(key, due) == pytest.approx(
-                due + coordinator._interval
-            )
+
+def test_plan_step_shortens_on_a_ramp_but_not_below_the_minimum(
+    coordinator: Coord,
+) -> None:
+    now = datetime(2026, 11, 8, 12, 0, tzinfo=UTC)
+
+    def ramp(rate: float) -> Any:
+        return lambda _src, when: _target(50 + rate * (when - now).total_seconds())
+
+    coordinator._interval = 240
+    with patch.object(coordinator, "_curve_target", side_effect=ramp(2.5 / 60)):
+        assert coordinator._plan_step(now) == 30.0  # 2.5 %/min: 2 % fits in 30 s
+    with patch.object(coordinator, "_curve_target", side_effect=ramp(1 / 60)):
+        assert coordinator._plan_step(now) == 120.0  # 1 %/min: 2 % in 120 s
+    with patch.object(coordinator, "_curve_target", side_effect=ramp(1.0)):
+        assert coordinator._plan_step(now) == coordinator._steps["min_s"]
+
+
+def test_plan_step_includes_an_interval_off_the_grid(coordinator: Coord) -> None:
+    now = datetime(2026, 11, 8, 12, 0, tzinfo=UTC)
+    coordinator._interval = 100  # 30, 60, 90 and then 100 itself
+    with patch.object(coordinator, "_curve_target", return_value=_target(50)):
+        assert coordinator._plan_step(now) == 100
+
+
+def test_plan_step_ignores_a_curve_without_data(coordinator: Coord) -> None:
+    now = datetime(2026, 11, 8, 12, 0, tzinfo=UTC)
+    with patch.object(coordinator, "_curve_target", return_value=None):
+        assert coordinator._plan_step(now) == coordinator._interval
+    calls = iter([_target(50), None])
+    with patch.object(
+        coordinator,
+        "_curve_target",
+        side_effect=lambda *_a: next(calls, _target(50)),
+    ):
+        assert coordinator._plan_step(now) == coordinator._interval
+
+
+def test_close_judges_mired_xy_and_rgb(coordinator: Coord) -> None:
+    steps = coordinator._steps
+    assert coordinator._close(_target(50, 4000), _target(51, 4000))
+    assert not coordinator._close(
+        _target(50), _target(50 + steps["max_brightness_pct"] + 1)
+    )
+    assert not coordinator._close(_target(50, 4000), _target(50, 3700))  # ~20 mired
+    rgb = {"mode": "rgb", "rgb": (135, 206, 235)}
+    assert coordinator._close(_target(50, None, **rgb), _target(50, None, **rgb))
+    far = {"mode": "rgb", "rgb": (255, 120, 30)}
+    assert not coordinator._close(_target(50, None, **rgb), _target(50, None, **far))
+    xy_a = {"mode": "xy", "xy": (0.40, 0.40)}
+    xy_b = {"mode": "xy", "xy": (0.40, 0.401)}
+    assert coordinator._close(_target(50, None, **xy_a), _target(50, None, **xy_b))
+    blank = {"mode": "rgb"}
+    assert coordinator._close(_target(50, None, **blank), _target(50, None, **blank))
+    # mixed modes compare by chromaticity (CCT as xy)
+    assert coordinator._close(_target(50, 4000), _target(50, 4000, mode="xy"))
+
+
+def test_curve_target_is_none_without_sun_or_profile(coordinator: Coord) -> None:
+    now = datetime(2026, 11, 8, 12, 0, tzinfo=UTC)
+    source = coordinator._config["sources"]["overhead"]
+    with patch(
+        "custom_components.light_man.coordinator.solar_inputs",
+        side_effect=ValueError("polar"),
+    ):
+        assert coordinator._curve_target(source, now) is None
+    with patch(
+        "custom_components.light_man.coordinator.compute_target",
+        side_effect=KeyError("min_br"),
+    ):
+        assert coordinator._curve_target(source, now) is None
 
 
 async def test_stale_off_right_after_an_up_tap_is_ignored(

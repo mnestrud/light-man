@@ -50,6 +50,7 @@ from .bars import (
     LOOK_COLORS,
     BarManager,
 )
+from .colorspace import kelvin_to_xy, rgb_to_xy
 from .const import (
     BAR_HEIGHT_QUIET_S,
     BRIGHTNESS_MAX,
@@ -72,6 +73,7 @@ from .const import (
     CONF_SOURCE,
     CONF_SOURCES,
     CONF_STAGE_DELAY,
+    CONF_STEPS,
     CONF_SWEEP,
     CONF_SYNC_SWITCHES,
     CONF_TOPIC,
@@ -217,17 +219,18 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         """Wire config, mode manager, and the push timer."""
         config: LightManConfig = validated.config
         interval = config[CONF_PUSH_INTERVAL]
-        n_sources = max(1, len(config[CONF_SOURCES]))
+        steps = config[CONF_STEPS]
         super().__init__(
             hass,
             _LOGGER,
             name="Light Man",
             config_entry=entry,
-            # One timer, sources staggered across the interval (A7).
-            update_interval=timedelta(seconds=interval / n_sources),
+            # One timer at the shortest step: every source shares one schedule.
+            update_interval=timedelta(seconds=steps["min_s"]),
             always_update=False,
         )
         self._interval = interval
+        self._steps = steps
         self.entry_id = entry.entry_id
         self._entry = entry
         self._config = config
@@ -292,10 +295,8 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
             lambda coro: hass.async_create_task(coro, "lm_bars", eager_start=True),
             sleep=lambda seconds: _bar_sleep(seconds),
         )
-        offsets = {key: i / n_sources for i, key in enumerate(config[CONF_SOURCES])}
-        self._stagger = offsets
-        self._epoch: float | None = None
-        self._next_due: dict[str, float] = {}
+        self._due = 0.0  # when every source's next step is due (shared schedule)
+        self._step_s = float(interval)  # the current step: its length is its fade
         self._glide_end: dict[str, datetime] = {}
         self._pushed_once = False
         self._closed = False
@@ -612,10 +613,9 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
     async def _async_update_data(self) -> CoordinatorData:
         """Periodic tick: sweep expired holds, then push the sources that are due.
 
-        The timer runs at ``interval / n_sources`` and each source is due once per
-        interval at its own offset (A7 stagger), so floods are spread across the
-        interval instead of landing together. Expiry only invalidates — the next
-        due tick sends what changed (no forced flood at solar midnight).
+        The timer runs at the shortest step; all sources step together on one
+        schedule (:meth:`_plan_step`). Expiry only invalidates — the next due
+        tick sends what changed (no forced flood at solar midnight).
         """
         now = dt_util.utcnow()
         looks = self._look_rooms()
@@ -644,10 +644,10 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
     ) -> None:
         """Plan each source's unit and hand it to the paced publisher.
 
-        Every tick publishes ``target(t_end)`` with ``transition = interval``
-        (A6 glide), where ``t_end`` is one interval ahead; the bulb fades
-        continuously between ticks. Light Man never publishes to an Inovelli
-        switch topic — switches are read-only inputs.
+        Every step publishes ``target(t_end)`` with ``transition`` = the step
+        (A6 glide), where ``t_end`` is one step ahead; the bulb fades
+        continuously between steps. All sources share the schedule, so lights
+        on different curves change at the same moments.
         """
         if not self.push_enabled:
             return
@@ -657,19 +657,63 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
             self.diagnostics["forced_floods"] = (
                 self.diagnostics.get("forced_floods", 0) + 1
             )
-        del now
         # HA rounds the timer to whole seconds, so it fires up to a second either
-        # side of a slot; a source due within half a timer period goes now
+        # side of the due time; a step due within half a timer period goes now
         # rather than one whole period late (review nit 12).
-        slack = self._interval / max(1, len(self._config[CONF_SOURCES])) / 2
+        slack = self._steps["min_s"] / 2
+        if clock >= self._due - slack:  # this send starts the next step
+            self._step_s = self._plan_step(now)
+            self._due = max(clock, self._due) + self._step_s
+        elif due_only:
+            return  # not due yet; a forced push leaves the schedule unchanged
         for key in self._config[CONF_SOURCES]:
-            due = self._next_due.get(key, 0.0)
-            if clock >= due - slack:  # this send is the source's slot
-                self._next_due[key] = self._next_slot(key, max(clock, due))
-            elif due_only:
-                continue  # not due yet; a forced push leaves the slot unchanged
             self._enqueue_source(key, force=force)
         self._pushed_once = True
+
+    def _plan_step(self, now: datetime) -> float:
+        """Return the next step's length: the longest that keeps every curve close.
+
+        Steps are whole multiples of the shortest step, up to the push interval.
+        A step ends early when any curve, at any point in it, would move more than
+        ``max_brightness_pct`` / ``max_mired`` / ``max_xy`` from where it starts —
+        so a light that turns on mid-step (it comes up at the step's end value)
+        is never far from the lights already on, which reach it gradually.
+        """
+        shortest = self._steps["min_s"]
+        count = max(1, math.floor(self._interval / shortest + _SLOT_EPSILON))
+        offsets = [shortest * k for k in range(1, count + 1)]
+        if self._interval - offsets[-1] > _SLOT_EPSILON:
+            offsets.append(float(self._interval))
+        allowed = len(offsets)  # how many offsets every curve stays within
+        for source in self._config[CONF_SOURCES].values():
+            start = self._curve_target(source, now)
+            if start is None:
+                continue
+            for index, offset in enumerate(offsets[:allowed]):
+                later = self._curve_target(source, now + timedelta(seconds=offset))
+                if later is not None and not self._close(start, later):
+                    allowed = index
+                    break
+        return offsets[max(allowed, 1) - 1]
+
+    def _close(self, start: EngineTarget, end: EngineTarget) -> bool:
+        """Return True when ``end`` is within one step's change of ``start``."""
+        if (
+            abs(end.brightness_pct - start.brightness_pct)
+            > self._steps["max_brightness_pct"]
+        ):
+            return False
+        if (
+            start.color_mode == end.color_mode == COLOR_MODE_COLOR_TEMP
+            and start.color_temp_kelvin
+            and end.color_temp_kelvin
+        ):
+            mired = abs(1e6 / end.color_temp_kelvin - 1e6 / start.color_temp_kelvin)
+            return mired <= self._steps["max_mired"]
+        a, b = _target_xy(start), _target_xy(end)
+        if a is None or b is None:
+            return True
+        return math.dist(a, b) <= self._steps["max_xy"]
 
     def _enqueue_source(self, key: str, *, force: bool) -> None:
         """Queue a source's tick as a *planned* unit (planned when it is sent).
@@ -686,7 +730,7 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         used: list[int | None] = [None]  # the force generation this unit planned with
 
         def planner() -> list[Send]:
-            t_end = dt_util.utcnow() + timedelta(seconds=self._interval)
+            t_end = dt_util.utcnow() + timedelta(seconds=self._step_s)
             self._glide_end[key] = t_end
             used[0] = self._force_pending.get(key)
             sends = self._plan_source(key, source, t_end, force=used[0] is not None)
@@ -722,24 +766,6 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
             and self._force_pending.get(key) == used[0]
         ):
             del self._force_pending[key]
-
-    def _next_slot(self, key: str, clock: float) -> float:
-        """Next due time on this source's own slot (A7 stagger).
-
-        Slots are ``epoch + (k + offset) * interval``, where ``offset`` is
-        ``i / n_sources``; a forced push therefore never re-synchronises the
-        sources onto the same instant.
-        """
-        if self._epoch is None:
-            self._epoch = clock
-        offset = self._stagger[key] * self._interval
-        elapsed = clock - self._epoch - offset
-        # A clock exactly on a slot (an early send passes the slot itself) must
-        # move to the *next* slot; float rounding of ``slot - epoch - offset``
-        # can land a hair below the boundary and return the same slot, which
-        # sent every source twice per interval (live 2026-11-03).
-        slots = math.floor(elapsed / self._interval + _SLOT_EPSILON) + 1
-        return self._epoch + offset + slots * self._interval
 
     def _plan_source(
         self, key: str, source: SourceConfig, t_end: datetime, *, force: bool
@@ -799,6 +825,33 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
             self._enqueue(rest[start : start + TICK_BUDGET], priority=PRIORITY_TICK)
         return first
 
+    def _curve_target(
+        self, source: SourceConfig, when: datetime
+    ) -> EngineTarget | None:
+        """Return the curve's target for ``source`` at ``when`` (None: no sun data).
+
+        A broken profile yields None here too: step planning skips that curve
+        and its own send reports the error.
+        """
+        try:
+            elevation, noon = solar_inputs(self.hass, when)
+            return self._target_at(source, when, elevation, noon)
+        except KeyError, TypeError, ValueError:
+            return None
+
+    def _target_at(
+        self, source: SourceConfig, when: datetime, elevation: float, noon: float
+    ) -> EngineTarget:
+        local = dt_util.as_local(when)
+        minutes = local.hour * 60 + local.minute + local.second / 60
+        return compute_target(
+            elevation,
+            noon,
+            source["profile"],
+            sleep_s=self._compute_sleep_s(when),
+            now_minutes=minutes,
+        )
+
     def _engine_payload(
         self, key: str, source: SourceConfig, when: datetime
     ) -> PushPayload | None:
@@ -811,12 +864,8 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
             elevation, noon = solar_inputs(self.hass, when)
         except ValueError:
             return None
-        local = dt_util.as_local(when)
-        minutes = local.hour * 60 + local.minute + local.second / 60
+        target = self._target_at(source, when, elevation, noon)
         sleep_s = self._compute_sleep_s(when)
-        target = compute_target(
-            elevation, noon, source["profile"], sleep_s=sleep_s, now_minutes=minutes
-        )
         self.diagnostics["sleep"] = {"on": self.sleep_on, "s": round(sleep_s, 3)}
         self.diagnostics["engine"][key] = {
             "elevation": round(elevation, 2),
@@ -879,7 +928,7 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
                 d_mired = INTERACTIVE_MODE_CHANGE_MIRED
             seconds = 0.1 * delta_pct + 0.02 * d_mired
             return round(min(10.0, max(2.0, seconds)), 1)
-        return float(self._interval)
+        return self._step_s
 
     def _enqueue(
         self,
@@ -957,7 +1006,7 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         """
         source = self._config[CONF_SOURCES][source_key]  # loader-validated
         t_end = self._glide_end.get(source_key) or (
-            dt_util.utcnow() + timedelta(seconds=self._interval)
+            dt_util.utcnow() + timedelta(seconds=self._step_s)
         )
         try:
             return self._engine_payload(source_key, source, t_end)
@@ -2324,6 +2373,19 @@ def _truthy(value: object) -> bool:
     if isinstance(value, (int, float)):
         return value != 0
     return False
+
+
+def _target_xy(target: EngineTarget) -> tuple[float, float] | None:
+    """Return a target's chromaticity: its xy, its rgb as xy, or its CCT as xy."""
+    if target.xy:
+        return (target.xy[0], target.xy[1])
+    if target.rgb_color:
+        return rgb_to_xy(
+            (target.rgb_color[0], target.rgb_color[1], target.rgb_color[2])
+        )
+    if target.color_temp_kelvin:
+        return kelvin_to_xy(target.color_temp_kelvin)
+    return None
 
 
 def _target_to_payload(target: EngineTarget, transition: float) -> PushPayload:

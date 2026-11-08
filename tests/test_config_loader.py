@@ -374,3 +374,36 @@ def test_occupancy_duplicate_sensor_name_in_zone_is_flagged() -> None:
     }
     result = validate_config(cfg)
     assert any("duplicate sensor name" in i for i in result.issues)
+
+
+def test_steps_default_when_absent() -> None:
+    cfg = _seed()
+    cfg.pop("steps", None)
+    steps = validate_config(cfg).config["steps"]
+    assert steps == {
+        "min_s": 30.0,
+        "max_brightness_pct": 2.0,
+        "max_mired": 5.0,
+        "max_xy": 0.005,
+    }
+
+
+def test_steps_bad_values_take_defaults_with_issues() -> None:
+    cfg = _seed()
+    cfg["steps"] = {"min_s": -1, "max_brightness_pct": "big", "max_mired": 8}
+    result = validate_config(cfg)
+    steps = result.config["steps"]
+    assert steps["min_s"] == 30.0
+    assert steps["max_brightness_pct"] == 2.0
+    assert steps["max_mired"] == 8.0
+    assert sum("steps." in i for i in result.issues) == 2
+    cfg["steps"] = "nope"
+    assert any("steps: expected a mapping" in i for i in validate_config(cfg).issues)
+
+
+def test_steps_minimum_above_the_interval_is_clamped() -> None:
+    cfg = _seed()
+    cfg["steps"] = {"min_s": 1000}
+    result = validate_config(cfg)
+    assert result.config["steps"]["min_s"] == float(result.config["push_interval_s"])
+    assert any("above push_interval_s" in i for i in result.issues)

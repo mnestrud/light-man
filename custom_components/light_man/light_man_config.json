@@ -1,6 +1,12 @@
 {
-  "seed_version": 15,
+  "seed_version": 16,
   "push_interval_s": 240,
+  "steps": {
+    "min_s": 30,
+    "max_brightness_pct": 2,
+    "max_mired": 5,
+    "max_xy": 0.005
+  },
   "curves": {
     "daylight_standard": {
       "min_br": 30,
