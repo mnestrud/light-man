@@ -441,13 +441,16 @@ def held_drift(records: list[dict[str, Any]], house: House) -> list[Row]:
     floods = {t for t in house.sources.values()}
     sends = [r for r in records if r["kind"] == "set"]
     looks: list[tuple[float, float, str, dict[str, Any]]] = []  # start, end, topic
+    before: dict[str, Any] | None = None  # the last flood (bar writes come between)
     for i, send in enumerate(sends):
-        if send["topic"] in floods or i == 0:
+        if send["topic"] in floods:
+            before = send
             continue
-        before = sends[i - 1]
+        if before is None or "brightness" not in send["payload"]:
+            continue
         transition = float(send["payload"].get("transition", 0) or 0)
         if (
-            before["topic"] in floods
+            send["topic"].removesuffix("/set") not in house.switch_room  # a light
             and send["t"] - before["t"] <= REASSERT_AFTER_FLOOD_S
             and 0 < transition <= REASSERT_MAX_TRANSITION_S
         ):
