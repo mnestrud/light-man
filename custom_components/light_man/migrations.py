@@ -195,6 +195,47 @@ def _v13_to_v14(raw: dict[str, Any]) -> dict[str, Any]:
     return raw
 
 
+STAIR_ROOM = "stairwell"
+STAIR_TOPIC = "zigbee2mqtt/Stairwell Top Smart Switch mmwave"
+STAIR_TOP = "stairwell_top"
+STAIR_LANDING = "stairwell_top_landing"
+STAIR_LANDING_KEY = "mmwave_area2_occupancy"
+V15_STAIR_ON_TRANSITION_S = 0.5
+
+
+def _v14_to_v15(raw: dict[str, Any]) -> dict[str, Any]:
+    """Stairwell: the top switch's landing area (area 2) is a second sensor.
+
+    Added next to the top sensor (same sweep), and the stairwell zone fades in
+    over 0.5 s. Left alone when the stairwell room, its top sensor or the zone
+    has been edited away.
+    """
+    room = raw.get("rooms", {}).get(STAIR_ROOM)
+    zone = raw.get("occupancy_zones", {}).get(STAIR_ROOM)
+    if not isinstance(room, dict) or not isinstance(zone, dict):
+        return raw
+    sensors = room.get("sensors")
+    bindings = zone.get("sensors")
+    top_ref = f"{STAIR_ROOM}.{STAIR_TOP}"
+    if not isinstance(sensors, dict) or not isinstance(bindings, dict):
+        return raw
+    top = sensors.get(STAIR_TOP)
+    if (
+        not isinstance(top, dict)
+        or top.get("topic") != STAIR_TOPIC
+        or not isinstance(bindings.get(top_ref), dict)
+    ):
+        return raw
+    sensors.setdefault(
+        STAIR_LANDING, {"topic": STAIR_TOPIC, "occupancy_key": STAIR_LANDING_KEY}
+    )
+    bindings.setdefault(
+        f"{STAIR_ROOM}.{STAIR_LANDING}", copy.deepcopy(bindings[top_ref])
+    )
+    zone.setdefault("on_transition_s", V15_STAIR_ON_TRANSITION_S)
+    return raw
+
+
 MIGRATIONS: dict[int, Callable[[dict[str, Any]], dict[str, Any]]] = {
     8: _v8_to_v9,
     9: _v9_to_v10,
@@ -202,6 +243,7 @@ MIGRATIONS: dict[int, Callable[[dict[str, Any]], dict[str, Any]]] = {
     11: _v11_to_v12,
     12: _v12_to_v13,
     13: _v13_to_v14,
+    14: _v14_to_v15,
 }
 
 

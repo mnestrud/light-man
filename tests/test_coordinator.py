@@ -677,6 +677,18 @@ async def test_occupancy_sweep_lights_each_stage(
     assert coordinator.diagnostics["occupancy"]["hallway"] is True
 
 
+async def test_occupancy_sweep_uses_the_zone_fade_in(
+    hass: HomeAssistant, coordinator: Coord, mqtt_mock: Any
+) -> None:
+    """A zone's on_transition_s sets the sweep's fade-in."""
+    coordinator._occupancy["hallway"]["on_transition_s"] = 0.5
+    await coordinator.async_set_push_enabled(enabled=True)
+    await hass.async_block_till_done()
+    mqtt_mock.async_publish.reset_mock()
+    await _walk(hass, coordinator, MMWAVE_EAST, occupied=True)
+    assert published(mqtt_mock)[HALL_UP] == {**SWEEP_ON, "transition": 0.5}
+
+
 async def test_occupancy_clears_when_all_sensors_off(
     hass: HomeAssistant, coordinator: Coord, mqtt_mock: Any
 ) -> None:

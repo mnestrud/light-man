@@ -26,7 +26,7 @@ MODES_STORE_VERSION: Final = 1
 # top-level objects merged across groups; occupancy moved to `occupancy_zones`
 # referencing room-owned sensors; sleep ramp became a top-level block. The loader
 # derives the unchanged runtime view from this shape, so addressing is identical.
-BUNDLED_SEED_VERSION: Final = 14
+BUNDLED_SEED_VERSION: Final = 15
 
 # --- Seed-config JSON keys --------------------------------------------------
 CONF_PUSH_INTERVAL: Final = "push_interval_s"
@@ -129,6 +129,7 @@ CONF_LIGHTS: Final = "lights"
 CONF_SOURCE: Final = "source"
 CONF_OFF_LIGHTS: Final = "off_lights"
 CONF_OFF_TRANSITION: Final = "off_transition_s"
+CONF_ON_TRANSITION: Final = "on_transition_s"  # sweep fade-in, per zone
 # Default JSON field in an Inovelli mmwave payload that reports overall presence.
 DEFAULT_OCCUPANCY_KEY: Final = "occupancy"
 DEFAULT_OCCUPANCY_TRANSITION_S: Final = 1.5

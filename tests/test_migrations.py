@@ -32,7 +32,7 @@ def _seed_v8() -> dict:
 
 def test_v8_fixture_migrates_to_the_shipped_bundle() -> None:
     migrated, steps = migrate(_seed_v8())
-    assert steps == [8, 9, 10, 11, 12, 13]
+    assert steps == [8, 9, 10, 11, 12, 13, 14]
     assert migrated == json.loads(BUNDLE.read_text())
     assert migrated["seed_version"] == BUNDLED_SEED_VERSION
 
@@ -48,7 +48,7 @@ def test_v8_to_v9_makes_day_window_defaults_explicit() -> None:
 def test_v9_fixture_migrates_to_the_shipped_bundle() -> None:
     raw = json.loads((FIXTURES / "seed_v9.json").read_text())
     migrated, steps = migrate(raw)
-    assert steps == [9, 10, 11, 12, 13]
+    assert steps == [9, 10, 11, 12, 13, 14]
     assert migrated == json.loads(BUNDLE.read_text())
     assert migrated["push_interval_s"] == 240
 
@@ -62,7 +62,7 @@ def test_v9_to_v10_keeps_an_edited_interval() -> None:
 def test_v10_fixture_migrates_to_the_shipped_bundle() -> None:
     raw = json.loads((FIXTURES / "seed_v10.json").read_text())
     migrated, steps = migrate(raw)
-    assert steps == [10, 11, 12, 13]
+    assert steps == [10, 11, 12, 13, 14]
     assert migrated == json.loads(BUNDLE.read_text())
     hall = migrated["occupancy_zones"]["hallway"]
     assert hall["override_switches"] == [HALL_EAST, HALL_WEST]
@@ -162,7 +162,7 @@ def _bath_switches(raw: dict) -> list[dict]:
 
 def test_v12_fixture_migrates_to_the_shipped_bundle() -> None:
     migrated, steps = migrate(_seed_v12())
-    assert steps == [12, 13]
+    assert steps == [12, 13, 14]
     assert migrated == json.loads(BUNDLE.read_text())
     bath = ["primary_bath.overhead", "primary_bath.under_vanity"]
     switches = {sw["topic"]: sw for sw in _bath_switches(migrated)}
@@ -212,7 +212,7 @@ def _seed_v13() -> dict:
 
 def test_v13_fixture_migrates_to_the_shipped_bundle() -> None:
     migrated, steps = migrate(_seed_v13())
-    assert steps == [13]
+    assert steps == [13, 14]
     assert migrated == json.loads(BUNDLE.read_text())
     assert migrated["push_interval_s"] == 240
 
@@ -221,3 +221,55 @@ def test_v13_to_v14_keeps_an_edited_interval() -> None:
     raw = _seed_v13()
     raw["push_interval_s"] = 90
     assert migrate(raw)[0]["push_interval_s"] == 90
+
+
+def _seed_v14() -> dict:
+    return json.loads((FIXTURES / "seed_v14.json").read_text())
+
+
+def test_v14_fixture_migrates_to_the_shipped_bundle() -> None:
+    migrated, steps = migrate(_seed_v14())
+    assert steps == [14]
+    assert migrated == json.loads(BUNDLE.read_text())
+    sensors = migrated["rooms"]["stairwell"]["sensors"]
+    assert sensors["stairwell_top_landing"]["occupancy_key"] == "mmwave_area2_occupancy"
+    zone = migrated["occupancy_zones"]["stairwell"]
+    assert zone["on_transition_s"] == 0.5
+    assert (
+        zone["sensors"]["stairwell.stairwell_top_landing"]
+        == zone["sensors"]["stairwell.stairwell_top"]
+    )
+    result = validate_config(migrated)
+    assert result.issues == []
+
+
+def test_v14_to_v15_keeps_an_edited_fade_and_landing() -> None:
+    raw = _seed_v14()
+    zone = raw["occupancy_zones"]["stairwell"]
+    zone["on_transition_s"] = 1.0
+    landing = {"topic": "zigbee2mqtt/Other", "occupancy_key": "x"}
+    raw["rooms"]["stairwell"]["sensors"]["stairwell_top_landing"] = landing
+    migrated = migrate(raw)[0]
+    assert migrated["occupancy_zones"]["stairwell"]["on_transition_s"] == 1.0
+    assert migrated["rooms"]["stairwell"]["sensors"]["stairwell_top_landing"] == landing
+
+
+def test_v14_to_v15_skips_an_edited_stairwell() -> None:
+    raw = _seed_v14()
+    raw["rooms"]["stairwell"]["sensors"]["stairwell_top"]["topic"] = "zigbee2mqtt/X"
+    migrated = migrate(raw)[0]
+    assert "stairwell_top_landing" not in migrated["rooms"]["stairwell"]["sensors"]
+    assert "on_transition_s" not in migrated["occupancy_zones"]["stairwell"]
+
+
+def test_v14_to_v15_skips_when_the_stairwell_is_gone() -> None:
+    raw = _seed_v14()
+    del raw["occupancy_zones"]["stairwell"]
+    assert "stairwell" not in migrate(raw)[0]["occupancy_zones"]
+    raw = _seed_v14()
+    raw["rooms"]["stairwell"]["sensors"] = []
+    assert migrate(raw)[0]["rooms"]["stairwell"]["sensors"] == []
+    raw = _seed_v14()
+    del raw["occupancy_zones"]["stairwell"]["sensors"]["stairwell.stairwell_top"]
+    migrated = migrate(raw)[0]
+    assert "stairwell_top_landing" not in migrated["rooms"]["stairwell"]["sensors"]

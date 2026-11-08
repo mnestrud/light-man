@@ -1,5 +1,5 @@
 {
-  "seed_version": 14,
+  "seed_version": 15,
   "push_interval_s": 240,
   "curves": {
     "daylight_standard": {
@@ -398,6 +398,10 @@
         "stairwell_top": {
           "topic": "zigbee2mqtt/Stairwell Top Smart Switch mmwave",
           "occupancy_key": "mmwave_area1_occupancy"
+        },
+        "stairwell_top_landing": {
+          "topic": "zigbee2mqtt/Stairwell Top Smart Switch mmwave",
+          "occupancy_key": "mmwave_area2_occupancy"
         }
       }
     },
@@ -605,11 +609,21 @@
               ]
             }
           ]
+        },
+        "stairwell.stairwell_top_landing": {
+          "sweep": [
+            {
+              "lights": [
+                "stairwell.overhead"
+              ]
+            }
+          ]
         }
       },
       "sync_switches": [
         "zigbee2mqtt/Stairwell Top Smart Switch mmwave"
-      ]
+      ],
+      "on_transition_s": 0.5
     }
   },
   "sleep": {

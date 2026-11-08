@@ -37,6 +37,7 @@ from .const import (
     CONF_OCCUPANCY_ZONES,
     CONF_OFF_LIGHTS,
     CONF_OFF_TRANSITION,
+    CONF_ON_TRANSITION,
     CONF_OVERRIDE_IDLE,
     CONF_OVERRIDE_SWITCHES,
     CONF_PROFILE,
@@ -570,6 +571,27 @@ def _zone_switches(
     return [t for t in topics if t in scan.switch_topics]
 
 
+def _zone_off_transition(zone_raw: dict[str, object]) -> float:
+    """Return a zone's all-clear fade-out (the default when unset or bad)."""
+    raw = zone_raw.get(CONF_OFF_TRANSITION, DEFAULT_OCCUPANCY_TRANSITION_S)
+    if _is_number(raw):
+        return float(cast("float", raw))
+    return DEFAULT_OCCUPANCY_TRANSITION_S
+
+
+def _zone_on_transition(
+    zone_id: str, zone_raw: dict[str, object], issues: list[str]
+) -> float | None:
+    """Return a zone's sweep fade-in if set (None: the default applies)."""
+    if CONF_ON_TRANSITION not in zone_raw:
+        return None
+    raw = zone_raw[CONF_ON_TRANSITION]
+    if _is_number(raw) and float(cast("float", raw)) >= 0:
+        return float(cast("float", raw))
+    issues.append(f"occupancy.{zone_id}: bad {CONF_ON_TRANSITION}; default")
+    return None
+
+
 def _validate_zone(
     zone_id: str,
     zone_raw: dict[str, object],
@@ -610,18 +632,29 @@ def _validate_zone(
     off_lights = (
         [t for t in raw_off if isinstance(t, str)] if isinstance(raw_off, list) else []
     )
-    off_trans = zone_raw.get(CONF_OFF_TRANSITION, DEFAULT_OCCUPANCY_TRANSITION_S)
-    off_transition_s = (
-        float(cast("float", off_trans))
-        if _is_number(off_trans)
-        else DEFAULT_OCCUPANCY_TRANSITION_S
-    )
+    off_transition_s = _zone_off_transition(zone_raw)
     runtime = OccupancyZone(
         sensors=run_sensors, off_lights=off_lights, off_transition_s=off_transition_s
     )
     stored = ZoneConfig(
         sensors=stored_sensors, off_lights=off_lights, off_transition_s=off_transition_s
     )
+    on_transition = _zone_on_transition(zone_id, zone_raw, issues)
+    if on_transition is not None:
+        runtime[CONF_ON_TRANSITION] = stored[CONF_ON_TRANSITION] = on_transition
+    _apply_zone_switches(zone_id, zone_raw, scan, issues, runtime, stored)
+    return runtime, stored
+
+
+def _apply_zone_switches(
+    zone_id: str,
+    zone_raw: dict[str, object],
+    scan: _RoomScan,
+    issues: list[str],
+    runtime: OccupancyZone,
+    stored: ZoneConfig,
+) -> None:
+    """Resolve a zone's sync and override switches (and the override idle time)."""
     sync = _zone_switches(zone_id, zone_raw, CONF_SYNC_SWITCHES, scan, issues)
     if sync is not None:
         runtime[CONF_SYNC_SWITCHES] = stored[CONF_SYNC_SWITCHES] = sync
@@ -634,7 +667,6 @@ def _validate_zone(
             idle = DEFAULT_OVERRIDE_IDLE_S
         seconds = float(cast("float", idle))
         runtime[CONF_OVERRIDE_IDLE] = stored[CONF_OVERRIDE_IDLE] = seconds
-    return runtime, stored
 
 
 def _validate_zones(

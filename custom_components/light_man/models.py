@@ -88,6 +88,7 @@ class OccupancyZone(TypedDict, total=False):
     sensors: dict[str, OccupancySensor]  # sensor name -> its binding
     off_lights: list[str]  # /set topics turned off on all-clear
     off_transition_s: float
+    on_transition_s: float  # sweep fade-in (default DEFAULT_OCCUPANCY_TRANSITION_S)
     sync_switches: list[str]  # switch bases whose state follows the zone
     override_switches: list[str]  # switch bases whose up tap overrides motion
     override_idle_s: float  # an override ends after this long with no presence
@@ -279,6 +280,7 @@ class ZoneConfig(TypedDict, total=False):
     sensors: dict[str, ZoneSensorBinding]
     off_lights: list[str]
     off_transition_s: float
+    on_transition_s: float
     sync_switches: list[str]
     override_switches: list[str]
     override_idle_s: float

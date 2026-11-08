@@ -317,6 +317,27 @@ def test_occupancy_defaults_applied() -> None:
     zone = validate_config(cfg).config["occupancy"]["z"]
     assert zone["off_transition_s"] == 1.5  # default off transition
     assert zone["off_lights"] == []  # none configured
+    assert "on_transition_s" not in zone  # the sweep uses the default fade-in
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected", "issue"),
+    [(0.5, 0.5, False), (0, 0.0, False), (-1, None, True), ("fast", None, True)],
+)
+def test_occupancy_on_transition(raw: Any, expected: Any, issue: bool) -> None:
+    cfg = _seed()
+    cfg["occupancy_zones"] = {
+        "z": {
+            "sensors": {"hall.east": {"sweep": [{"lights": ["hall.up_main"]}]}},
+            "on_transition_s": raw,
+            "off_transition_s": "slow",  # not a number: the default
+        }
+    }
+    result = validate_config(cfg)
+    zone = result.config["occupancy"]["z"]
+    assert zone.get("on_transition_s") == expected
+    assert zone["off_transition_s"] == 1.5
+    assert any("on_transition_s" in i for i in result.issues) is issue
 
 
 def test_occupancy_bad_zones_dropped_with_issues() -> None:

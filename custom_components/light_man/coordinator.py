@@ -62,6 +62,7 @@ from .const import (
     CONF_OCCUPANCY_KEY,
     CONF_OFF_LIGHTS,
     CONF_OFF_TRANSITION,
+    CONF_ON_TRANSITION,
     CONF_OVERRIDE_IDLE,
     CONF_OVERRIDE_SWITCHES,
     CONF_PUSH_INTERVAL,
@@ -1262,6 +1263,9 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         are told ON so their state and LED bar follow the lights (F).
         """
         lit = self._zone_lit.setdefault(zone_key, set())
+        fade = self._occupancy[zone_key].get(
+            CONF_ON_TRANSITION, DEFAULT_OCCUPANCY_TRANSITION_S
+        )
         for stage in sweep:
             delay = stage.get(CONF_STAGE_DELAY, 0.0)
             if delay:
@@ -1275,7 +1279,7 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
                     continue
                 body = {
                     **payload,
-                    "transition": DEFAULT_OCCUPANCY_TRANSITION_S,
+                    "transition": fade,
                     "state": STATE_ON,
                 }
                 sends.append(Send(light[CONF_SET_TOPIC], body))
