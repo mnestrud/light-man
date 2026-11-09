@@ -12,7 +12,8 @@ through this queue, which:
   mesh's own broadcasts;
 - serves interactive units before tick units, and lets a newer send for a topic
   replace a pending older one (coalescing);
-- spaces any two sends by ``min_gap_s``.
+- spaces any two sends by ``min_gap_s``, except within a ``together`` unit
+  (one fixture's lamps, which must change at the same moment).
 
 Hass-free: the coordinator injects the send coroutine, a task factory, the
 group classifier, and (in tests) a clock and sleep.
@@ -60,6 +61,7 @@ class _Unit:
     origin_at: float | None  # when the triggering event arrived (latency stats)
     planner: Callable[[], list[Send]] | None = None  # lazy: plan at dequeue
     key: str | None = None  # lazy units with the same key replace each other
+    together: bool = False  # sends after the first skip min_gap_s
 
     def sort_key(self) -> tuple[int, int]:
         return (self.priority, self.seq)
@@ -144,8 +146,12 @@ class PacedPublisher:
         *,
         priority: int,
         origin_at: float | None = None,
+        together: bool = False,
     ) -> asyncio.Future[list[Send]]:
         """Queue a unit; the future resolves to the sends the broker acked.
+
+        ``together`` sends the unit back to back (no ``min_gap_s`` between its
+        sends), for lamps that must change at the same moment.
 
         A send for a topic that is already pending in an older unit replaces it
         there (the older unit drops that send; an emptied unit resolves ``[]``).
@@ -156,9 +162,9 @@ class PacedPublisher:
             future.set_result([])
             return future
         self._coalesce({send.topic for send in sends})
-        self._add(
-            _Unit(next(self._seq), priority, sends, future, self._clock(), origin_at)
-        )
+        unit = _Unit(next(self._seq), priority, sends, future, self._clock(), origin_at)
+        unit.together = together
+        self._add(unit)
         return future
 
     def enqueue_planned(
@@ -242,7 +248,13 @@ class PacedPublisher:
                 continue  # re-pick: a planned unit re-plans, a tap may now go first
             self._pending.remove(unit)
             self._current = unit
-            acked = [s for s in unit.sends if await self._send_one(s, unit.priority)]
+            acked = [
+                s
+                for i, s in enumerate(unit.sends)
+                if await self._send_one(
+                    s, unit.priority, spaced=not (unit.together and i > 0)
+                )
+            ]
             self._current = None
             if unit.origin_at is not None and unit.priority == PRIORITY_INTERACTIVE:
                 self.stats.interactive_latency_s.append(self._clock() - unit.origin_at)
@@ -324,9 +336,11 @@ class PacedPublisher:
         oldest_needed = stamps[min(slots, len(stamps)) - 1]
         return max(0.0, oldest_needed + self._window_s - now)
 
-    async def _send_one(self, send: Send, priority: int) -> bool:
+    async def _send_one(
+        self, send: Send, priority: int, *, spaced: bool = True
+    ) -> bool:
         now = self._clock()
-        if self._last_send_at is not None:
+        if spaced and self._last_send_at is not None:
             gap = self._last_send_at + self._min_gap_s - now
             if gap > 0:
                 await self._sleep(gap)

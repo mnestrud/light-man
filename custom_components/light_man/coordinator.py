@@ -965,12 +965,15 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         *,
         priority: int,
         origin_at: float | None = None,
+        together: bool = False,
     ) -> None:
         """Queue a concrete unit; dedup marks are set from the acked sends only."""
         if self._closed:
             return
         self._note_planned(sends, priority)
-        future = self._publisher.enqueue(sends, priority=priority, origin_at=origin_at)
+        future = self._publisher.enqueue(
+            sends, priority=priority, origin_at=origin_at, together=together
+        )
         future.add_done_callback(self._on_sent)
 
     def _note_planned(self, sends: list[Send], priority: int) -> None:
@@ -1359,7 +1362,9 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
                 sends.append(Send(light[CONF_SET_TOPIC], body))
                 lit.add(light[CONF_SET_TOPIC])
             if sends:
-                self._enqueue(sends, priority=PRIORITY_INTERACTIVE)
+                # One stage = one fixture's lamps: send them back to back so the
+                # pair starts its fade at the same moment.
+                self._enqueue(sends, priority=PRIORITY_INTERACTIVE, together=True)
         self._write_switches(
             self._occupancy[zone_key].get(CONF_SYNC_SWITCHES, []), STATE_ON
         )

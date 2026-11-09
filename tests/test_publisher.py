@@ -123,6 +123,20 @@ async def test_unit_is_sent_contiguously_in_order() -> None:
     assert [topic for _t, topic in h.sent] == ["g/flood", "g/reassert", "d/other"]
 
 
+async def test_together_unit_skips_min_gap_inside_the_unit() -> None:
+    h = Harness()
+    h.pub.enqueue([_s("d/first")], priority=PRIORITY_INTERACTIVE)
+    h.pub.enqueue(
+        [_s("d/up"), _s("d/down")], priority=PRIORITY_INTERACTIVE, together=True
+    )
+    h.pub.enqueue([_s("d/next")], priority=PRIORITY_INTERACTIVE)
+    await _drain(h)
+    offsets = dict((topic, t) for t, topic in h.offsets())
+    assert offsets["d/up"] == pytest.approx(0.15)  # still gapped from the unit before
+    assert offsets["d/down"] == offsets["d/up"]  # the pair goes back to back
+    assert offsets["d/next"] == pytest.approx(0.30)
+
+
 async def test_unit_is_budget_checked_as_a_whole() -> None:
     h = Harness()
     for i in range(5):
