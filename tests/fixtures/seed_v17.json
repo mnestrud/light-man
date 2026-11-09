@@ -1,0 +1,639 @@
+{
+  "seed_version": 17,
+  "push_interval_s": 240,
+  "steps": {
+    "min_s": 30,
+    "max_brightness_pct": 2,
+    "max_mired": 5,
+    "max_xy": 0.005
+  },
+  "curves": {
+    "daylight_standard": {
+      "min_br": 30,
+      "max_br": 90,
+      "min_ct": 2700,
+      "max_ct": 6500,
+      "sat": 0.5,
+      "base_color_mode": "color_temp",
+      "base_rgb": null,
+      "dusk_floor_ct": 2200,
+      "night_floor_br": 30,
+      "sleep": {
+        "br": 30,
+        "color_mode": "color_temp",
+        "ct": 2700
+      },
+      "day_window": {
+        "enabled": true,
+        "start": "07:30",
+        "end": "17:00",
+        "edge_transition_s": 3600.0,
+        "wind_down_s": 5400.0
+      }
+    },
+    "accent_dim": {
+      "min_br": 10,
+      "max_br": 30,
+      "min_ct": 2700,
+      "max_ct": 6000,
+      "sat": 0.5,
+      "base_color_mode": "color_temp",
+      "base_rgb": null,
+      "dusk_floor_ct": 2200,
+      "night_floor_br": 10,
+      "sleep": {
+        "br": 10,
+        "color_mode": "color_temp",
+        "ct": 2500
+      },
+      "day_window": {
+        "enabled": true,
+        "start": "07:30",
+        "end": "17:00",
+        "edge_transition_s": 3600.0,
+        "wind_down_s": 5400.0
+      }
+    },
+    "hallway_sky": {
+      "min_br": 30,
+      "max_br": 90,
+      "min_ct": 2700,
+      "max_ct": 6500,
+      "sat": 0.5,
+      "base_color_mode": "rgb",
+      "base_rgb": [
+        135,
+        206,
+        235
+      ],
+      "dusk_floor_ct": 2200,
+      "night_floor_br": 30,
+      "sleep": {
+        "br": 40,
+        "color_mode": "rgb",
+        "rgb": [
+          255,
+          126,
+          30
+        ]
+      },
+      "day_window": {
+        "enabled": true,
+        "start": "07:30",
+        "end": "17:00",
+        "edge_transition_s": 3600.0,
+        "wind_down_s": 5400.0
+      }
+    },
+    "hallway_ct_winddown": {
+      "min_br": 30,
+      "max_br": 90,
+      "min_ct": 2700,
+      "max_ct": 6500,
+      "sat": 0.5,
+      "base_color_mode": "color_temp",
+      "base_rgb": null,
+      "dusk_floor_ct": 2200,
+      "night_floor_br": 30,
+      "sleep": {
+        "br": 5,
+        "color_mode": "rgb",
+        "rgb": [
+          155,
+          123,
+          232
+        ]
+      },
+      "day_window": {
+        "enabled": true,
+        "start": "07:30",
+        "end": "17:00",
+        "edge_transition_s": 3600.0,
+        "wind_down_s": 5400.0
+      }
+    }
+  },
+  "sources": {
+    "overhead": {
+      "consolidated_topic": "zigbee2mqtt/zgb_overhead_all/set",
+      "curve_ref": "daylight_standard"
+    },
+    "accent": {
+      "consolidated_topic": "zigbee2mqtt/zgb_accent_all/set",
+      "curve_ref": "accent_dim"
+    },
+    "hallway_up": {
+      "consolidated_topic": "zigbee2mqtt/zgb_hallway_up/set",
+      "curve_ref": "hallway_sky"
+    },
+    "hallway_down": {
+      "consolidated_topic": "zigbee2mqtt/zgb_hallway_down/set",
+      "curve_ref": "hallway_ct_winddown"
+    }
+  },
+  "rooms": {
+    "living_room": {
+      "name": "Living Room",
+      "lights": [
+        {
+          "id": "overhead",
+          "set_topic": "zigbee2mqtt/zgb_living_room/set",
+          "source": "overhead"
+        }
+      ],
+      "switches": [
+        {
+          "topic": "zigbee2mqtt/Living Room Overhead Light Switch 1",
+          "governs": "living_room.overhead",
+          "animations": {
+            "up_double": {
+              "effect": "slow_rising",
+              "color": 220,
+              "level": 50,
+              "duration": 10
+            },
+            "down_double": {
+              "effect": "slow_falling",
+              "color": 220,
+              "level": 50,
+              "duration": 10
+            },
+            "up_triple": {
+              "effect": "slow_rising",
+              "color": 220,
+              "level": 50,
+              "duration": 10
+            },
+            "down_triple": {
+              "effect": "slow_falling",
+              "color": 220,
+              "level": 50,
+              "duration": 10
+            }
+          }
+        }
+      ],
+      "sensors": {}
+    },
+    "kitchen": {
+      "name": "Kitchen",
+      "lights": [
+        {
+          "id": "overhead",
+          "set_topic": "zigbee2mqtt/zgb_kitchen/set",
+          "source": "overhead"
+        },
+        {
+          "id": "island",
+          "set_topic": "zigbee2mqtt/zgb_kitchen_island/set",
+          "source": "accent"
+        }
+      ],
+      "switches": [
+        {
+          "topic": "zigbee2mqtt/Kitchen Overhead Light Switch",
+          "governs": "kitchen.overhead",
+          "animations": {
+            "up_double": {
+              "effect": "slow_rising",
+              "color": 220,
+              "level": 50,
+              "duration": 10
+            },
+            "down_double": {
+              "effect": "slow_falling",
+              "color": 220,
+              "level": 50,
+              "duration": 10
+            },
+            "up_triple": {
+              "effect": "pulse",
+              "color": 220,
+              "level": 50,
+              "duration": 10
+            },
+            "down_triple": {
+              "effect": "pulse",
+              "color": 220,
+              "level": 50,
+              "duration": 10
+            }
+          }
+        },
+        {
+          "topic": "zigbee2mqtt/Kitchen Island Light Switch",
+          "governs": "kitchen.island",
+          "animations": {
+            "up_double": {
+              "effect": "slow_rising",
+              "color": 220,
+              "level": 50,
+              "duration": 10
+            },
+            "down_double": {
+              "effect": "slow_falling",
+              "color": 220,
+              "level": 50,
+              "duration": 10
+            }
+          }
+        }
+      ],
+      "sensors": {}
+    },
+    "primary_bedroom": {
+      "name": "Primary Bedroom",
+      "lights": [
+        {
+          "id": "overhead",
+          "set_topic": "zigbee2mqtt/zgb_primary_bedroom/set",
+          "source": "overhead"
+        }
+      ],
+      "switches": [
+        {
+          "topic": "zigbee2mqtt/Primary Bedroom Overhead Light Switch",
+          "governs": "primary_bedroom.overhead",
+          "animations": {
+            "up_double": {
+              "effect": "slow_rising",
+              "color": 220,
+              "level": 50,
+              "duration": 10
+            },
+            "down_double": {
+              "effect": "slow_falling",
+              "color": 220,
+              "level": 50,
+              "duration": 10
+            },
+            "up_triple": {
+              "effect": "pulse",
+              "color": 220,
+              "level": 50,
+              "duration": 10
+            },
+            "down_triple": {
+              "effect": "pulse",
+              "color": 220,
+              "level": 50,
+              "duration": 10
+            }
+          }
+        }
+      ],
+      "sensors": {}
+    },
+    "primary_bath": {
+      "name": "Primary Bath",
+      "lights": [
+        {
+          "id": "overhead",
+          "set_topic": "zigbee2mqtt/zgb_overhead_bath/set",
+          "source": "overhead"
+        },
+        {
+          "id": "shower",
+          "set_topic": "zigbee2mqtt/zgb_primary_shower_lights/set",
+          "source": "overhead"
+        },
+        {
+          "id": "under_vanity",
+          "set_topic": "zigbee2mqtt/Primary Bath Under Vanity Lights/set",
+          "source": "accent"
+        }
+      ],
+      "switches": [
+        {
+          "topic": "zigbee2mqtt/Primary Bath Front Smart Switch",
+          "governs": [
+            "primary_bath.overhead",
+            "primary_bath.under_vanity"
+          ]
+        },
+        {
+          "topic": "zigbee2mqtt/Primary Bath Toilet Smart Switch",
+          "governs": [
+            "primary_bath.overhead",
+            "primary_bath.under_vanity"
+          ]
+        },
+        {
+          "topic": "zigbee2mqtt/Primary Bath Shower Smart Switch",
+          "governs": "primary_bath.shower"
+        }
+      ],
+      "sensors": {}
+    },
+    "office": {
+      "name": "Office",
+      "lights": [
+        {
+          "id": "overhead",
+          "set_topic": "zigbee2mqtt/zgb_office_overhead/set",
+          "source": "overhead"
+        }
+      ],
+      "switches": [
+        {
+          "topic": "zigbee2mqtt/Office Smart Switch",
+          "governs": "office.overhead",
+          "animations": {
+            "up_double": {
+              "effect": "slow_rising",
+              "color": 220,
+              "level": 50,
+              "duration": 10
+            },
+            "down_double": {
+              "effect": "slow_falling",
+              "color": 220,
+              "level": 50,
+              "duration": 10
+            },
+            "up_triple": {
+              "effect": "pulse",
+              "color": 220,
+              "level": 50,
+              "duration": 10
+            },
+            "down_triple": {
+              "effect": "pulse",
+              "color": 220,
+              "level": 50,
+              "duration": 10
+            }
+          }
+        }
+      ],
+      "sensors": {}
+    },
+    "upstairs_bath": {
+      "name": "Upstairs Bath",
+      "lights": [
+        {
+          "id": "overhead",
+          "set_topic": "zigbee2mqtt/zgb_upstairs_bath/set",
+          "source": "overhead"
+        }
+      ],
+      "switches": [
+        {
+          "topic": "zigbee2mqtt/Upstairs Bath Light Switch",
+          "governs": "upstairs_bath.overhead"
+        }
+      ],
+      "sensors": {}
+    },
+    "stairwell": {
+      "name": "Stairwell",
+      "lights": [
+        {
+          "id": "overhead",
+          "set_topic": "zigbee2mqtt/zgb_stairwell/set",
+          "source": "overhead"
+        }
+      ],
+      "switches": [
+        {
+          "topic": "zigbee2mqtt/Stairwell Top Smart Switch mmwave",
+          "governs": "stairwell.overhead"
+        }
+      ],
+      "sensors": {
+        "stairwell_top": {
+          "topic": "zigbee2mqtt/Stairwell Top Smart Switch mmwave",
+          "occupancy_key": "mmwave_area1_occupancy"
+        },
+        "stairwell_top_landing": {
+          "topic": "zigbee2mqtt/Stairwell Top Smart Switch mmwave",
+          "occupancy_key": "mmwave_area2_occupancy"
+        }
+      }
+    },
+    "front_door": {
+      "name": "Front Door",
+      "lights": [
+        {
+          "id": "overhead",
+          "set_topic": "zigbee2mqtt/Front Door Overhead Light 1/set",
+          "source": "overhead"
+        }
+      ],
+      "switches": [
+        {
+          "topic": "zigbee2mqtt/Front Door Overhead Light Switch",
+          "governs": "front_door.overhead"
+        }
+      ],
+      "sensors": {}
+    },
+    "michael_closet": {
+      "name": "Michael Closet",
+      "lights": [
+        {
+          "id": "overhead",
+          "set_topic": "zigbee2mqtt/Michael Closet Overhead Light/set",
+          "source": "overhead"
+        }
+      ],
+      "switches": [
+        {
+          "topic": "zigbee2mqtt/Michael Closet Overhead Switch",
+          "governs": "michael_closet.overhead",
+          "animations": {
+            "up_double": {
+              "effect": "slow_rising",
+              "color": 220,
+              "level": 50,
+              "duration": 10
+            },
+            "down_double": {
+              "effect": "slow_falling",
+              "color": 220,
+              "level": 50,
+              "duration": 10
+            },
+            "up_triple": {
+              "effect": "pulse",
+              "color": 220,
+              "level": 50,
+              "duration": 10
+            },
+            "down_triple": {
+              "effect": "pulse",
+              "color": 220,
+              "level": 50,
+              "duration": 10
+            }
+          }
+        }
+      ],
+      "sensors": {}
+    },
+    "hallway": {
+      "name": "Hallway",
+      "lights": [
+        {
+          "id": "east_up",
+          "set_topic": "zigbee2mqtt/Hallway Light East Uplight/set",
+          "source": "hallway_up"
+        },
+        {
+          "id": "east_down",
+          "set_topic": "zigbee2mqtt/Hallway Light East Downlight/set",
+          "source": "hallway_down"
+        },
+        {
+          "id": "center_up",
+          "set_topic": "zigbee2mqtt/Hallway Light Center Uplight/set",
+          "source": "hallway_up"
+        },
+        {
+          "id": "center_down",
+          "set_topic": "zigbee2mqtt/Hallway Light Center Downlight/set",
+          "source": "hallway_down"
+        },
+        {
+          "id": "west_up",
+          "set_topic": "zigbee2mqtt/Hallway Light West Uplight/set",
+          "source": "hallway_up"
+        },
+        {
+          "id": "west_down",
+          "set_topic": "zigbee2mqtt/Hallway Light West Downlight/set",
+          "source": "hallway_down"
+        }
+      ],
+      "switches": [
+        {
+          "topic": "zigbee2mqtt/Hallway Light Switch East New New mmwave",
+          "governs": "hallway",
+          "bar_follows": "hallway.east_down"
+        },
+        {
+          "topic": "zigbee2mqtt/Hall Smart Switch West New mmwave",
+          "governs": "hallway",
+          "bar_follows": "hallway.east_down"
+        }
+      ],
+      "sensors": {
+        "hall_east": {
+          "topic": "zigbee2mqtt/Hallway Light Switch East New New mmwave",
+          "occupancy_key": "mmwave_area1_occupancy"
+        },
+        "hall_west": {
+          "topic": "zigbee2mqtt/Hall Smart Switch West New mmwave",
+          "occupancy_key": "mmwave_area1_occupancy"
+        }
+      }
+    }
+  },
+  "occupancy_zones": {
+    "hallway": {
+      "off_lights": [
+        "zigbee2mqtt/zgb_hallwayf/set"
+      ],
+      "sensors": {
+        "hallway.hall_east": {
+          "sweep": [
+            {
+              "lights": [
+                "hallway.east_up",
+                "hallway.east_down"
+              ]
+            },
+            {
+              "delay_s": 1.0,
+              "lights": [
+                "hallway.center_up",
+                "hallway.center_down"
+              ]
+            },
+            {
+              "delay_s": 1.0,
+              "lights": [
+                "hallway.west_up",
+                "hallway.west_down"
+              ]
+            }
+          ]
+        },
+        "hallway.hall_west": {
+          "sweep": [
+            {
+              "lights": [
+                "hallway.west_up",
+                "hallway.west_down"
+              ]
+            },
+            {
+              "delay_s": 1.0,
+              "lights": [
+                "hallway.center_up",
+                "hallway.center_down"
+              ]
+            },
+            {
+              "delay_s": 1.0,
+              "lights": [
+                "hallway.east_up",
+                "hallway.east_down"
+              ]
+            }
+          ]
+        }
+      },
+      "sync_switches": [
+        "zigbee2mqtt/Hallway Light Switch East New New mmwave"
+      ],
+      "override_switches": [
+        "zigbee2mqtt/Hallway Light Switch East New New mmwave",
+        "zigbee2mqtt/Hall Smart Switch West New mmwave"
+      ],
+      "override_idle_s": 3600
+    },
+    "stairwell": {
+      "off_lights": [
+        "zigbee2mqtt/zgb_stairwell/set"
+      ],
+      "sensors": {
+        "stairwell.stairwell_top": {
+          "sweep": [
+            {
+              "lights": [
+                "stairwell.overhead"
+              ]
+            }
+          ]
+        },
+        "hallway.hall_west": {
+          "sweep": [
+            {
+              "lights": [
+                "stairwell.overhead"
+              ]
+            }
+          ]
+        },
+        "stairwell.stairwell_top_landing": {
+          "sweep": [
+            {
+              "lights": [
+                "stairwell.overhead"
+              ]
+            }
+          ]
+        }
+      },
+      "sync_switches": [
+        "zigbee2mqtt/Stairwell Top Smart Switch mmwave"
+      ],
+      "on_transition_s": 0.5
+    }
+  },
+  "sleep": {
+    "ramp_in_s": 5400,
+    "ramp_out_s": 1800
+  }
+}

@@ -1,5 +1,5 @@
 {
-  "seed_version": 17,
+  "seed_version": 18,
   "push_interval_s": 240,
   "steps": {
     "min_s": 30,
@@ -525,6 +525,10 @@
         "hall_west": {
           "topic": "zigbee2mqtt/Hall Smart Switch West New mmwave",
           "occupancy_key": "mmwave_area1_occupancy"
+        },
+        "hall_west_stairs": {
+          "topic": "zigbee2mqtt/Hall Smart Switch West New mmwave",
+          "occupancy_key": "mmwave_area2_occupancy"
         }
       }
     }
@@ -591,7 +595,8 @@
         "zigbee2mqtt/Hallway Light Switch East New New mmwave",
         "zigbee2mqtt/Hall Smart Switch West New mmwave"
       ],
-      "override_idle_s": 3600
+      "override_idle_s": 3600,
+      "on_transition_s": 0.75
     },
     "stairwell": {
       "off_lights": [
@@ -607,7 +612,7 @@
             }
           ]
         },
-        "hallway.hall_west": {
+        "hallway.hall_west_stairs": {
           "sweep": [
             {
               "lights": [

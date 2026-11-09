@@ -269,6 +269,48 @@ def _v16_to_v17(raw: dict[str, Any]) -> dict[str, Any]:
     return raw
 
 
+HALL_ZONE = "hallway"
+V18_HALL_ON_TRANSITION_S = 0.75
+
+
+HALL_WEST_REF = "hallway.hall_west"
+HALL_WEST_STAIRS = "hall_west_stairs"
+HALL_WEST_STAIRS_KEY = "mmwave_area2_occupancy"
+
+
+def _v17_to_v18(raw: dict[str, Any]) -> dict[str, Any]:
+    """Hallway fade 0.75 s; the stair lights follow the west switch's area 2.
+
+    The hallway zone fades in over 0.75 s (a fade already set is kept). The
+    west switch's area 1 now covers its whole half of the hallway, so the
+    stairwell zone's west binding moves to a new ``hall_west_stairs`` sensor
+    (area 2, the foot of the stairs). Left alone when the hallway room's west
+    sensor or the stairwell zone's west binding has been edited away.
+    """
+    zones = raw.get("occupancy_zones", {})
+    zone = zones.get(HALL_ZONE)
+    if isinstance(zone, dict):
+        zone.setdefault("on_transition_s", V18_HALL_ON_TRANSITION_S)
+    room = raw.get("rooms", {}).get(HALL_ZONE)
+    stair = zones.get(STAIR_ROOM)
+    sensors = room.get("sensors") if isinstance(room, dict) else None
+    bindings = stair.get("sensors") if isinstance(stair, dict) else None
+    if not isinstance(sensors, dict) or not isinstance(bindings, dict):
+        return raw
+    west = sensors.get("hall_west")
+    if not isinstance(west, dict) or HALL_WEST_REF not in bindings:
+        return raw
+    sensors.setdefault(
+        HALL_WEST_STAIRS,
+        {"topic": west.get("topic"), "occupancy_key": HALL_WEST_STAIRS_KEY},
+    )
+    raw["occupancy_zones"][STAIR_ROOM]["sensors"] = {
+        (f"{HALL_ZONE}.{HALL_WEST_STAIRS}" if ref == HALL_WEST_REF else ref): bind
+        for ref, bind in bindings.items()
+    }
+    return raw
+
+
 MIGRATIONS: dict[int, Callable[[dict[str, Any]], dict[str, Any]]] = {
     8: _v8_to_v9,
     9: _v9_to_v10,
@@ -279,6 +321,7 @@ MIGRATIONS: dict[int, Callable[[dict[str, Any]], dict[str, Any]]] = {
     14: _v14_to_v15,
     15: _v15_to_v16,
     16: _v16_to_v17,
+    17: _v17_to_v18,
 }
 
 
