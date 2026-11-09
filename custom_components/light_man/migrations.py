@@ -311,6 +311,20 @@ def _v17_to_v18(raw: dict[str, Any]) -> dict[str, Any]:
     return raw
 
 
+V19_HALL_ON_TRANSITION_S = 1.0
+
+
+def _v18_to_v19(raw: dict[str, Any]) -> dict[str, Any]:
+    """Hallway zone fades in over 1 s (only a fade still at the shipped 0.75 s)."""
+    zone = raw.get("occupancy_zones", {}).get(HALL_ZONE)
+    if (
+        isinstance(zone, dict)
+        and zone.get("on_transition_s") == V18_HALL_ON_TRANSITION_S
+    ):
+        zone["on_transition_s"] = V19_HALL_ON_TRANSITION_S
+    return raw
+
+
 MIGRATIONS: dict[int, Callable[[dict[str, Any]], dict[str, Any]]] = {
     8: _v8_to_v9,
     9: _v9_to_v10,
@@ -322,6 +336,7 @@ MIGRATIONS: dict[int, Callable[[dict[str, Any]], dict[str, Any]]] = {
     15: _v15_to_v16,
     16: _v16_to_v17,
     17: _v17_to_v18,
+    18: _v18_to_v19,
 }
 
 

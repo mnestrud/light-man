@@ -1,5 +1,5 @@
 {
-  "seed_version": 18,
+  "seed_version": 19,
   "push_interval_s": 240,
   "steps": {
     "min_s": 30,
@@ -596,7 +596,7 @@
         "zigbee2mqtt/Hall Smart Switch West New mmwave"
       ],
       "override_idle_s": 3600,
-      "on_transition_s": 0.75
+      "on_transition_s": 1.0
     },
     "stairwell": {
       "off_lights": [
