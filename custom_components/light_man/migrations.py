@@ -325,6 +325,32 @@ def _v18_to_v19(raw: dict[str, Any]) -> dict[str, Any]:
     return raw
 
 
+HALL_PAIR_GROUPS = {
+    frozenset({f"hallway.{pos}_up", f"hallway.{pos}_down"}): (
+        f"zigbee2mqtt/zgb_hall_{pos}_pair/set"
+    )
+    for pos in ("east", "center", "west")
+}
+
+
+def _v19_to_v20(raw: dict[str, Any]) -> dict[str, Any]:
+    """Hallway sweep stages turn each fixture on with its up+down pair group."""
+    zone = raw.get("occupancy_zones", {}).get(HALL_ZONE)
+    sensors = zone.get("sensors") if isinstance(zone, dict) else None
+    for sensor in sensors.values() if isinstance(sensors, dict) else ():
+        sweep = sensor.get("sweep") if isinstance(sensor, dict) else None
+        for stage in sweep if isinstance(sweep, list) else ():
+            if not isinstance(stage, dict) or "group" in stage:
+                continue
+            lights = stage.get("lights")
+            if not isinstance(lights, list):
+                continue
+            group = HALL_PAIR_GROUPS.get(frozenset(map(str, lights)))
+            if group is not None:
+                stage["group"] = group
+    return raw
+
+
 MIGRATIONS: dict[int, Callable[[dict[str, Any]], dict[str, Any]]] = {
     8: _v8_to_v9,
     9: _v9_to_v10,
@@ -337,6 +363,7 @@ MIGRATIONS: dict[int, Callable[[dict[str, Any]], dict[str, Any]]] = {
     16: _v16_to_v17,
     17: _v17_to_v18,
     18: _v18_to_v19,
+    19: _v19_to_v20,
 }
 
 

@@ -20,6 +20,9 @@ groups:
   "21": { friendly_name: zgb_hallwayf }
   "30": { friendly_name: zgb_overhead_all,          hue_native_control: true } # consolidated overhead
   "31": { friendly_name: zgb_accent_all,            hue_native_control: true } # consolidated accent
+  "40": { friendly_name: zgb_hall_east_pair,        hue_native_control: true } # hallway sweep: east up+down
+  "41": { friendly_name: zgb_hall_center_pair,      hue_native_control: true } # hallway sweep: center up+down
+  "42": { friendly_name: zgb_hall_west_pair,        hue_native_control: true } # hallway sweep: west up+down
 
 # ----- Consolidated source -> per-room group mapping (confident, from tick wiring) -----
 # zgb_overhead_all (30) = union of the 10 overhead per-room groups:

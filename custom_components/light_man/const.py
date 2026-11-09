@@ -26,7 +26,7 @@ MODES_STORE_VERSION: Final = 1
 # top-level objects merged across groups; occupancy moved to `occupancy_zones`
 # referencing room-owned sensors; sleep ramp became a top-level block. The loader
 # derives the unchanged runtime view from this shape, so addressing is identical.
-BUNDLED_SEED_VERSION: Final = 19
+BUNDLED_SEED_VERSION: Final = 20
 
 # --- Seed-config JSON keys --------------------------------------------------
 CONF_PUSH_INTERVAL: Final = "push_interval_s"
@@ -136,6 +136,9 @@ CONF_SENSORS: Final = "sensors"
 CONF_TOPIC: Final = "topic"
 CONF_SWEEP: Final = "sweep"
 CONF_STAGE_DELAY: Final = "delay_s"
+# Optional Z2M group set-topic holding exactly a stage's lamps: the stage turns
+# on with one groupcast (brightness + ON + fade) so its lamps start together.
+CONF_STAGE_GROUP: Final = "group"
 CONF_LIGHTS: Final = "lights"
 CONF_SOURCE: Final = "source"
 CONF_OFF_LIGHTS: Final = "off_lights"

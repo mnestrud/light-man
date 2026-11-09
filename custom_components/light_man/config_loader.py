@@ -51,6 +51,7 @@ from .const import (
     CONF_SOURCE,
     CONF_SOURCES,
     CONF_STAGE_DELAY,
+    CONF_STAGE_GROUP,
     CONF_STEP_MAX_MIRED,
     CONF_STEP_MAX_PCT,
     CONF_STEP_MAX_XY,
@@ -554,6 +555,12 @@ def _resolve_sweep(
         if _is_number(delay):
             run_stage[CONF_STAGE_DELAY] = float(cast("float", delay))
             ref_stage[CONF_STAGE_DELAY] = float(cast("float", delay))
+        group = raw_stage.get(CONF_STAGE_GROUP)
+        if isinstance(group, str) and group:
+            run_stage[CONF_STAGE_GROUP] = group
+            ref_stage[CONF_STAGE_GROUP] = group
+        elif group is not None:
+            issues.append(f"occupancy.{zone_id}: sweep group {group!r} is not a topic")
         runtime.append(run_stage)
         stored.append(ref_stage)
     return runtime, stored

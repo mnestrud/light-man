@@ -1,5 +1,5 @@
 {
-  "seed_version": 19,
+  "seed_version": 20,
   "push_interval_s": 240,
   "steps": {
     "min_s": 30,
@@ -545,21 +545,24 @@
               "lights": [
                 "hallway.east_up",
                 "hallway.east_down"
-              ]
+              ],
+              "group": "zigbee2mqtt/zgb_hall_east_pair/set"
             },
             {
               "delay_s": 1.0,
               "lights": [
                 "hallway.center_up",
                 "hallway.center_down"
-              ]
+              ],
+              "group": "zigbee2mqtt/zgb_hall_center_pair/set"
             },
             {
               "delay_s": 1.0,
               "lights": [
                 "hallway.west_up",
                 "hallway.west_down"
-              ]
+              ],
+              "group": "zigbee2mqtt/zgb_hall_west_pair/set"
             }
           ]
         },
@@ -569,21 +572,24 @@
               "lights": [
                 "hallway.west_up",
                 "hallway.west_down"
-              ]
+              ],
+              "group": "zigbee2mqtt/zgb_hall_west_pair/set"
             },
             {
               "delay_s": 1.0,
               "lights": [
                 "hallway.center_up",
                 "hallway.center_down"
-              ]
+              ],
+              "group": "zigbee2mqtt/zgb_hall_center_pair/set"
             },
             {
               "delay_s": 1.0,
               "lights": [
                 "hallway.east_up",
                 "hallway.east_down"
-              ]
+              ],
+              "group": "zigbee2mqtt/zgb_hall_east_pair/set"
             }
           ]
         }

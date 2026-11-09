@@ -58,6 +58,7 @@ class OccupancyStage(TypedDict, total=False):
 
     delay_s: float  # seconds to wait before turning this stage's lights on
     lights: list[OccupancyLight]
+    group: str  # set topic of a group holding exactly these lights
 
 
 class OccupancySensor(TypedDict, total=False):
@@ -263,6 +264,7 @@ class ZoneStage(TypedDict, total=False):
 
     delay_s: float
     lights: list[str]
+    group: str
 
 
 class ZoneSensorBinding(TypedDict, total=False):

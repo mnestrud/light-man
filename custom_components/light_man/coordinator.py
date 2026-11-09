@@ -73,6 +73,7 @@ from .const import (
     CONF_SOURCE,
     CONF_SOURCES,
     CONF_STAGE_DELAY,
+    CONF_STAGE_GROUP,
     CONF_STEPS,
     CONF_SWEEP,
     CONF_SYNC_SWITCHES,
@@ -1347,8 +1348,18 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
             delay = stage.get(CONF_STAGE_DELAY, 0.0)
             if delay:
                 await asyncio.sleep(delay)
+            lights = stage.get(CONF_LIGHTS, [])
+            group_body = self._stage_group_body(stage, lit, fade)
+            if group_body is not None:
+                # One groupcast: the stage's lamps start their fade together.
+                lit.update(light[CONF_SET_TOPIC] for light in lights)
+                self._enqueue(
+                    [Send(stage[CONF_STAGE_GROUP], group_body)],
+                    priority=PRIORITY_INTERACTIVE,
+                )
+                continue
             sends: list[Send] = []
-            for light in stage.get(CONF_LIGHTS, []):
+            for light in lights:
                 if light[CONF_SET_TOPIC] in lit:
                     continue
                 payload = self._sweep_payload(light)
@@ -1368,6 +1379,35 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         self._write_switches(
             self._occupancy[zone_key].get(CONF_SYNC_SWITCHES, []), STATE_ON
         )
+
+    def _stage_group_body(
+        self, stage: OccupancyStage, lit: set[str], fade: float
+    ) -> dict[str, Any] | None:
+        """Return the stage's groupcast body, or None to send lamp by lamp.
+
+        The group carries only brightness + ON + fade: each lamp's colour is
+        already staged by its source's flood (``hue_native_control`` sets colour
+        while off). So it is used only when no stage lamp is lit yet, none is
+        held at a look (a look's colour is not staged), and all share the
+        curve brightness.
+        """
+        group = stage.get(CONF_STAGE_GROUP)
+        lights = stage.get(CONF_LIGHTS, [])
+        if not group or not lights:
+            return None
+        levels: set[object] = set()
+        for light in lights:
+            topic = light[CONF_SET_TOPIC]
+            room = self._topic_room.get(topic, "")
+            if topic in lit or self._modes.mode_of(room) in LOOK_KINDS:
+                return None
+            payload = self._room_glide_target(light[CONF_SOURCE])
+            if payload is None or "brightness" not in payload:
+                return None
+            levels.add(payload["brightness"])
+        if len(levels) != 1:
+            return None
+        return {"brightness": levels.pop(), "transition": fade, "state": STATE_ON}
 
     def _sweep_payload(self, light: OccupancyLight) -> PushPayload | None:
         """Return what a sweep shows on a light: its held look, else the curve."""

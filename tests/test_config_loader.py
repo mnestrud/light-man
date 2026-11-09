@@ -407,3 +407,17 @@ def test_steps_minimum_above_the_interval_is_clamped() -> None:
     result = validate_config(cfg)
     assert result.config["steps"]["min_s"] == float(result.config["push_interval_s"])
     assert any("above push_interval_s" in i for i in result.issues)
+
+
+def test_occupancy_stage_group_is_kept_or_flagged() -> None:
+    raw = _seed()
+    sweep = raw["occupancy_zones"]["hallway"]["sensors"]["hall.east"]["sweep"]
+    sweep[0]["group"] = "zigbee2mqtt/zgb_pair/set"
+    sweep[1]["group"] = 7
+    result = validate_config(raw)
+    east = result.config["occupancy"]["hallway"]["sensors"]["east"]
+    assert east["sweep"][0]["group"] == "zigbee2mqtt/zgb_pair/set"
+    assert "group" not in east["sweep"][1]
+    stored = result.stored["occupancy_zones"]["hallway"]["sensors"]["hall.east"]
+    assert stored["sweep"][0]["group"] == "zigbee2mqtt/zgb_pair/set"
+    assert any("sweep group 7" in issue for issue in result.issues)
