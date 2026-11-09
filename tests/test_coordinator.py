@@ -1022,14 +1022,14 @@ def _pair_stage(coordinator: Coord) -> dict[str, Any]:
 async def test_occupancy_stage_group_turns_the_pair_on_together(
     hass: HomeAssistant, coordinator: Coord, mqtt_mock: Any
 ) -> None:
-    """A stage with a group sends one groupcast: brightness + ON + fade, no colour."""
+    """A stage with a group sends one groupcast: ON + fade only (both staged)."""
     _pair_stage(coordinator)
     await coordinator.async_set_push_enabled(enabled=True)
     await hass.async_block_till_done()
     mqtt_mock.async_publish.reset_mock()
     await _walk(hass, coordinator, MMWAVE_EAST, occupied=True)
     pubs = published(mqtt_mock)
-    assert pubs[PAIR] == {"brightness": 229, "transition": 1.5, "state": "ON"}
+    assert pubs[PAIR] == {"transition": 1.5, "state": "ON"}
     assert HALL_UP not in pubs
     assert HALL_CENTER_SET not in pubs
     assert coordinator._zone_lit["hallway"] >= {HALL_UP, HALL_CENTER_SET}
@@ -1038,25 +1038,12 @@ async def test_occupancy_stage_group_turns_the_pair_on_together(
 async def test_stage_group_falls_back_to_lamp_sends(
     hass: HomeAssistant, coordinator: Coord
 ) -> None:
-    """Lit, held, unknown or mismatched lamps send lamp by lamp instead."""
+    """Lit or held lamps send lamp by lamp instead."""
     stage = _pair_stage(coordinator)
     body = coordinator._stage_group_body
-    assert body(stage, set(), 1.0) == {
-        "brightness": 229,
-        "transition": 1.0,
-        "state": "ON",
-    }
+    assert body(stage, set(), 1.0) == {"transition": 1.0, "state": "ON"}
     assert body({"lights": stage["lights"]}, set(), 1.0) is None  # type: ignore[typeddict-item]
     assert body({"group": PAIR, "lights": []}, set(), 1.0) is None  # type: ignore[typeddict-item]
     assert body(stage, {HALL_UP}, 1.0) is None  # one lamp already lit
-    target = (
-        "custom_components.light_man.coordinator.LightManCoordinator._room_glide_target"
-    )
-    with patch(target, return_value=None):
-        assert body(stage, set(), 1.0) is None
-    with patch(target, return_value={"color_temp": 300}):
-        assert body(stage, set(), 1.0) is None
-    with patch(target, side_effect=[{"brightness": 10}, {"brightness": 20}]):
-        assert body(stage, set(), 1.0) is None
     await coordinator.async_hold("hall.up_main", "night")
-    assert body(stage, set(), 1.0) is None  # a look's colour is not staged
+    assert body(stage, set(), 1.0) is None  # a look is not staged

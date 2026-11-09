@@ -1385,29 +1385,21 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
     ) -> dict[str, Any] | None:
         """Return the stage's groupcast body, or None to send lamp by lamp.
 
-        The group carries only brightness + ON + fade: each lamp's colour is
-        already staged by its source's flood (``hue_native_control`` sets colour
-        while off). So it is used only when no stage lamp is lit yet, none is
-        held at a look (a look's colour is not staged), and all share the
-        curve brightness.
+        The group carries only ON + fade: each lamp's brightness and colour are
+        already staged by its source's flood (``hue_native_control`` stages
+        while off). So it is used only when no stage lamp is lit yet and none
+        is held at a look (a look is not staged).
         """
         group = stage.get(CONF_STAGE_GROUP)
         lights = stage.get(CONF_LIGHTS, [])
         if not group or not lights:
             return None
-        levels: set[object] = set()
         for light in lights:
             topic = light[CONF_SET_TOPIC]
             room = self._topic_room.get(topic, "")
             if topic in lit or self._modes.mode_of(room) in LOOK_KINDS:
                 return None
-            payload = self._room_glide_target(light[CONF_SOURCE])
-            if payload is None or "brightness" not in payload:
-                return None
-            levels.add(payload["brightness"])
-        if len(levels) != 1:
-            return None
-        return {"brightness": levels.pop(), "transition": fade, "state": STATE_ON}
+        return {"transition": fade, "state": STATE_ON}
 
     def _sweep_payload(self, light: OccupancyLight) -> PushPayload | None:
         """Return what a sweep shows on a light: its held look, else the curve."""

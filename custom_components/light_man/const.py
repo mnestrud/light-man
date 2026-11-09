@@ -137,7 +137,8 @@ CONF_TOPIC: Final = "topic"
 CONF_SWEEP: Final = "sweep"
 CONF_STAGE_DELAY: Final = "delay_s"
 # Optional Z2M group set-topic holding exactly a stage's lamps: the stage turns
-# on with one groupcast (brightness + ON + fade) so its lamps start together.
+# on with one groupcast (ON + fade; brightness/colour staged) so its lamps start
+# together.
 CONF_STAGE_GROUP: Final = "group"
 CONF_LIGHTS: Final = "lights"
 CONF_SOURCE: Final = "source"
