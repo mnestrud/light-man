@@ -154,3 +154,23 @@ async def test_set_look_needs_a_held_room() -> None:
     await modes.async_load()
     assert not await modes.set_look("office", {"brightness": 9})
     assert modes.look_of("office") is None
+
+
+async def test_motion_off_persists_and_shows_in_attributes() -> None:
+    store = FakeStore(None)
+    modes = ModeManager(store)
+    await modes.async_load()
+    await modes.set_motion_off("hallway", off=True)
+    later = dt_util.utcnow() + timedelta(hours=1)
+    await modes.set_override("hallway", expires_at=later)
+    assert modes.motion_off("hallway")
+    assert modes.as_attributes()["hallway"] == {"mode": "motion_off", "expires_at": ""}
+    reloaded = ModeManager(FakeStore(store._data))
+    await reloaded.async_load()
+    assert reloaded.motion_off("hallway")
+    await reloaded.set_motion_off("hallway", off=False)
+    assert not reloaded.motion_off("hallway")
+    bad = ModeManager(FakeStore({"__zone_motion_off__": ["ok", 3]}))
+    await bad.async_load()
+    assert bad.motion_off("ok")
+    assert not bad.motion_off("3")

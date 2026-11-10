@@ -26,7 +26,7 @@ MODES_STORE_VERSION: Final = 1
 # top-level objects merged across groups; occupancy moved to `occupancy_zones`
 # referencing room-owned sensors; sleep ramp became a top-level block. The loader
 # derives the unchanged runtime view from this shape, so addressing is identical.
-BUNDLED_SEED_VERSION: Final = 22
+BUNDLED_SEED_VERSION: Final = 23
 
 # --- Seed-config JSON keys --------------------------------------------------
 CONF_PUSH_INTERVAL: Final = "push_interval_s"
@@ -112,6 +112,8 @@ HELD_MANUAL: Final = "manual"  # up/down_held -> the level the paddle was held t
 HELD_KINDS: Final = frozenset({HELD_NIGHT, HELD_DAY, HELD_MANUAL})
 LOOK_KINDS: Final = frozenset({HELD_NIGHT, HELD_DAY})  # config taps
 MODE_OVERRIDE: Final = "override"  # a zone held on by a tap (motion ignored)
+MODE_MOTION_OFF: Final = "motion_off"  # config held: zone motion off until held again
+ACTION_MOTION_TOGGLE: Final = "config_held"
 
 # Inovelli action string -> resulting room mode. Single taps release to
 # `adaptive` (down differs only in the resulting paddle state). Double/triple

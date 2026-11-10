@@ -1,5 +1,5 @@
 {
-  "seed_version": 22,
+  "seed_version": 23,
   "push_interval_s": 240,
   "steps": {
     "min_s": 30,
@@ -650,7 +650,11 @@
       "sync_switches": [
         "zigbee2mqtt/Stairwell Top Smart Switch mmwave"
       ],
-      "on_transition_s": 0.5
+      "on_transition_s": 0.5,
+      "override_switches": [
+        "zigbee2mqtt/Stairwell Top Smart Switch mmwave"
+      ],
+      "override_idle_s": 3600
     },
     "primary_bath": {
       "off_lights": [
@@ -678,8 +682,8 @@
         "zigbee2mqtt/Primary Bath Front Smart Switch",
         "zigbee2mqtt/Primary Bath Toilet Smart Switch"
       ],
-      "override_until_off": true,
-      "on_transition_s": 1.0
+      "on_transition_s": 1.0,
+      "override_idle_s": 3600
     }
   },
   "sleep": {

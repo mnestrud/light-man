@@ -7,7 +7,9 @@ signal). Held modes persist across restarts (Store) so a restart never drops a
 held look, and auto-expire at the next local midnight (00:00).
 
 Zone overrides (a tap holding an occupancy zone on, motion ignored) persist in
-the same Store under ``OVERRIDES_KEY``, also expiring at 00:00.
+the same Store under ``OVERRIDES_KEY``, also expiring at 00:00. Zones whose
+motion is switched off (a config hold) persist under ``MOTION_OFF_KEY`` with no
+expiry: only another config hold turns their motion back on.
 """
 
 from __future__ import annotations
@@ -16,13 +18,20 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 from homeassistant.util import dt as dt_util
 
-from .const import ACTION_MODE, HELD_KINDS, MODE_ADAPTIVE, MODE_OVERRIDE
+from .const import (
+    ACTION_MODE,
+    HELD_KINDS,
+    MODE_ADAPTIVE,
+    MODE_MOTION_OFF,
+    MODE_OVERRIDE,
+)
 from .models import HeldRecord
 
 if TYPE_CHECKING:
     from datetime import datetime
 
 OVERRIDES_KEY = "__zone_overrides__"
+MOTION_OFF_KEY = "__zone_motion_off__"
 
 
 def action_to_mode(action: str) -> str | None:
@@ -50,6 +59,7 @@ class ModeManager:
         self._store = store
         self._held: dict[str, HeldRecord] = {}
         self._overrides: dict[str, datetime] = {}  # zone -> expires_at
+        self._motion_off: set[str] = set()  # zones whose motion is switched off
 
     async def async_load(self) -> None:
         """Load persisted held modes, dropping malformed/unknown entries."""
@@ -57,6 +67,9 @@ class ModeManager:
         if not isinstance(data, dict):
             return
         data = dict(data)
+        motion_off = data.pop(MOTION_OFF_KEY, None)
+        if isinstance(motion_off, list):
+            self._motion_off = {zone for zone in motion_off if isinstance(zone, str)}
         overrides = data.pop(OVERRIDES_KEY, None)
         if isinstance(overrides, dict):
             for zone, expires_raw in overrides.items():
@@ -98,11 +111,27 @@ class ModeManager:
             }
             for room, rec in self._held.items()
         }
+        if self._motion_off:
+            data[MOTION_OFF_KEY] = sorted(self._motion_off)
         if self._overrides:
             data[OVERRIDES_KEY] = {
                 zone: expires.isoformat() for zone, expires in self._overrides.items()
             }
         return data
+
+    # --- zone motion off (config hold) -------------------------------------
+
+    def motion_off(self, zone: str) -> bool:
+        """Return True while the zone's motion is switched off."""
+        return zone in self._motion_off
+
+    async def set_motion_off(self, zone: str, *, off: bool) -> None:
+        """Switch a zone's motion off (or back on); persisted, no expiry."""
+        if off:
+            self._motion_off.add(zone)
+        else:
+            self._motion_off.discard(zone)
+        await self._save()
 
     # --- zone overrides -----------------------------------------------------
 
@@ -218,4 +247,6 @@ class ModeManager:
         }
         for zone, expires in self._overrides.items():
             attrs[zone] = {"mode": MODE_OVERRIDE, "expires_at": expires.isoformat()}
+        for zone in self._motion_off:
+            attrs[zone] = {"mode": MODE_MOTION_OFF, "expires_at": ""}
         return attrs

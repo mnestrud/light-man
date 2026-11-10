@@ -52,6 +52,7 @@ from .bars import (
 )
 from .colorspace import kelvin_to_xy, rgb_to_xy
 from .const import (
+    ACTION_MOTION_TOGGLE,
     BAR_HEIGHT_QUIET_S,
     BRIGHTNESS_MAX,
     COLOR_MODE_COLOR_TEMP,
@@ -392,6 +393,12 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         }
         # switch -> zones it holds
         self._override_zones = _switch_zones(self._occupancy, CONF_OVERRIDE_SWITCHES)
+        # switch -> zones its config hold switches motion off/on (override + sync)
+        self._motion_zones: dict[str, list[str]] = {}
+        for zones_by_switch in (self._override_zones, self._sync_zones):
+            for base, zones in zones_by_switch.items():
+                known = self._motion_zones.setdefault(base, [])
+                known.extend(z for z in zones if z not in known)
         self._sweep_tasks: dict[tuple[str, str], asyncio.Task[None]] = {}
         self.diagnostics: dict[str, Any] = {
             "issues": validated.issues,
@@ -945,6 +952,7 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
             room: level
             for zone_key, dims in self._zone_dims.items()
             if self._modes.override_until(zone_key) is None
+            and not self._modes.motion_off(zone_key)
             for room, level in dims.items()
         }
 
@@ -1169,6 +1177,8 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         if zones:
             held_on = any(self._modes.override_until(z) is not None for z in zones)
             leds[LED_BOTTOM] = COLOR_GREEN if held_on else None
+        if any(self._modes.motion_off(z) for z in self._motion_zones.get(base, [])):
+            leds[LED_BOTTOM] = COLOR_RED  # motion off outranks the override
         return leds
 
     def _sync_bars(self) -> None:
@@ -1353,7 +1363,12 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
                     self._start_sweep(binding)
 
     def _start_sweep(self, binding: _Binding) -> None:
-        """Launch a binding's sweep as a task, restarting any in-flight run."""
+        """Launch a binding's sweep as a task, restarting any in-flight run.
+
+        A zone whose motion is switched off never sweeps.
+        """
+        if self._modes.motion_off(binding.zone):
+            return
         task_key = (binding.zone, binding.name)
         running = self._sweep_tasks.get(task_key)
         if running is not None and not running.done():
@@ -1497,8 +1512,11 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         self.diagnostics["occupancy"][zone_key] = False
         self._clear_zone(zone_key)
 
-    def _clear_zone(self, zone_key: str) -> None:
+    def _clear_zone(self, zone_key: str, *, force: bool = False) -> None:
         """Turn a vacant zone off: through its sync switch, else its off topics.
+
+        A zone whose motion is switched off is left alone (no vacancy, idle or
+        00:00 turn-off) unless ``force`` (the config hold that switches it off).
 
         A sync switch that shows ON is told OFF and its own binding switches the
         lights (one unicast + the binding's groupcast, and the bar follows). A
@@ -1506,6 +1524,8 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         Light Man's OFF as before. A zone held on by a config-tap look is left
         on; the next occupancy episode's sweep shows the look again.
         """
+        if self._modes.motion_off(zone_key) and not force:
+            return
         zone = self._occupancy[zone_key]
         self._zone_lit.pop(zone_key, None)
         dimmed = self._zone_dims.pop(zone_key, {})
@@ -1763,6 +1783,9 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         if action in RELEASE_ACTIONS:
             await self._end_dim(base)
             return
+        if action == ACTION_MOTION_TOGGLE:
+            await self._toggle_motion(base)
+            return
         mode = action_to_mode(action)
         if mode is None:
             return
@@ -1885,6 +1908,64 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
                 self._interactive_send(
                     topic, payload, transition=ZONE_DIM_RELEASE_TRANSITION_S
                 )
+
+    async def _toggle_motion(self, base: str) -> None:
+        """Switch the motion of this switch's zones off or on (a config hold).
+
+        Off: lights motion turned on go off (paddle-on lights stay); motion is
+        then ignored entirely — no sweeps, no vacancy/idle/00:00 turn-off —
+        until another config hold. On: an occupied zone whose lights are off is
+        swept as on arrival; paddle-on lights count as paddle-on from now.
+        """
+        zones = self._motion_zones.get(base, [])
+        if not zones:
+            return
+        off = not self._modes.motion_off(zones[0])
+        for zone_key in zones:
+            if off:
+                await self._motion_off(zone_key)
+            else:
+                await self._motion_on(zone_key)
+        _LOGGER.info("motion %s for %s", "off" if off else "on", ", ".join(zones))
+        if off:
+            self._bars.announce(base, LED_BOTTOM)  # pulses red, then stays
+        self._publish_snapshot()
+        self._bars.unannounce(base)
+        if not off:
+            self._bar_play(base, EFFECT_PULSE, COLOR_BAR)  # back to automatic
+
+    async def _motion_off(self, zone_key: str) -> None:
+        for (zone, _name), task in list(self._sweep_tasks.items()):
+            if zone == zone_key and not task.done():
+                task.cancel()
+        motion_lit = bool(self._zone_lit.get(zone_key)) and (
+            self._modes.override_until(zone_key) is None
+        )
+        if motion_lit:
+            self.diagnostics["occupancy"][zone_key] = False
+            self._clear_zone(zone_key, force=True)
+        await self._modes.set_motion_off(zone_key, off=True)
+
+    async def _motion_on(self, zone_key: str) -> None:
+        await self._modes.set_motion_off(zone_key, off=False)
+        if self._zone_lights_on(zone_key):
+            if self._occupancy[zone_key].get(CONF_OVERRIDE_SWITCHES):
+                await self._arm_override(zone_key)  # paddle-on from now
+            return
+        for binding in self._bindings_by_zone.get(zone_key, []):
+            if self._sensor_occupied.get((binding.zone, binding.name)):
+                self._start_sweep(binding)
+
+    def _zone_lights_on(self, zone_key: str) -> bool:
+        """Return True if the zone's lights are on (lit by motion or a paddle)."""
+        zone = self._occupancy[zone_key]
+        switches = [
+            *zone.get(CONF_SYNC_SWITCHES, []),
+            *zone.get(CONF_OVERRIDE_SWITCHES, []),
+        ]
+        return bool(self._zone_lit.get(zone_key)) or any(
+            self._paddle(base) for base in switches
+        )
 
     def _play_tap_animation(self, base: str, action: str) -> None:
         """Play the bar animation configured for a tap (the shade taps)."""

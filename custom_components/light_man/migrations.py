@@ -415,6 +415,25 @@ def _v21_to_v22(raw: dict[str, Any]) -> dict[str, Any]:
     return raw
 
 
+V23_STAIR_ZONE = "stairwell"
+V23_OVERRIDE_IDLE_S = 3600
+
+
+def _v22_to_v23(raw: dict[str, Any]) -> dict[str, Any]:
+    """Paddle-on holds alike everywhere: bath to 00:00/idle, stairwell gains one."""
+    zones = raw.get("occupancy_zones")
+    if not isinstance(zones, dict):
+        return raw
+    bath = zones.get(BATH_ROOM)
+    if isinstance(bath, dict) and bath.pop("override_until_off", None) is not None:
+        bath.setdefault("override_idle_s", V23_OVERRIDE_IDLE_S)
+    stair = zones.get(V23_STAIR_ZONE)
+    if isinstance(stair, dict) and "override_switches" not in stair:
+        stair["override_switches"] = [STAIR_TOPIC]
+        stair.setdefault("override_idle_s", V23_OVERRIDE_IDLE_S)
+    return raw
+
+
 MIGRATIONS: dict[int, Callable[[dict[str, Any]], dict[str, Any]]] = {
     8: _v8_to_v9,
     9: _v9_to_v10,
@@ -430,6 +449,7 @@ MIGRATIONS: dict[int, Callable[[dict[str, Any]], dict[str, Any]]] = {
     19: _v19_to_v20,
     20: _v20_to_v21,
     21: _v21_to_v22,
+    22: _v22_to_v23,
 }
 
 
