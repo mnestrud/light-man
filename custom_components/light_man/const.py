@@ -225,6 +225,10 @@ DIM_START_DELAY_S: Final = 0.4
 # A held light switched off gets its curve value staged this long after the off:
 # the bound bulbs report off 0.1-1.4 s after the tap (median 0.9 s, 2026-11 capture).
 OFF_STAGE_DELAY_S: Final = 1.5
+# An off bulb whose own report shows another look than it should hold (it lost
+# power) is re-staged once its reports have been quiet this long: an off-fade
+# reports passing levels for ~10 s before the stored value (2026-11-10 capture).
+DRIFT_SETTLE_S: Final = 15.0
 BAR_HEIGHT_QUIET_S: Final = 3.0  # ignore the switch's level reports after our write
 FAILURE_LOG_INTERVAL_S: Final = 600.0
 MQTT_SLOW_PUBLISH_S: Final = 10.0

@@ -304,6 +304,18 @@ changes (arm or release), and have `force_push` bypass dedup entirely. The arm d
 safe (bulbs are already correct from the prior consolidated flood); release/TTL-expiry is where the
 bypass is load-bearing.
 
+**Drift repair (0.8.29).** Dedup means a look that stops changing (the hallway uplights' fixed blue)
+is sent only by ramps and restarts, and turn-ons (switch bindings, motion pair groups) carry no colour.
+A bulb that loses power comes back at its factory look (254 / 2700 K) and would come on wrong (seen
+2026-11-10, after the hall switches' firmware update). Light Man subscribes to `zigbee2mqtt/+`, maps each
+bulb to its light (by name, or as a member of the light's Z2M group), and decodes the bulb's own
+`philips_raw` report. When a changed report has been quiet `DRIFT_SETTLE_S` (15 s) and the bulb is
+**off**, it is compared (`drift.holds`) with the look it should hold now: the held look or lit night-light
+dim if one applies, else the curve at the current step's end (ramps and sleep included). A mismatch
+sends one state-less re-stage to the light's topic, gliding to the step's end like a tick. Skipped
+while one of Light Man's own sends may still be landing, while an off-stage is due, and after one try per
+distinct report. Lit bulbs are never touched.
+
 ### 5.5 Native-Hue coverage — VERIFIED COMPLETE (2026-06-09)
 Every consolidated member must have `hue_native_control` active, **either** via its per-room group
 (11 native groups) **or at the bulb's device level** (`hue_native_control` is a converter option that

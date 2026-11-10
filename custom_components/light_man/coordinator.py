@@ -95,6 +95,7 @@ from .const import (
     DIM_START_DELAY_S,
     DIM_STOP_TRANSITION_S,
     DIM_TIMEOUT_S,
+    DRIFT_SETTLE_S,
     FAILURE_LOG_INTERVAL_S,
     HELD_DAY,
     HELD_MANUAL,
@@ -120,6 +121,8 @@ from .const import (
     TRANSITION_REASSERT,
     ZONE_DIM_RELEASE_TRANSITION_S,
 )
+from .drift import holds
+from .hue_frame import decode_hex
 from .modes import action_to_mode
 from .publisher import (
     PRIORITY_INTERACTIVE,
@@ -144,6 +147,7 @@ if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
 
     from .config_loader import ValidatedConfig
+    from .hue_frame import HueFrame
     from .models import (
         EngineTarget,
         LightManConfig,
@@ -270,6 +274,14 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         self._bar_lights = validated.bar_lights  # base -> the light its bar follows
         self._override_timers: dict[str, Callable[[], None]] = {}
         self._off_stages: dict[str, Callable[[], None]] = {}  # light ref -> cancel
+        # Drift repair: each bulb's last decoded report, the pending settle
+        # check, and the report a re-stage was sent for (one try per report).
+        self._bulb_frames: dict[str, HueFrame] = {}
+        self._drift_checks: dict[str, Callable[[], None]] = {}
+        self._drift_tried: dict[str, HueFrame] = {}
+        self._group_members: dict[str, set[str]] = {}  # group /set -> member ieees
+        self._device_names: dict[str, str] = {}  # ieee -> friendly name
+        self._bulb_rooms: dict[str, tuple[str, str]] = {}  # bulb -> (source, light)
         self._bar_pct: dict[str, float] = {}  # source -> curve % of its last send
         self._zone_lit: dict[str, set[str]] = {}  # zone -> topics lit this episode
         # zone -> {light ref: brightness %} shown dimmed this episode (night light)
@@ -446,6 +458,12 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
             self._unsubs.append(
                 await mqtt.async_subscribe(self.hass, topic, self._handle_occupancy)
             )
+        self._rebuild_bulb_rooms()
+        self._unsubs.append(
+            await mqtt.async_subscribe(
+                self.hass, f"{self._z2m_base}/+", self._handle_bulb_report
+            )
+        )
         bridge = f"{self._z2m_base}/bridge"
         for suffix, handler in (
             ("logging", self._handle_bridge_logging),
@@ -509,10 +527,15 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
             if switch.dim_start is not None:
                 switch.dim_start.cancel()
                 switch.dim_start = None
-        for cancel in [*self._override_timers.values(), *self._off_stages.values()]:
+        for cancel in [
+            *self._override_timers.values(),
+            *self._off_stages.values(),
+            *self._drift_checks.values(),
+        ]:
             cancel()
         self._override_timers.clear()
         self._off_stages.clear()
+        self._drift_checks.clear()
         self._publisher.cancel()
         self._bars.cancel()
 
@@ -2445,11 +2468,19 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
             return
         if not isinstance(groups, list):
             return
+        groups = [g for g in groups if isinstance(g, dict) and "friendly_name" in g]
         self._group_topics = {
-            set_topic_for(self._z2m_base, group["friendly_name"])
-            for group in groups
-            if isinstance(group, dict) and "friendly_name" in group
+            set_topic_for(self._z2m_base, group["friendly_name"]) for group in groups
         }
+        self._group_members = {
+            set_topic_for(self._z2m_base, group["friendly_name"]): {
+                str(member["ieee_address"])
+                for member in group.get("members") or []
+                if isinstance(member, dict) and "ieee_address" in member
+            }
+            for group in groups
+        }
+        self._rebuild_bulb_rooms()
 
     async def _handle_bridge_devices(self, msg: mqtt.ReceiveMessage) -> None:
         """Learn which switches still forward their level (a level binding)."""
@@ -2460,6 +2491,12 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         if not isinstance(devices, list):
             return
         devices = [d for d in devices if isinstance(d, dict)]
+        self._device_names = {
+            str(d["ieee_address"]): str(d["friendly_name"])
+            for d in devices
+            if "ieee_address" in d and "friendly_name" in d
+        }
+        self._rebuild_bulb_rooms()
         coordinators = {
             d.get("ieee_address") for d in devices if d.get("type") == "Coordinator"
         }
@@ -2475,6 +2512,135 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
                         name = device.get("friendly_name", "")
                         bound.add(f"{self._z2m_base}/{name}")
         self._level_bound = bound
+
+    # --- drift repair (an off bulb that lost its staged look) ----------------
+
+    def _rebuild_bulb_rooms(self) -> None:
+        """Map each bulb's friendly name to the light it belongs to.
+
+        A light addressed by its own bulb maps by name; a light addressed by a
+        Z2M group maps each of the group's members (from ``bridge/groups`` and
+        ``bridge/devices``). The first light listing a bulb wins.
+        """
+        prefix = f"{self._z2m_base}/"
+        rooms: dict[str, tuple[str, str]] = {}
+        for source_key, source in self._config[CONF_SOURCES].items():
+            for room, room_cfg in source.get(CONF_ROOMS, {}).items():
+                topic = room_cfg.get(CONF_SET_TOPIC)
+                if not topic or not topic.startswith(prefix):
+                    continue
+                names = [topic[len(prefix) :].removesuffix("/set")]
+                names += [
+                    self._device_names[ieee]
+                    for ieee in sorted(self._group_members.get(topic, ()))
+                    if ieee in self._device_names
+                ]
+                for name in names:
+                    rooms.setdefault(name, (source_key, room))
+        self._bulb_rooms = rooms
+
+    async def _handle_bulb_report(self, msg: mqtt.ReceiveMessage) -> None:
+        """Note a Light Man bulb's own state report; check it once it settles.
+
+        Z2M republishes a bulb's whole state (``philips_raw`` included) on
+        every poll and link report: only a changed frame starts a check.
+        """
+        name = msg.topic.rsplit("/", 1)[-1]
+        payload = str(msg.payload)
+        if name not in self._bulb_rooms or "philips_raw" not in payload:
+            return
+        data = _parse_json(payload)
+        raw = data.get("philips_raw") if data else None
+        if not isinstance(raw, str):
+            return
+        try:
+            frame = decode_hex(raw)
+        except ValueError:
+            return
+        if self._bulb_frames.get(name) == frame:
+            return
+        self._bulb_frames[name] = frame
+        self._drift_tried.pop(name, None)
+        self._schedule_drift_check(name)
+
+    def _schedule_drift_check(self, name: str) -> None:
+        cancel = self._drift_checks.pop(name, None)
+        if cancel is not None:
+            cancel()
+        self._drift_checks[name] = async_call_later(
+            self.hass, DRIFT_SETTLE_S, partial(self._drift_check_due, name)
+        )
+
+    @callback
+    def _drift_check_due(self, name: str, _now: datetime) -> None:
+        self._drift_checks.pop(name, None)
+        if not self._closed:
+            self._check_drift(name)
+
+    def _check_drift(self, name: str) -> None:
+        """Re-stage an off bulb that holds another look than its light should.
+
+        The expected look is exactly what the next flood would leave on it: a
+        held look or a lit night-light dim if one applies, else the curve at
+        the current step's end (ramps and the sleep overlay included). The
+        state-less send goes to the light's own topic and glides to the step's
+        end, like a tick. Nothing is sent while the bulb is on, while one of
+        Light Man's own sends to it may still be landing, while an off-stage is
+        due, or a second time for the same report.
+        """
+        frame = self._bulb_frames.get(name)
+        source_key, room = self._bulb_rooms.get(name, ("", ""))
+        topic = self._room_topic(room)
+        if (
+            frame is None
+            or frame.on is not False
+            or topic is None
+            or not self.push_enabled
+            or room in self._off_stages
+            or self._drift_tried.get(name) == frame
+        ):
+            return
+        consolidated = self._topic_source_consolidated.get(topic, topic)
+        last_sent = max(
+            self._planned_at.get(topic, float("-inf")),
+            self._planned_at.get(consolidated, float("-inf")),
+        )
+        if self._clock() - last_sent < DRIFT_SETTLE_S:
+            self._schedule_drift_check(name)  # its report will settle first
+            return
+        expected = self._expected_look(source_key, room)
+        if expected is None or holds(frame, expected):
+            return
+        self._drift_tried[name] = frame
+        t_end = self._step_target()
+        transition = self._tick_transition(topic, expected, True, t_end)
+        _LOGGER.info(
+            "re-staging %s: off at brightness %s, mirek %s, xy %s; should hold %s",
+            name,
+            frame.brightness,
+            frame.mirek,
+            frame.xy,
+            expected,
+        )
+        self._enqueue(
+            [Send(topic, {**expected, "transition": transition})],
+            priority=PRIORITY_TICK,
+        )
+
+    def _expected_look(self, source_key: str, room: str) -> PushPayload | None:
+        """Return the look a light should hold now (None: unknown, leave it)."""
+        source = self._config[CONF_SOURCES][source_key]
+        try:
+            adaptive = self._engine_payload(source_key, source, self._step_target())
+        except KeyError, TypeError, ValueError:
+            return None
+        if adaptive is None:
+            return None
+        looks = self._held_looks(source_key, source, adaptive)
+        if room in looks:
+            look = looks[room]
+            return _strip(look) if look is not None else None
+        return adaptive
 
     def _is_group(self, topic: str) -> bool:
         """Return True for group (broadcast) topics; all of them until groups load."""
