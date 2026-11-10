@@ -66,12 +66,14 @@ from .const import (
     CONF_ON_TRANSITION,
     CONF_OVERRIDE_IDLE,
     CONF_OVERRIDE_SWITCHES,
+    CONF_OVERRIDE_UNTIL_OFF,
     CONF_PUSH_INTERVAL,
     CONF_ROOMS,
     CONF_SENSORS,
     CONF_SET_TOPIC,
     CONF_SOURCE,
     CONF_SOURCES,
+    CONF_STAGE_BRIGHTNESS,
     CONF_STAGE_DELAY,
     CONF_STAGE_GROUP,
     CONF_STEPS,
@@ -106,6 +108,7 @@ from .const import (
     MODE_ADAPTIVE,
     MQTT_SLOW_PUBLISH_S,
     OFF_STAGE_DELAY_S,
+    OVERRIDE_UNTIL_OFF_DAYS,
     PADDLE_STATE_GRACE_S,
     RELEASE_ACTIONS,
     STATE_OFF,
@@ -114,6 +117,7 @@ from .const import (
     SWITCH_READ_GAP_S,
     TRANSITION_CATCHUP_UNKNOWN_S,
     TRANSITION_REASSERT,
+    ZONE_DIM_RELEASE_TRANSITION_S,
 )
 from .modes import action_to_mode
 from .publisher import (
@@ -126,6 +130,7 @@ from .publisher import (
 )
 from .push import (
     build_payload,
+    pct_to_brightness,
     plan_source,
 )
 from .solar import day_profile, solar_inputs
@@ -266,6 +271,8 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         self._off_stages: dict[str, Callable[[], None]] = {}  # light ref -> cancel
         self._bar_pct: dict[str, float] = {}  # source -> curve % of its last send
         self._zone_lit: dict[str, set[str]] = {}  # zone -> topics lit this episode
+        # zone -> {light ref: brightness %} shown dimmed this episode (night light)
+        self._zone_dims: dict[str, dict[str, float]] = {}
         self._room_source: dict[str, str] = {
             room: source_key
             for source_key, source in config[CONF_SOURCES].items()
@@ -802,7 +809,7 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
             return []
         if adaptive is None:
             return []
-        looks = self._held_looks(key, source)
+        looks = self._held_looks(key, source, adaptive)
         if any(looks.get(room) is None and self._dim_pending(room) for room in looks):
             self._plan_diag[key] = ({"mode": "deferred", "topics": []}, 0)
             return []  # a paddle is being held; this source waits one tick
@@ -903,9 +910,14 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         return _strip(_target_to_payload(target, 0.0))
 
     def _held_looks(
-        self, key: str, source: SourceConfig
+        self, key: str, source: SourceConfig, adaptive: PushPayload | None = None
     ) -> dict[str, PushPayload | None]:
-        """Each held room's look: night/day from the curve, manual as dimmed to."""
+        """Each held room's look: night/day from the curve, manual as dimmed to.
+
+        With the curve value (``adaptive``), a zone's dimmed night light that is
+        lit and not overridden counts as held too: the curve colour at its
+        fixed level, so each flood is followed by its re-assert.
+        """
         looks: dict[str, PushPayload | None] = {}
         profile = source["profile"]
         for room in source.get(CONF_ROOMS, {}):
@@ -919,8 +931,25 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
             else:
                 look = self._modes.look_of(room)
                 looks[room] = cast("PushPayload", look) if look else None
+        if adaptive is not None:
+            rooms = source.get(CONF_ROOMS, {})
+            for room, level in self._active_dims().items():
+                if room in rooms and room not in looks:
+                    looks[room] = _dimmed(_strip(adaptive), level)
         del key
         return looks
+
+    def _active_dims(self) -> dict[str, float]:
+        """Dimmed zone lights to keep at their level (zones not overridden)."""
+        return {
+            room: level
+            for zone_key, dims in self._zone_dims.items()
+            if self._modes.override_until(zone_key) is None
+            for room, level in dims.items()
+        }
+
+    def _until_off(self, zone_key: str) -> bool:
+        return bool(self._occupancy[zone_key].get(CONF_OVERRIDE_UNTIL_OFF, False))
 
     def _unchanged(self, topic: str, payload: PushPayload) -> bool:
         """Return True when ``topic`` already shows this colour and brightness.
@@ -1134,7 +1163,9 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         kinds = {self._modes.mode_of(ref) for ref in refs}
         top = next((c for kind, c in LOOK_COLORS.items() if kind in kinds), None)
         leds: dict[str, int | None] = {LED_TOP: top}
-        zones = self._override_zones.get(base)
+        zones = [
+            z for z in self._override_zones.get(base, []) if not self._until_off(z)
+        ]
         if zones:
             held_on = any(self._modes.override_until(z) is not None for z in zones)
             leds[LED_BOTTOM] = COLOR_GREEN if held_on else None
@@ -1352,14 +1383,16 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
                 delay = stage.get(CONF_STAGE_DELAY, 0.0)
                 if delay:
                     await asyncio.sleep(delay)
-                self._sweep_stage(stage, lit, fade)
+                self._sweep_stage(zone_key, stage, lit, fade)
         finally:
             self._publisher.end_sweep()
         self._write_switches(
             self._occupancy[zone_key].get(CONF_SYNC_SWITCHES, []), STATE_ON
         )
 
-    def _sweep_stage(self, stage: OccupancyStage, lit: set[str], fade: float) -> None:
+    def _sweep_stage(
+        self, zone_key: str, stage: OccupancyStage, lit: set[str], fade: float
+    ) -> None:
         """Turn one stage on: its pair group if a group slot is free, else lamps.
 
         Lamp sends are unicasts (no broadcast-table slot), so a stage never
@@ -1381,6 +1414,11 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
             payload = self._sweep_payload(light)
             if payload is None:
                 continue
+            level = stage.get(CONF_STAGE_BRIGHTNESS)
+            room = self._topic_room.get(light[CONF_SET_TOPIC], "")
+            if level is not None and self._modes.mode_of(room) not in LOOK_KINDS:
+                payload = _dimmed(payload, level)
+                self._zone_dims.setdefault(zone_key, {})[room] = level
             body = {**payload, "transition": fade, "state": STATE_ON}
             sends.append(Send(light[CONF_SET_TOPIC], body))
             lit.add(light[CONF_SET_TOPIC])
@@ -1399,8 +1437,8 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         """
         group = stage.get(CONF_STAGE_GROUP)
         lights = stage.get(CONF_LIGHTS, [])
-        if not group or not lights:
-            return None
+        if not group or not lights or CONF_STAGE_BRIGHTNESS in stage:
+            return None  # a fixed level is not staged: those lights go one by one
         for light in lights:
             topic = light[CONF_SET_TOPIC]
             room = self._topic_room.get(topic, "")
@@ -1469,8 +1507,11 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         """
         zone = self._occupancy[zone_key]
         self._zone_lit.pop(zone_key, None)
+        dimmed = self._zone_dims.pop(zone_key, {})
         if self._zone_held(zone_key):
             return
+        for room in dimmed:
+            self._schedule_off_stage(room)  # stage the curve, not the night level
         sync = zone.get(CONF_SYNC_SWITCHES, [])
         if sync and all(self._paddle(base) for base in sync):
             self._write_switches(sync, STATE_OFF)
@@ -1510,9 +1551,13 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
     # --- zone override (a tap holds the zone on; motion ignored) ------------
 
     async def _arm_override(self, zone_key: str) -> None:
-        await self._modes.set_override(
-            zone_key, expires_at=self._next_midnight(dt_util.utcnow())
+        now = dt_util.utcnow()
+        expires = (
+            now + timedelta(days=OVERRIDE_UNTIL_OFF_DAYS)
+            if self._until_off(zone_key)
+            else self._next_midnight(now)
         )
+        await self._modes.set_override(zone_key, expires_at=expires)
         _LOGGER.info("override armed for zone %s", zone_key)
         self._restart_idle_timer(zone_key)
 
@@ -1529,7 +1574,7 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
     def _restart_idle_timer(self, zone_key: str) -> None:
         """End a vacant zone's override ``override_idle_s`` after its last presence."""
         self._cancel_idle_timer(zone_key)
-        if not self._zone_vacant(zone_key):
+        if not self._zone_vacant(zone_key) or self._until_off(zone_key):
             return
         zone = self._occupancy[zone_key]
         idle = zone.get(CONF_OVERRIDE_IDLE, DEFAULT_OVERRIDE_IDLE_S)
@@ -1774,6 +1819,8 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         for zone in zones:
             await self._end_override(zone)
             self._zone_lit.pop(zone, None)
+            for room in self._zone_dims.pop(zone, {}):
+                self._schedule_off_stage(room)  # off at the night level: stage curve
         for _source, ref in switch.lights:
             self._forget_lit(ref)
         for source_key, topic, _refs in self._light_topics(
@@ -1813,11 +1860,30 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
             )
             feedback = COLOR_BAR  # back to automatic
         for zone in zones:
-            if self._modes.override_until(zone) is None:
+            self._release_dims(zone)
+            if self._modes.override_until(zone) is None and not self._until_off(zone):
                 self._bars.announce(base, LED_BOTTOM)
                 feedback = None
             await self._arm_override(zone)
         return feedback
+
+    def _release_dims(self, zone_key: str) -> None:
+        """Bring a zone's lit night lights to their curve (a paddle-on).
+
+        The binding's ON does not change a bulb that is already on, so each
+        dimmed light gets its curve value, faded like the bulbs' own wake.
+        """
+        for room in self._zone_dims.pop(zone_key, {}):
+            self._cancel_off_stage(room)
+            source_key = self._room_source.get(room)
+            topic = self._room_topic(room)
+            payload = (
+                self._room_glide_target(source_key) if source_key is not None else None
+            )
+            if topic is not None and payload is not None:
+                self._interactive_send(
+                    topic, payload, transition=ZONE_DIM_RELEASE_TRANSITION_S
+                )
 
     def _play_tap_animation(self, base: str, action: str) -> None:
         """Play the bar animation configured for a tap (the shade taps)."""
@@ -2451,6 +2517,11 @@ def _target_to_payload(target: EngineTarget, transition: float) -> PushPayload:
         transition=transition,
         xy=target.xy,
     )
+
+
+def _dimmed(payload: PushPayload, level: float) -> PushPayload:
+    """Return the payload's colour at a fixed brightness percentage."""
+    return cast("PushPayload", {**payload, "brightness": pct_to_brightness(level)})
 
 
 def _strip(payload: PushPayload) -> PushPayload:

@@ -40,6 +40,7 @@ from .const import (
     CONF_ON_TRANSITION,
     CONF_OVERRIDE_IDLE,
     CONF_OVERRIDE_SWITCHES,
+    CONF_OVERRIDE_UNTIL_OFF,
     CONF_PROFILE,
     CONF_PUSH_INTERVAL,
     CONF_RAMP_IN,
@@ -50,6 +51,7 @@ from .const import (
     CONF_SLEEP,
     CONF_SOURCE,
     CONF_SOURCES,
+    CONF_STAGE_BRIGHTNESS,
     CONF_STAGE_DELAY,
     CONF_STAGE_GROUP,
     CONF_STEP_MAX_MIRED,
@@ -519,6 +521,32 @@ def _build_runtime_sources(
 # --- occupancy zones --------------------------------------------------------
 
 
+def _apply_stage_options(
+    zone_id: str,
+    raw_stage: dict[str, object],
+    run_stage: OccupancyStage,
+    ref_stage: ZoneStage,
+    issues: list[str],
+) -> None:
+    """Copy a stage's delay, group and fixed brightness (validated) to both shapes."""
+    delay = raw_stage.get(CONF_STAGE_DELAY)
+    if _is_number(delay):
+        run_stage[CONF_STAGE_DELAY] = float(cast("float", delay))
+        ref_stage[CONF_STAGE_DELAY] = float(cast("float", delay))
+    group = raw_stage.get(CONF_STAGE_GROUP)
+    if isinstance(group, str) and group:
+        run_stage[CONF_STAGE_GROUP] = group
+        ref_stage[CONF_STAGE_GROUP] = group
+    elif group is not None:
+        issues.append(f"occupancy.{zone_id}: sweep group {group!r} is not a topic")
+    level = raw_stage.get(CONF_STAGE_BRIGHTNESS)
+    if _is_number(level) and 1 <= float(cast("float", level)) <= 100:
+        run_stage[CONF_STAGE_BRIGHTNESS] = float(cast("float", level))
+        ref_stage[CONF_STAGE_BRIGHTNESS] = float(cast("float", level))
+    elif level is not None:
+        issues.append(f"occupancy.{zone_id}: bad sweep {CONF_STAGE_BRIGHTNESS}")
+
+
 def _resolve_sweep(
     zone_id: str,
     raw_sweep: object,
@@ -551,16 +579,7 @@ def _resolve_sweep(
             continue
         run_stage: OccupancyStage = {CONF_LIGHTS: run_lights}
         ref_stage: ZoneStage = {CONF_LIGHTS: ref_lights}
-        delay = raw_stage.get(CONF_STAGE_DELAY)
-        if _is_number(delay):
-            run_stage[CONF_STAGE_DELAY] = float(cast("float", delay))
-            ref_stage[CONF_STAGE_DELAY] = float(cast("float", delay))
-        group = raw_stage.get(CONF_STAGE_GROUP)
-        if isinstance(group, str) and group:
-            run_stage[CONF_STAGE_GROUP] = group
-            ref_stage[CONF_STAGE_GROUP] = group
-        elif group is not None:
-            issues.append(f"occupancy.{zone_id}: sweep group {group!r} is not a topic")
+        _apply_stage_options(zone_id, raw_stage, run_stage, ref_stage, issues)
         runtime.append(run_stage)
         stored.append(ref_stage)
     return runtime, stored
@@ -684,6 +703,13 @@ def _apply_zone_switches(
             idle = DEFAULT_OVERRIDE_IDLE_S
         seconds = float(cast("float", idle))
         runtime[CONF_OVERRIDE_IDLE] = stored[CONF_OVERRIDE_IDLE] = seconds
+        until_off = zone_raw.get(CONF_OVERRIDE_UNTIL_OFF)
+        if isinstance(until_off, bool):
+            runtime[CONF_OVERRIDE_UNTIL_OFF] = stored[CONF_OVERRIDE_UNTIL_OFF] = (
+                until_off
+            )
+        elif until_off is not None:
+            issues.append(f"occupancy.{zone_id}: bad {CONF_OVERRIDE_UNTIL_OFF}")
 
 
 def _validate_zones(

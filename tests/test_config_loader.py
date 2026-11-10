@@ -421,3 +421,24 @@ def test_occupancy_stage_group_is_kept_or_flagged() -> None:
     stored = result.stored["occupancy_zones"]["hallway"]["sensors"]["hall.east"]
     assert stored["sweep"][0]["group"] == "zigbee2mqtt/zgb_pair/set"
     assert any("sweep group 7" in issue for issue in result.issues)
+
+
+def test_stage_brightness_and_until_off_are_kept_or_flagged() -> None:
+    raw = _seed()
+    zone = raw["occupancy_zones"]["hallway"]
+    sweep = zone["sensors"]["hall.east"]["sweep"]
+    sweep[0]["brightness_pct"] = 10
+    sweep[1]["brightness_pct"] = 0
+    zone["override_switches"] = []
+    zone["override_until_off"] = True
+    result = validate_config(raw)
+    run = result.config["occupancy"]["hallway"]
+    assert run["sensors"]["east"]["sweep"][0]["brightness_pct"] == 10.0
+    assert "brightness_pct" not in run["sensors"]["east"]["sweep"][1]
+    assert run["override_until_off"] is True
+    assert result.stored["occupancy_zones"]["hallway"]["override_until_off"] is True
+    assert any("bad sweep brightness_pct" in i for i in result.issues)
+    zone["override_until_off"] = "yes"
+    result = validate_config(raw)
+    assert "override_until_off" not in result.config["occupancy"]["hallway"]
+    assert any("bad override_until_off" in i for i in result.issues)

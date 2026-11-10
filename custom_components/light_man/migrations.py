@@ -351,6 +351,57 @@ def _v19_to_v20(raw: dict[str, Any]) -> dict[str, Any]:
     return raw
 
 
+BATH_ROOM = "primary_bath"
+BATH_FRONT = "zigbee2mqtt/Primary Bath Front Smart Switch"
+BATH_TOILET_SWITCH = "zigbee2mqtt/Primary Bath Toilet Smart Switch"
+BATH_TOILET_LIGHT = "zigbee2mqtt/Primary Bath Toilet Light/set"
+BATH_VANITY_LIGHT = "zigbee2mqtt/Primary Bath Under Vanity Lights/set"
+V21_NIGHT_PCT = 10
+
+
+def _v20_to_v21(raw: dict[str, Any]) -> dict[str, Any]:
+    """Primary bath night light: toilet fixture, front-switch mmWave, its zone."""
+    room = raw.get("rooms", {}).get(BATH_ROOM)
+    zones = raw.get("occupancy_zones")
+    if not isinstance(room, dict) or not isinstance(zones, dict):
+        return raw
+    lights = room.setdefault("lights", [])
+    if isinstance(lights, list) and not any(
+        isinstance(light, dict) and light.get("id") == "toilet" for light in lights
+    ):
+        lights.insert(
+            1, {"id": "toilet", "set_topic": BATH_TOILET_LIGHT, "source": "overhead"}
+        )
+    sensors = room.get("sensors")
+    if not isinstance(sensors, dict):
+        sensors = room["sensors"] = {}
+    sensors.setdefault(
+        "bath_front",
+        {"topic": BATH_FRONT, "occupancy_key": "mmwave_area1_occupancy"},
+    )
+    zones.setdefault(
+        BATH_ROOM,
+        {
+            "off_lights": [BATH_TOILET_LIGHT, BATH_VANITY_LIGHT],
+            "sensors": {
+                f"{BATH_ROOM}.bath_front": {
+                    "sweep": [
+                        {
+                            "lights": [f"{BATH_ROOM}.toilet"],
+                            "brightness_pct": V21_NIGHT_PCT,
+                        },
+                        {"lights": [f"{BATH_ROOM}.under_vanity"]},
+                    ]
+                }
+            },
+            "override_switches": [BATH_FRONT, BATH_TOILET_SWITCH],
+            "override_until_off": True,
+            "on_transition_s": 1.0,
+        },
+    )
+    return raw
+
+
 MIGRATIONS: dict[int, Callable[[dict[str, Any]], dict[str, Any]]] = {
     8: _v8_to_v9,
     9: _v9_to_v10,
@@ -364,6 +415,7 @@ MIGRATIONS: dict[int, Callable[[dict[str, Any]], dict[str, Any]]] = {
     17: _v17_to_v18,
     18: _v18_to_v19,
     19: _v19_to_v20,
+    20: _v20_to_v21,
 }
 
 

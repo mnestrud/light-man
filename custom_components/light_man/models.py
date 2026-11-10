@@ -59,6 +59,7 @@ class OccupancyStage(TypedDict, total=False):
     delay_s: float  # seconds to wait before turning this stage's lights on
     lights: list[OccupancyLight]
     group: str  # set topic of a group holding exactly these lights
+    brightness_pct: float  # fixed level (curve colour) for these lights
 
 
 class OccupancySensor(TypedDict, total=False):
@@ -93,6 +94,7 @@ class OccupancyZone(TypedDict, total=False):
     sync_switches: list[str]  # switch bases whose state follows the zone
     override_switches: list[str]  # switch bases whose up tap overrides motion
     override_idle_s: float  # an override ends after this long with no presence
+    override_until_off: bool  # the override lasts until a paddle-off
 
 
 class LightManConfig(TypedDict):
@@ -265,6 +267,7 @@ class ZoneStage(TypedDict, total=False):
     delay_s: float
     lights: list[str]
     group: str
+    brightness_pct: float
 
 
 class ZoneSensorBinding(TypedDict, total=False):
@@ -287,6 +290,7 @@ class ZoneConfig(TypedDict, total=False):
     sync_switches: list[str]
     override_switches: list[str]
     override_idle_s: float
+    override_until_off: bool
 
 
 class SleepConfig(TypedDict, total=False):

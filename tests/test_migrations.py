@@ -32,7 +32,7 @@ def _seed_v8() -> dict:
 
 def test_v8_fixture_migrates_to_the_shipped_bundle() -> None:
     migrated, steps = migrate(_seed_v8())
-    assert steps == [8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
+    assert steps == [8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
     assert migrated == json.loads(BUNDLE.read_text())
     assert migrated["seed_version"] == BUNDLED_SEED_VERSION
 
@@ -48,7 +48,7 @@ def test_v8_to_v9_makes_day_window_defaults_explicit() -> None:
 def test_v9_fixture_migrates_to_the_shipped_bundle() -> None:
     raw = json.loads((FIXTURES / "seed_v9.json").read_text())
     migrated, steps = migrate(raw)
-    assert steps == [9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
+    assert steps == [9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
     assert migrated == json.loads(BUNDLE.read_text())
     assert migrated["push_interval_s"] == 240
 
@@ -62,7 +62,7 @@ def test_v9_to_v10_keeps_an_edited_interval() -> None:
 def test_v10_fixture_migrates_to_the_shipped_bundle() -> None:
     raw = json.loads((FIXTURES / "seed_v10.json").read_text())
     migrated, steps = migrate(raw)
-    assert steps == [10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
+    assert steps == [10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
     assert migrated == json.loads(BUNDLE.read_text())
     hall = migrated["occupancy_zones"]["hallway"]
     assert hall["override_switches"] == [HALL_EAST, HALL_WEST]
@@ -162,7 +162,7 @@ def _bath_switches(raw: dict) -> list[dict]:
 
 def test_v12_fixture_migrates_to_the_shipped_bundle() -> None:
     migrated, steps = migrate(_seed_v12())
-    assert steps == [12, 13, 14, 15, 16, 17, 18, 19]
+    assert steps == [12, 13, 14, 15, 16, 17, 18, 19, 20]
     assert migrated == json.loads(BUNDLE.read_text())
     bath = ["primary_bath.overhead", "primary_bath.under_vanity"]
     switches = {sw["topic"]: sw for sw in _bath_switches(migrated)}
@@ -212,7 +212,7 @@ def _seed_v13() -> dict:
 
 def test_v13_fixture_migrates_to_the_shipped_bundle() -> None:
     migrated, steps = migrate(_seed_v13())
-    assert steps == [13, 14, 15, 16, 17, 18, 19]
+    assert steps == [13, 14, 15, 16, 17, 18, 19, 20]
     assert migrated == json.loads(BUNDLE.read_text())
     assert migrated["push_interval_s"] == 240
 
@@ -229,7 +229,7 @@ def _seed_v14() -> dict:
 
 def test_v14_fixture_migrates_to_the_shipped_bundle() -> None:
     migrated, steps = migrate(_seed_v14())
-    assert steps == [14, 15, 16, 17, 18, 19]
+    assert steps == [14, 15, 16, 17, 18, 19, 20]
     assert migrated == json.loads(BUNDLE.read_text())
     sensors = migrated["rooms"]["stairwell"]["sensors"]
     assert sensors["stairwell_top_landing"]["occupancy_key"] == "mmwave_area2_occupancy"
@@ -281,7 +281,7 @@ def _seed_v15() -> dict:
 
 def test_v15_fixture_migrates_to_the_shipped_bundle() -> None:
     migrated, steps = migrate(_seed_v15())
-    assert steps == [15, 16, 17, 18, 19]
+    assert steps == [15, 16, 17, 18, 19, 20]
     assert migrated == json.loads(BUNDLE.read_text())
     assert validate_config(migrated).config["steps"] == {
         "min_s": 30.0,
@@ -303,7 +303,7 @@ def _seed_v16() -> dict:
 
 def test_v16_fixture_migrates_to_the_shipped_bundle() -> None:
     migrated, steps = migrate(_seed_v16())
-    assert steps == [16, 17, 18, 19]
+    assert steps == [16, 17, 18, 19, 20]
     assert migrated == json.loads(BUNDLE.read_text())
     for curve in migrated["curves"].values():
         assert curve["day_window"]["start"] == "07:30"
@@ -340,7 +340,7 @@ def _seed_v17() -> dict:
 
 def test_v17_fixture_migrates_to_the_shipped_bundle() -> None:
     migrated, steps = migrate(_seed_v17())
-    assert steps == [17, 18, 19]
+    assert steps == [17, 18, 19, 20]
     assert migrated == json.loads(BUNDLE.read_text())
     assert migrated["occupancy_zones"]["hallway"]["on_transition_s"] == 1.0
     assert validate_config(migrated).issues == []
@@ -392,7 +392,7 @@ def _seed_v18() -> dict:
 
 def test_v18_fixture_migrates_to_the_shipped_bundle() -> None:
     migrated, steps = migrate(_seed_v18())
-    assert steps == [18, 19]
+    assert steps == [18, 19, 20]
     assert migrated == json.loads(BUNDLE.read_text())
     assert migrated["occupancy_zones"]["hallway"]["on_transition_s"] == 1.0
 
@@ -411,7 +411,7 @@ def _seed_v19() -> dict:
 
 def test_v19_fixture_migrates_to_the_shipped_bundle() -> None:
     migrated, steps = migrate(_seed_v19())
-    assert steps == [19]
+    assert steps == [19, 20]
     assert migrated == json.loads(BUNDLE.read_text())
     stage = migrated["occupancy_zones"]["hallway"]["sensors"]["hallway.hall_east"][
         "sweep"
@@ -442,3 +442,43 @@ def test_v19_to_v20_leaves_edited_and_odd_stages_alone() -> None:
     migrate(raw)
     del raw["occupancy_zones"]["hallway"]
     assert "hallway" not in migrate(raw)[0]["occupancy_zones"]
+
+
+def _seed_v20() -> dict:
+    return json.loads((FIXTURES / "seed_v20.json").read_text())
+
+
+def test_v20_fixture_migrates_to_the_shipped_bundle() -> None:
+    migrated, steps = migrate(_seed_v20())
+    assert steps == [20]
+    assert migrated == json.loads(BUNDLE.read_text())
+    zone = migrated["occupancy_zones"]["primary_bath"]
+    assert zone["override_until_off"] is True
+    assert zone["sensors"]["primary_bath.bath_front"]["sweep"][0] == {
+        "lights": ["primary_bath.toilet"],
+        "brightness_pct": 10,
+    }
+
+
+def test_v20_to_v21_keeps_existing_pieces_and_skips_odd_shapes() -> None:
+    raw = _seed_v20()
+    room = raw["rooms"]["primary_bath"]
+    room["lights"].append({"id": "toilet", "set_topic": "mine", "source": "overhead"})
+    room["sensors"] = "nope"
+    raw["occupancy_zones"]["primary_bath"] = {"mine": True}
+    out = migrate(raw)[0]
+    lights = out["rooms"]["primary_bath"]["lights"]
+    assert [x for x in lights if x["id"] == "toilet"] == [
+        {"id": "toilet", "set_topic": "mine", "source": "overhead"}
+    ]
+    assert "bath_front" in out["rooms"]["primary_bath"]["sensors"]
+    assert out["occupancy_zones"]["primary_bath"] == {"mine": True}
+    raw = _seed_v20()
+    raw["rooms"]["primary_bath"]["lights"] = "nope"
+    assert migrate(raw)[0]["rooms"]["primary_bath"]["lights"] == "nope"
+    raw = _seed_v20()
+    del raw["rooms"]["primary_bath"]
+    assert "primary_bath" not in migrate(raw)[0]["occupancy_zones"]
+    raw = _seed_v20()
+    raw["occupancy_zones"] = "nope"
+    assert migrate(raw)[0]["occupancy_zones"] == "nope"

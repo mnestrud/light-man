@@ -26,7 +26,7 @@ MODES_STORE_VERSION: Final = 1
 # top-level objects merged across groups; occupancy moved to `occupancy_zones`
 # referencing room-owned sensors; sleep ramp became a top-level block. The loader
 # derives the unchanged runtime view from this shape, so addressing is identical.
-BUNDLED_SEED_VERSION: Final = 20
+BUNDLED_SEED_VERSION: Final = 21
 
 # --- Seed-config JSON keys --------------------------------------------------
 CONF_PUSH_INTERVAL: Final = "push_interval_s"
@@ -140,6 +140,9 @@ CONF_STAGE_DELAY: Final = "delay_s"
 # on with one groupcast (ON + fade; brightness/colour staged) so its lamps start
 # together.
 CONF_STAGE_GROUP: Final = "group"
+# Optional fixed brightness (%) for a stage's lights: the curve's colour at this
+# level (a night light). Re-asserted after each flood while the zone is lit.
+CONF_STAGE_BRIGHTNESS: Final = "brightness_pct"
 CONF_LIGHTS: Final = "lights"
 CONF_SOURCE: Final = "source"
 CONF_OFF_LIGHTS: Final = "off_lights"
@@ -156,6 +159,14 @@ CONF_SYNC_SWITCHES: Final = "sync_switches"
 CONF_OVERRIDE_SWITCHES: Final = "override_switches"
 CONF_OVERRIDE_IDLE: Final = "override_idle_s"
 DEFAULT_OVERRIDE_IDLE_S: Final = 3600.0
+# A zone whose override lasts until a paddle-off (no idle timer, no 00:00 end).
+# Its override is the lights' normal on state, so the bar shows no override LED.
+CONF_OVERRIDE_UNTIL_OFF: Final = "override_until_off"
+# Fade for a dimmed zone light brought to its curve on a paddle-on (matches the
+# bulbs' own wake fade on the binding's ON; tune by eye).
+ZONE_DIM_RELEASE_TRANSITION_S: Final = 0.4
+# An override that lasts until a paddle-off is stored with this far expiry.
+OVERRIDE_UNTIL_OFF_DAYS: Final = 3650
 
 # --- Services ---------------------------------------------------------------
 SERVICE_RELEASE_HOLD: Final = "release_hold"
