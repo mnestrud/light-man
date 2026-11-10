@@ -1420,6 +1420,7 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
                 payload = _dimmed(payload, level)
                 self._zone_dims.setdefault(zone_key, {})[room] = level
             body = {**payload, "transition": fade, "state": STATE_ON}
+            self._cancel_off_stage(room)  # a pending curve stage must not land on it
             sends.append(Send(light[CONF_SET_TOPIC], body))
             lit.add(light[CONF_SET_TOPIC])
         if sends:

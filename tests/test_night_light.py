@@ -246,3 +246,16 @@ async def test_a_fixed_level_stage_never_uses_its_group(bath: Any) -> None:
         "brightness_pct": 10.0,
     }
     assert bath._stage_group_body(stage, set(), 1.0) is None
+
+
+async def test_a_quick_redetect_cancels_the_pending_curve_stage(
+    hass: HomeAssistant, bath: Any, mqtt_mock: Any
+) -> None:
+    await _radar(hass, bath, occupied=True)
+    await _radar(hass, bath, occupied=False)  # off; curve stage due in 1.5 s
+    assert "bath.toilet" in bath._off_stages
+    await _radar(hass, bath, occupied=True)  # back within the 1.5 s
+    assert "bath.toilet" not in bath._off_stages
+    mqtt_mock.async_publish.reset_mock()
+    await _later(hass, OFF_STAGE_DELAY_S + 1)
+    assert TOILET not in published(mqtt_mock)  # stays at the night level
