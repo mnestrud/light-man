@@ -1,4 +1,9 @@
-# Zigbee2MQTT external converter (live dependency)
+# Zigbee2MQTT external converter (retired 2026-11-10)
+
+**Retired.** Z2M 2.x never loaded it: `bridge/converters` was `[]` and no bulb exposed `on_level`
+(2.x reads only the `external_converters/` folder, not the old `external_converters:` key). The key was
+removed from `configuration.yaml` on 2026-11-10 (snapshot `backups/2026-11-10-z2m-tune/`); every bulb runs
+the upstream definition. The text below is the historical note.
 
 `philips_datura.mjs` is a verbatim copy of the external converter Zigbee2MQTT loads on the live system
 (`/mnt/ha-config/zigbee2mqtt/philips_datura.mjs`, listed under `external_converters` in Z2M's
