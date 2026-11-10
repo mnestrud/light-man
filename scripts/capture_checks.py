@@ -41,7 +41,9 @@ RESTART_SEND_S = 120.0  # Light Man's start-up send lands within this of HA's st
 IGNORED_TAP_WINDOW_S = 1.0  # an ignored config tap's red blink follows within this
 REPORT_CADENCE_S = 10.0
 SPACING_FRACTION = 0.9
-GLIDE_MIN_TRANSITION_S = 30.0
+# Curve steps are >= 30 s; queue spacing trims a few tenths off the later sources'
+# fades (29.3-29.8 s seen), so a glide is any fade from 25 s up.
+GLIDE_MIN_TRANSITION_S = 25.0
 GLIDE_PCT_PER_S = 0.2
 INTERACTIVE_PCT_PER_S = 50.0
 REASSERT_MAX_TRANSITION_S = 0.5

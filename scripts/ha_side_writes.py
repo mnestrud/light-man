@@ -122,8 +122,8 @@ def logbook_report(start: datetime, end: datetime) -> None:
             )
 
 
-def _light_man_topics() -> tuple[set[str], set[str], set[str], set[str]]:
-    """Return Light Man's (light topics, zone-off topics, switches, sync switches)."""
+def _light_man_topics() -> tuple[set[str], set[str], set[str], set[str], set[str]]:
+    """Return Light Man's (lights, zone-off topics, switches, sync, stage groups)."""
     data = json.loads(STORE.read_text())["data"]
     lights = {s["consolidated_topic"] for s in data["sources"].values()}
     switches: set[str] = set()
@@ -132,10 +132,13 @@ def _light_man_topics() -> tuple[set[str], set[str], set[str], set[str]]:
         switches |= {switch["topic"] for switch in room.get("switches", [])}
     off: set[str] = set()
     sync: set[str] = set()
+    groups: set[str] = set()
     for zone in data.get("occupancy_zones", {}).values():
         off |= set(zone.get("off_lights", []))
         sync |= set(zone.get("sync_switches", []))
-    return lights | off, off, switches, sync
+        for sensor in zone.get("sensors", {}).values():
+            groups |= {st["group"] for st in sensor.get("sweep", []) if "group" in st}
+    return lights | off | groups, off, switches, sync, groups
 
 
 def _from_light_man(
@@ -148,7 +151,7 @@ def _from_light_man(
 
     ``since_hold`` is how long ago a paddle was held or released on that switch.
     """
-    lights, off, switches, sync = owned
+    lights, off, switches, sync, groups = owned
     base = topic.removesuffix("/set")
     keys = set(payload)
     if base in switches:
@@ -165,6 +168,8 @@ def _from_light_man(
             and since_hold is not None
             and since_hold <= HOLD_ANSWER_S
         )
+    if topic in groups and keys == {"state", "transition"}:
+        return bool(payload["state"] == "ON")  # a sweep stage's pair groupcast
     if topic in lights:
         if "transition" not in keys:
             return False
