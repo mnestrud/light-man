@@ -1,5 +1,5 @@
 {
-  "seed_version": 21,
+  "seed_version": 22,
   "push_interval_s": 240,
   "steps": {
     "min_s": 30,
@@ -331,7 +331,7 @@
       "sensors": {
         "bath_front": {
           "topic": "zigbee2mqtt/Primary Bath Front Smart Switch",
-          "occupancy_key": "mmwave_area1_occupancy"
+          "occupancy_key": "occupancy"
         }
       }
     },

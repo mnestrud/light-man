@@ -402,6 +402,19 @@ def _v20_to_v21(raw: dict[str, Any]) -> dict[str, Any]:
     return raw
 
 
+def _v21_to_v22(raw: dict[str, Any]) -> dict[str, Any]:
+    """Bath front sensor reads the switch's combined occupancy (areas 1 + 2)."""
+    room = raw.get("rooms", {}).get(BATH_ROOM)
+    sensors = room.get("sensors") if isinstance(room, dict) else None
+    sensor = sensors.get("bath_front") if isinstance(sensors, dict) else None
+    if (
+        isinstance(sensor, dict)
+        and sensor.get("occupancy_key") == "mmwave_area1_occupancy"
+    ):
+        sensor["occupancy_key"] = "occupancy"
+    return raw
+
+
 MIGRATIONS: dict[int, Callable[[dict[str, Any]], dict[str, Any]]] = {
     8: _v8_to_v9,
     9: _v9_to_v10,
@@ -416,6 +429,7 @@ MIGRATIONS: dict[int, Callable[[dict[str, Any]], dict[str, Any]]] = {
     18: _v18_to_v19,
     19: _v19_to_v20,
     20: _v20_to_v21,
+    21: _v21_to_v22,
 }
 
 
