@@ -118,6 +118,7 @@ from .const import (
 from .modes import action_to_mode
 from .publisher import (
     PRIORITY_INTERACTIVE,
+    PRIORITY_SWEEP,
     PRIORITY_TICK,
     TICK_BUDGET,
     PacedPublisher,
@@ -1344,41 +1345,47 @@ class LightManCoordinator(DataUpdateCoordinator[CoordinatorData]):
         fade = self._occupancy[zone_key].get(
             CONF_ON_TRANSITION, DEFAULT_OCCUPANCY_TRANSITION_S
         )
-        for stage in sweep:
-            delay = stage.get(CONF_STAGE_DELAY, 0.0)
-            if delay:
-                await asyncio.sleep(delay)
-            lights = stage.get(CONF_LIGHTS, [])
-            group_body = self._stage_group_body(stage, lit, fade)
-            if group_body is not None:
-                # One groupcast: the stage's lamps start their fade together.
-                lit.update(light[CONF_SET_TOPIC] for light in lights)
-                self._enqueue(
-                    [Send(stage[CONF_STAGE_GROUP], group_body)],
-                    priority=PRIORITY_INTERACTIVE,
-                )
-                continue
-            sends: list[Send] = []
-            for light in lights:
-                if light[CONF_SET_TOPIC] in lit:
-                    continue
-                payload = self._sweep_payload(light)
-                if payload is None:
-                    continue
-                body = {
-                    **payload,
-                    "transition": fade,
-                    "state": STATE_ON,
-                }
-                sends.append(Send(light[CONF_SET_TOPIC], body))
-                lit.add(light[CONF_SET_TOPIC])
-            if sends:
-                # One stage = one fixture's lamps: send them back to back so the
-                # pair starts its fade at the same moment.
-                self._enqueue(sends, priority=PRIORITY_INTERACTIVE, together=True)
+        # Curve ticks wait while the sweep runs (at most TICK_HOLD_MAX_S each).
+        self._publisher.begin_sweep()
+        try:
+            for stage in sweep:
+                delay = stage.get(CONF_STAGE_DELAY, 0.0)
+                if delay:
+                    await asyncio.sleep(delay)
+                self._sweep_stage(stage, lit, fade)
+        finally:
+            self._publisher.end_sweep()
         self._write_switches(
             self._occupancy[zone_key].get(CONF_SYNC_SWITCHES, []), STATE_ON
         )
+
+    def _sweep_stage(self, stage: OccupancyStage, lit: set[str], fade: float) -> None:
+        """Turn one stage on: its pair group if a group slot is free, else lamps.
+
+        Lamp sends are unicasts (no broadcast-table slot), so a stage never
+        waits for the group budget; they go back to back to keep the pair close.
+        """
+        lights = stage.get(CONF_LIGHTS, [])
+        group_body = self._stage_group_body(stage, lit, fade)
+        if group_body is not None and self._publisher.group_slot_free():
+            # One groupcast: the stage's lamps start their fade together.
+            lit.update(light[CONF_SET_TOPIC] for light in lights)
+            self._enqueue(
+                [Send(stage[CONF_STAGE_GROUP], group_body)], priority=PRIORITY_SWEEP
+            )
+            return
+        sends: list[Send] = []
+        for light in lights:
+            if light[CONF_SET_TOPIC] in lit:
+                continue
+            payload = self._sweep_payload(light)
+            if payload is None:
+                continue
+            body = {**payload, "transition": fade, "state": STATE_ON}
+            sends.append(Send(light[CONF_SET_TOPIC], body))
+            lit.add(light[CONF_SET_TOPIC])
+        if sends:
+            self._enqueue(sends, priority=PRIORITY_SWEEP, together=True)
 
     def _stage_group_body(
         self, stage: OccupancyStage, lit: set[str], fade: float

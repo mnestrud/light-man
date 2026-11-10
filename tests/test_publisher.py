@@ -9,7 +9,9 @@ import pytest
 
 from custom_components.light_man.publisher import (
     PRIORITY_INTERACTIVE,
+    PRIORITY_SWEEP,
     PRIORITY_TICK,
+    TICK_HOLD_MAX_S,
     PacedPublisher,
     Send,
 )
@@ -381,3 +383,64 @@ async def test_oversized_tick_unit_waits_for_ticks_not_taps() -> None:
     await _drain(h2)
     first_big = min(t for t, topic in h2.sent if topic == "g/0")
     assert first_big - h2.sent[0][0] >= 10.0  # an earlier tick send does
+
+
+async def test_human_before_sweep_before_tick() -> None:
+    h = Harness()
+    h.pub.enqueue([_s("d/tick")], priority=PRIORITY_TICK)
+    h.pub.enqueue([_s("d/sweep")], priority=PRIORITY_SWEEP)
+    h.pub.enqueue([_s("d/tap")], priority=PRIORITY_INTERACTIVE)
+    await _drain(h)
+    assert [topic for _t, topic in h.sent] == ["d/tap", "d/sweep", "d/tick"]
+
+
+async def test_ticks_wait_for_a_running_sweep_then_go() -> None:
+    h = Harness()
+    blocked = asyncio.Event()  # long waits block until woken (the clock stays put)
+
+    async def _sleep(seconds: float) -> None:
+        if seconds >= 1.0:
+            await blocked.wait()
+        await h.time.sleep(seconds)
+
+    h.pub._sleep = _sleep
+    h.pub.begin_sweep()
+    h.pub.enqueue([_s("g/tick")], priority=PRIORITY_TICK)
+    h.pub.enqueue([_s("d/tap")], priority=PRIORITY_INTERACTIVE)
+    for _ in range(20):
+        await asyncio.sleep(0)
+    assert [topic for _t, topic in h.sent] == ["d/tap"]  # human goes, tick held
+    h.pub.end_sweep()
+    h.pub.end_sweep()  # extra ends never go negative
+    await _drain(h)
+    assert [topic for _t, topic in h.sent] == ["d/tap", "g/tick"]
+    assert h.pub._sweeps == 0
+
+
+async def test_a_tick_waits_at_most_the_hold_cap() -> None:
+    h = Harness()
+    h.pub.begin_sweep()  # a sweep that never ends
+    queued = h.time.now
+    h.pub.enqueue([_s("g/tick")], priority=PRIORITY_TICK)
+    await _drain(h)
+    assert h.sent[0][1] == "g/tick"
+    assert h.sent[0][0] - queued == pytest.approx(TICK_HOLD_MAX_S)
+
+
+async def test_group_slot_free_counts_window_and_queue_ahead_of_ticks() -> None:
+    h = Harness()
+    assert h.pub.group_slot_free()
+    for i in range(6):
+        h.pub.enqueue([_s(f"g/t{i}")], priority=PRIORITY_TICK)
+    await _drain(h)
+    h.pub.begin_sweep()
+    h.pub.enqueue([_s("g/held")], priority=PRIORITY_TICK)  # held: not counted
+    assert h.pub.group_slot_free()  # 6 sent + 0 ahead < 8
+    h.pub.enqueue([_s("g/sweep")], priority=PRIORITY_SWEEP)
+    assert h.pub.group_slot_free()  # 6 sent + 1 queued: one more fits (8)
+    h.pub.enqueue([_s("g/tap")], priority=PRIORITY_INTERACTIVE)
+    assert not h.pub.group_slot_free()  # 6 sent + 2 queued: cap reached
+    h.pub._current = h.pub._pending[-1]
+    assert not h.pub.group_slot_free()
+    h.pub._current = None
+    h.pub.cancel()

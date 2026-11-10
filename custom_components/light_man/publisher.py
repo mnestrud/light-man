@@ -10,8 +10,11 @@ through this queue, which:
 - keeps tick traffic to ``tick_budget`` group sends per ``window_s`` and all
   traffic to ``cap``, leaving the difference for interactive sends and the
   mesh's own broadcasts;
-- serves interactive units before tick units, and lets a newer send for a topic
-  replace a pending older one (coalescing);
+- serves units by priority — interactive (human: taps, holds, dims), then
+  occupancy sweeps, then ticks — and lets a newer send for a topic replace a
+  pending older one (coalescing);
+- holds tick units while an occupancy sweep runs (``begin_sweep`` /
+  ``end_sweep``), each for at most ``TICK_HOLD_MAX_S`` after it was queued;
 - spaces any two sends by ``min_gap_s``, except within a ``together`` unit
   (one fixture's lamps, which must change at the same moment).
 
@@ -34,13 +37,15 @@ if TYPE_CHECKING:
 
 _LOGGER = logging.getLogger(__name__)
 
-PRIORITY_INTERACTIVE = 0
-PRIORITY_TICK = 1
+PRIORITY_INTERACTIVE = 0  # human actions: taps, holds, dims, off stages
+PRIORITY_SWEEP = 1  # occupancy sweep stages
+PRIORITY_TICK = 2  # curve floods and their held-room re-asserts
 
 BROADCAST_WINDOW_S = 10.0
 BROADCAST_CAP = 8
 TICK_BUDGET = 6
 LATENCY_SAMPLES = 200
+TICK_HOLD_MAX_S = 5.0  # longest a tick unit waits for running sweeps
 
 
 @dataclass(frozen=True)
@@ -136,6 +141,7 @@ class PacedPublisher:
         self._current: _Unit | None = None
         self._closed = False
         self._wake = asyncio.Event()
+        self._sweeps = 0  # occupancy sweeps running (ticks are held meanwhile)
         self.stats = PublisherStats()
 
     # --- public API -----------------------------------------------------------
@@ -232,6 +238,31 @@ class PacedPublisher:
             self._worker.cancel()
         self._worker = None
 
+    def begin_sweep(self) -> None:
+        """Hold tick units while an occupancy sweep runs (pair with end_sweep)."""
+        self._sweeps += 1
+
+    def end_sweep(self) -> None:
+        """Release the tick hold once no sweep runs; wake a waiting worker."""
+        self._sweeps = max(0, self._sweeps - 1)
+        if not self._sweeps:
+            self._wake.set()
+
+    def group_slot_free(self) -> bool:
+        """Return True if one more group send fits the cap ahead of tick units.
+
+        Counts the window, pending interactive/sweep group sends and (whole)
+        the unit being sent; held tick units go after a sweep, so they don't.
+        """
+        self._expire(self._clock())
+        ahead = [u for u in self._pending if u.priority < PRIORITY_TICK]
+        if self._current is not None:
+            ahead.append(self._current)
+        queued = sum(
+            1 for unit in ahead for send in unit.sends if self._is_group(send.topic)
+        )
+        return len(self._group_sends) + queued < self._cap
+
     def group_sends_in_window(self, now: float | None = None) -> int:
         """Group sends in the current rolling window."""
         self._expire(self._clock() if now is None else now)
@@ -297,23 +328,8 @@ class PacedPublisher:
             wait = self._wait_until_free(
                 now, total + need - self._cap, any_priority=True
             )
-        if need and unit.priority == PRIORITY_TICK:
-            ticks = sum(1 for _t, p in self._group_sends if p == PRIORITY_TICK)
-            if need > self._tick_budget:
-                # An oversized tick unit waits for earlier tick sends to leave the
-                # window (taps do not hold it back; the cap rule above still
-                # applies). The coordinator keeps tick units within the budget.
-                if ticks:
-                    wait = max(
-                        wait, self._wait_until_free(now, ticks, any_priority=False)
-                    )
-            elif ticks + need > self._tick_budget:
-                wait = max(
-                    wait,
-                    self._wait_until_free(
-                        now, ticks + need - self._tick_budget, any_priority=False
-                    ),
-                )
+        if unit.priority == PRIORITY_TICK:
+            wait = max(wait, self._tick_wait(unit, now, need))
         if self._last_send_at is not None:
             wait = max(wait, self._last_send_at + self._min_gap_s - now)
         if wait <= 0:
@@ -329,6 +345,24 @@ class PacedPublisher:
                 if not task.done():
                     task.cancel()
         return True
+
+    def _tick_wait(self, unit: _Unit, now: float, need: int) -> float:
+        """Extra wait for a tick unit: the tick budget, then any running sweep."""
+        wait = 0.0
+        ticks = sum(1 for _t, p in self._group_sends if p == PRIORITY_TICK)
+        if need and need > self._tick_budget:
+            # An oversized tick unit waits for earlier tick sends to leave the
+            # window (taps do not hold it back; the cap rule still applies).
+            # The coordinator keeps tick units within the budget.
+            if ticks:
+                wait = self._wait_until_free(now, ticks, any_priority=False)
+        elif need and ticks + need > self._tick_budget:
+            wait = self._wait_until_free(
+                now, ticks + need - self._tick_budget, any_priority=False
+            )
+        if self._sweeps:
+            wait = max(wait, unit.queued_at + TICK_HOLD_MAX_S - now)
+        return wait
 
     def _wait_until_free(self, now: float, slots: int, *, any_priority: bool) -> float:
         stamps = [t for t, p in self._group_sends if any_priority or p == PRIORITY_TICK]

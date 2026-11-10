@@ -1047,3 +1047,20 @@ async def test_stage_group_falls_back_to_lamp_sends(
     assert body(stage, {HALL_UP}, 1.0) is None  # one lamp already lit
     await coordinator.async_hold("hall.up_main", "night")
     assert body(stage, set(), 1.0) is None  # a look is not staged
+
+
+async def test_sweep_uses_lamp_sends_when_no_group_slot_is_free(
+    hass: HomeAssistant, coordinator: Coord, mqtt_mock: Any
+) -> None:
+    """With the group cap full, a pair stage goes as lamp unicasts, never waits."""
+    _pair_stage(coordinator)
+    await coordinator.async_set_push_enabled(enabled=True)
+    await hass.async_block_till_done()
+    mqtt_mock.async_publish.reset_mock()
+    with patch.object(coordinator._publisher, "group_slot_free", return_value=False):
+        await _walk(hass, coordinator, MMWAVE_EAST, occupied=True)
+    pubs = published(mqtt_mock)
+    assert PAIR not in pubs
+    assert pubs[HALL_UP] == SWEEP_ON
+    assert pubs[HALL_CENTER_SET] == SWEEP_ON
+    assert coordinator._publisher._sweeps == 0  # the sweep released the tick hold
